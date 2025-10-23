@@ -21,5 +21,18 @@
             "v1.7": "修复因未监测重命名事件导致的清理硬链接失败的问题",
             "v1.6": "提升插件性能"
         }
+    },
+    "OPSync": {
+        "name": "Openlist 视频文件同步",
+        "description": "监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录。",
+        "labels": "openlist同步",
+        "version": "1.0",
+        "icon": "Ombi_A.png",
+        "author": "lyzd1",
+        "level": 1,
+        "v2": true,
+        "history": {
+            "v1.0": "使用openlist api进行同步"
+        }
     }
 }
