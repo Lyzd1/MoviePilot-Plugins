@@ -22,7 +22,7 @@
             "v1.6": "提升插件性能"
         }
     },
-    "OPSync": {
+    "AlistMover": {
         "name": "Openlist视频同步",
         "description": "监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录。",
         "labels": "openlist",
