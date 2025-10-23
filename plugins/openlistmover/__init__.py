@@ -108,7 +108,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.5"
+    plugin_version = "2.6"
     # 插件作者
     plugin_author = "lyzd1"
     # 作者主页
@@ -127,15 +127,21 @@ class OpenlistMover(_PluginBase):
     _openlist_token = ""
     _monitor_paths = ""
     _path_mappings = ""
-    _strm_path_mappings = "" # 新增 strm 映射配置
+    _strm_path_mappings = "" 
+    _archive_days = 30 # 新增：任务归档天数
     _observer = []
     _scheduler: Optional[BackgroundScheduler] = None
+    
+    # 任务持久化相关
+    _data_file = "openlist_mover_tasks.json"
+    _clear_counter = 0 # 用于 Openlist API 成功任务清除计数器
+    _CLEAR_THRESHOLD = 10 # 每 10 次任务检查，清理一次 Openlist API 成功任务
     
     # {local_prefix: (openlist_src_prefix, openlist_dst_prefix)}
     _parsed_mappings: Dict[str, Tuple[str, str]] = {}
     
     # {dst_prefix: (strm_src_prefix, strm_dst_prefix)}
-    _parsed_strm_mappings: Dict[str, Tuple[str, str]] = {} # 新增 strm 映射解析结果
+    _parsed_strm_mappings: Dict[str, Tuple[str, str]] = {} 
     
     # Task tracking list
     # Format: [{"id": str, "file": str, "src_dir": str, "dst_dir": str, "start_time": datetime, "status": int, "error": str, "strm_status": str}]
@@ -173,10 +179,14 @@ class OpenlistMover(_PluginBase):
             self._openlist_token = config.get("openlist_token", "")
             self._monitor_paths = config.get("monitor_paths", "")
             self._path_mappings = config.get("path_mappings", "")
-            self._strm_path_mappings = config.get("strm_path_mappings", "") # 加载 strm 映射
+            self._strm_path_mappings = config.get("strm_path_mappings", "")
+            self._archive_days = int(config.get("archive_days", 30)) # 加载归档天数
 
         # 停止现有任务
         self.stop_service()
+        
+        # 1. 加载持久化任务列表
+        self._load_tasks()
 
         if self._enabled:
             if not self._openlist_url or not self._openlist_token:
@@ -404,6 +414,26 @@ class OpenlistMover(_PluginBase):
                             }
                         ]
                     },
+                     {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "archive_days",
+                                            "label": "任务归档天数（天）",
+                                            "type": "number",
+                                            "placeholder": "任务记录超过此天数将被自动清理，但会保留最近 3 条成功记录。",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
                     {
                         "component": "VAlert",
                         "props": {
@@ -422,7 +452,8 @@ class OpenlistMover(_PluginBase):
             "openlist_token": "",
             "monitor_paths": "",
             "path_mappings": "",
-            "strm_path_mappings": "" # 新增默认值
+            "strm_path_mappings": "",
+            "archive_days": 30 # 新增默认值
         }
 
     def get_page(self) -> List[dict]:
@@ -463,8 +494,16 @@ class OpenlistMover(_PluginBase):
 
         def task_to_tr(task: Dict[str, Any]) -> dict:
             strm_status = task.get('strm_status', '未执行')
-            strm_color = 'text-warning' if strm_status == '失败' else ('text-success' if strm_status == '成功' else 'text-muted')
+            strm_color = 'text-warning' if strm_status.startswith('失败') else ('text-success' if strm_status.startswith('成功') else 'text-muted')
             
+            # 确保 start_time 是 datetime 对象
+            start_time = task.get('start_time')
+            if isinstance(start_time, str):
+                try:
+                    start_time = datetime.fromisoformat(start_time)
+                except ValueError:
+                    start_time = None
+
             return {
                 'component': 'tr',
                 'props': {'class': 'text-sm'},
@@ -472,7 +511,7 @@ class OpenlistMover(_PluginBase):
                     # 移除 任务ID 的显示
                     {'component': 'td', 'text': task.get('file', 'N/A')},
                     {'component': 'td', 'text': task.get('dst_dir', 'N/A')},
-                    {'component': 'td', 'text': task['start_time'].strftime('%Y-%m-%d %H:%M:%S') if 'start_time' in task else 'N/A'},
+                    {'component': 'td', 'text': start_time.strftime('%Y-%m-%d %H:%M:%S') if start_time else 'N/A'},
                     {
                         'component': 'td', 
                         'props': {'class': get_status_color(task['status'])},
@@ -552,6 +591,102 @@ class OpenlistMover(_PluginBase):
                 ]
             }
         ]
+        
+    def _load_tasks(self):
+        """加载持久化的任务列表"""
+        task_file = Path(self.data_path) / self._data_file
+        if task_file.exists():
+            try:
+                with task_file.open('r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    
+                with task_lock:
+                    self._move_tasks = []
+                    for task in data:
+                        # 转换 start_time 字符串为 datetime 对象
+                        if isinstance(task.get('start_time'), str):
+                            try:
+                                task['start_time'] = datetime.fromisoformat(task['start_time'])
+                            except ValueError:
+                                logger.error(f"任务 {task.get('id')} 的 start_time 解析失败，跳过此任务记录。")
+                                continue
+                        
+                        self._move_tasks.append(task)
+                    logger.info(f"成功加载 {len(self._move_tasks)} 条持久化任务记录。")
+                    
+            except Exception as e:
+                logger.error(f"加载任务文件失败: {e}")
+                self._move_tasks = []
+        else:
+            self._move_tasks = []
+            
+    def _save_tasks(self):
+        """保存任务列表到持久化文件"""
+        task_file = Path(self.data_path) / self._data_file
+        
+        try:
+            with task_lock:
+                # 转换 datetime 对象为字符串以便 JSON 序列化
+                serializable_tasks = []
+                for task in self._move_tasks:
+                    serializable_task = task.copy()
+                    if isinstance(serializable_task.get('start_time'), datetime):
+                        serializable_task['start_time'] = serializable_task['start_time'].isoformat()
+                    serializable_tasks.append(serializable_task)
+            
+            with task_file.open('w', encoding='utf-8') as f:
+                json.dump(serializable_tasks, f, ensure_ascii=False, indent=4)
+            
+        except Exception as e:
+            logger.error(f"保存任务文件失败: {e}")
+            
+    def _archive_tasks(self):
+        """根据配置的 archive_days 自动归档任务，保留最近 3 条成功记录。"""
+        if self._archive_days <= 0:
+            return
+
+        with task_lock:
+            # 1. 找到所有已完成（成功或失败）的任务
+            finished_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_SUCCESS, TASK_STATUS_FAILED]]
+            
+            # 2. 找到所有活跃任务（等待或运行中）
+            active_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
+
+            # 3. 找出所有成功任务，按时间倒序排列
+            successful_tasks = sorted(
+                [t for t in finished_tasks if t['status'] == TASK_STATUS_SUCCESS],
+                key=lambda x: x['start_time'],
+                reverse=True
+            )
+            
+            # 保留最近的 3 条成功任务的 ID
+            tasks_to_keep_id = {t['id'] for t in successful_tasks[:3]}
+            
+            # 4. 确定归档阈值时间
+            archive_threshold = datetime.now() - timedelta(days=self._archive_days)
+            
+            tasks_to_keep = []
+            archived_count = 0
+            
+            # 5. 遍历已完成任务进行筛选
+            for task in finished_tasks:
+                is_old = task['start_time'] < archive_threshold
+                is_protected = task['id'] in tasks_to_keep_id
+                
+                if is_old and not is_protected:
+                    # 归档 (移除)
+                    archived_count += 1
+                else:
+                    # 保留 (无论是否归档时间外，只要是保护的或未超时的都保留)
+                    tasks_to_keep.append(task)
+
+            # 6. 更新任务列表 (活跃任务 + 保留的已完成任务)
+            self._move_tasks = active_tasks + tasks_to_keep
+            
+            if archived_count > 0:
+                logger.info(f"已根据 {self._archive_days} 天归档规则，清理了 {archived_count} 条旧任务记录。")
+                self._save_tasks() # 归档后立即保存
+        
 
     def stop_service(self):
         """
@@ -597,7 +732,7 @@ class OpenlistMover(_PluginBase):
             
     def _send_task_notification(self, task: Dict[str, Any], title: str, text: str):
         """
-        发送通知消息 (修复: 重新添加此方法)
+        发送通知消息
         """
         if self._notify:
             self.post_message(
@@ -605,6 +740,47 @@ class OpenlistMover(_PluginBase):
                 title=title,
                 text=text,
             )
+            
+    def _call_openlist_clear_succeeded_api(self):
+        """
+        调用 Openlist API 清理已成功的 move 和 copy 任务记录
+        """
+        endpoints = [
+            "/api/admin/task/move/clear_succeeded",
+            "/api/admin/task/copy/clear_succeeded"
+        ]
+        
+        all_success = True
+        
+        for endpoint in endpoints:
+            api_url = f"{self._openlist_url}{endpoint}"
+            
+            headers = {
+                "Authorization": self._openlist_token,
+                "User-Agent": "MoviePilot-OpenlistMover-ClearTask",
+            }
+            
+            try:
+                req = urllib.request.Request(api_url, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    response_body = response.read().decode("utf-8")
+                    response_code = response.getcode()
+                    
+                    if response_code == 200:
+                        response_data = json.loads(response_body)
+                        if response_data.get("code") == 200:
+                            logger.info(f"成功清理 Openlist API 成功任务: {endpoint}")
+                        else:
+                            logger.warning(f"Openlist API 成功任务清理失败: {endpoint} - {response_data.get('message')}")
+                            all_success = False
+                    else:
+                        logger.warning(f"Openlist API 成功任务清理返回非 200 状态码: {endpoint} - {response_code}")
+                        all_success = False
+            except Exception as e:
+                logger.error(f"调用 Openlist API 成功任务清理时出错: {endpoint} - {e}")
+                all_success = False
+                
+        return all_success
 
     def _check_move_tasks(self):
         """
@@ -613,8 +789,10 @@ class OpenlistMover(_PluginBase):
         logger.debug("开始检查 Openlist 移动任务状态...")
         tasks_to_keep = []
         
+        task_changed = False # 标记任务状态是否有变化，以便保存
+
         with task_lock:
-            # 遍历所有任务
+            # 1. 遍历所有任务，检查状态和超时
             for task in self._move_tasks:
                 if task['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]:
                     # 检查超时
@@ -623,6 +801,7 @@ class OpenlistMover(_PluginBase):
                         task['error'] = f"任务超时 ({int(self._max_task_duration / 60)} 分钟)"
                         self._send_task_notification(task, "Openlist 移动超时", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：任务超时")
                         logger.error(f"Openlist 移动任务 {task['id']} 超时")
+                        task_changed = True
                         tasks_to_keep.append(task)
                         continue
 
@@ -639,10 +818,12 @@ class OpenlistMover(_PluginBase):
                             self._process_strm_creation(task) # <<<<<<<<<<<<<<< 任务成功后处理 STRM
                             
                             self._send_task_notification(task, "Openlist 移动成功", f"文件：{task['file']}\n已移动到：{task['dst_dir']}\nSTRM状态: {task.get('strm_status')}")
+                            task_changed = True
                         elif new_status == TASK_STATUS_FAILED:
                             task['status'] = new_status
                             task['error'] = error_msg if error_msg else "Openlist 报告失败"
                             self._send_task_notification(task, "Openlist 移动失败", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：{task['error']}")
+                            task_changed = True
                         elif new_status == TASK_STATUS_RUNNING:
                             task['status'] = new_status
                             
@@ -654,6 +835,20 @@ class OpenlistMover(_PluginBase):
             self._move_tasks = tasks_to_keep
             
             logger.debug(f"Openlist Mover 任务检查完成，当前活跃任务数: {len([t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]])}")
+            
+            # 2. 自动归档任务记录
+            self._archive_tasks()
+
+            # 3. 自动清理 Openlist API 成功任务
+            self._clear_counter += 1
+            if self._clear_counter >= self._CLEAR_THRESHOLD:
+                self._call_openlist_clear_succeeded_api()
+                self._clear_counter = 0
+
+            # 4. 保存任务列表
+            if task_changed:
+                self._save_tasks()
+
 
     def _process_strm_creation(self, task: Dict[str, Any]):
         """
@@ -678,6 +873,7 @@ class OpenlistMover(_PluginBase):
         if not best_match:
             task['strm_status'] = '跳过 (无映射规则)'
             logger.debug(f"任务 {task['id']} 移动成功，但未找到匹配的 STRM 映射规则，跳过 STRM 复制。")
+            self._save_tasks() # 状态变化，保存
             return
             
         try:
@@ -685,8 +881,6 @@ class OpenlistMover(_PluginBase):
             strm_src_prefix, strm_dst_prefix = self._parsed_strm_mappings[dst_prefix]
             
             # 计算相对路径
-            # Path(dst_dir).relative_to(Path(dst_prefix)) 可能会在路径不规范时失败，使用 os.path.relpath
-            # 确保路径都是绝对路径或规范化
             relative_dir_str = os.path.relpath(dst_dir, dst_prefix)
             relative_dir = relative_dir_str.replace(os.path.sep, '/')
             
@@ -708,6 +902,7 @@ class OpenlistMover(_PluginBase):
             if not list_success:
                 task['strm_status'] = '失败 (List API 失败)'
                 logger.error(f"任务 {task['id']} STRM List API 失败，无法生成 .strm 文件。")
+                self._save_tasks() # 状态变化，保存
                 return
 
             # 3. 稍作等待，确保 .strm 文件生成
@@ -727,9 +922,12 @@ class OpenlistMover(_PluginBase):
                 task['strm_status'] = '失败 (Copy API 失败)'
                 logger.error(f"任务 {task['id']} STRM 文件复制失败。")
                 
+            self._save_tasks() # 状态变化，保存
+                
         except Exception as e:
             task['strm_status'] = f'失败 (异常: {str(e)})'
             logger.error(f"任务 {task['id']} STRM 处理时发生异常: {e} - {traceback.format_exc()}")
+            self._save_tasks() # 状态变化，保存
 
 
     def _parse_path_mappings(self) -> Dict[str, Tuple[str, str]]:
@@ -909,6 +1107,7 @@ class OpenlistMover(_PluginBase):
                 }
                 with task_lock:
                     self._move_tasks.append(new_task)
+                    self._save_tasks() # 新增任务，保存列表
                     
                 if self._notify:
                     self.post_message(
@@ -936,7 +1135,6 @@ class OpenlistMover(_PluginBase):
     def _call_openlist_move_api(self, payload: dict) -> Optional[str]:
         """
         调用 Openlist API /api/fs/move。
-        此方法被修改为假设 Openlist/AList API 成功时会返回任务ID。
         返回任务ID (string) 或 None。
         """
         try:
@@ -1139,4 +1337,3 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist Copy API 时出错: {e} - {traceback.format_exc()}")
             return False
-
