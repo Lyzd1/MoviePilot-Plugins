@@ -88,17 +88,17 @@ class NewFileMonitorHandler(FileSystemEventHandler):
 
 class AlistMover(_PluginBase):
     # 插件名称
-    plugin_name = "Alist 视频文件移动"
+    plugin_name = "Openlist 视频文件同步"
     # 插件描述
-    plugin_desc = "监控本地目录，当有新视频文件生成时，自动通过 Alist API 将其移动到指定的云盘目录。"
+    plugin_desc = "监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录。"
     # 插件图标
-    plugin_icon = "mdi-movie-arrow-right"
+    plugin_icon = "Ombi_A.png"
     # 插件版本
     plugin_version = "1.0"
     # 插件作者
-    plugin_author = "Gemini"
+    plugin_author = "lyzd1"
     # 作者主页
-    author_url = "https://github.com/google/gemini"
+    author_url = "https://github.com/lyzd1"
     # 插件配置项ID前缀
     plugin_config_prefix = "alistmover_"
     # 加载顺序
@@ -559,3 +559,4 @@ class AlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Alist API 时出错: {e} - {traceback.format_exc()}")
             return False
+
