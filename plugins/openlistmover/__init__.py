@@ -108,7 +108,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.2"
+    plugin_version = "3.3"
     # 插件作者
     plugin_author = "lyzd1"
     # 作者主页
@@ -748,7 +748,16 @@ class OpenlistMover(_PluginBase):
                             # 增加成功计数
                             self._successful_moves_count += 1
                             
-                            self._send_task_notification(task, "Openlist 移动成功", f"文件：{task['file']}\n已移动到：{task['dst_dir']}\nSTRM状态: {task.get('strm_status')}")
+                            move_success_text = (
+                                f"✅ 文件移动成功\n"
+                                f"🎬 视频文件：{task['dst_dir']}/{task['file']}\n"
+                                f"🔗 STRM状态：{task.get('strm_status', '未处理')}"
+                            )
+                            self._send_task_notification(
+                                task,
+                                "Openlist 移动完成",
+                                move_success_text
+                            )
                         elif new_status == TASK_STATUS_FAILED:
                             task['status'] = new_status
                             task['error'] = error_msg if error_msg else "Openlist 报告失败"
@@ -1058,13 +1067,6 @@ class OpenlistMover(_PluginBase):
                 }
                 with task_lock:
                     self._move_tasks.append(new_task)
-                    
-                if self._notify:
-                    self.post_message(
-                        mtype=NotificationType.SiteMessage,
-                        title="Openlist 移动任务已启动",
-                        text=f"文件：{name}\n源：{src_dir}\n目标：{dst_dir}\n任务ID: {task_id}",
-                    )
             else:
                 logger.error(f"Openlist API 移动失败: {name}")
                 if self._notify:
@@ -1334,3 +1336,4 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist 清空 {task_type} 任务 API 时出错: {e} - {traceback.format_exc()}")
             return False
+
