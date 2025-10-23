@@ -94,7 +94,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "1.0"
+    plugin_version = "1.1"
     # 插件作者
     plugin_author = "lyzd1"
     # 作者主页
@@ -220,7 +220,42 @@ class OpenlistMover(_PluginBase):
         pass
 
     def get_api(self) -> List[Dict[str, Any]]:
-        pass
+        """
+        新增 API 接口用于前端查询 Openlist 任务状态
+        """
+        return [
+            {
+                "title": "获取 Openlist 未完成任务",
+                "path": "tasks_undone",
+                "method": "GET",
+                "handler": self._api_tasks_undone,
+            },
+        ]
+        
+    def _api_tasks_undone(self, *args, **kwargs) -> dict:
+        """
+        API 处理器：获取 Openlist 未完成的任务列表
+        """
+        logger.debug("接收到获取 Openlist 未完成任务的 API 调用")
+        tasks = self._get_openlist_tasks(api_path="/api/admin/task/copy/undone")
+        
+        # 0-等待中，1-进行中，2-成功
+        # 状态映射用于前端显示
+        status_map = {0: "等待中", 1: "进行中", 2: "成功", 3: "失败"}
+        
+        task_list = []
+        if tasks:
+            for task in tasks:
+                task_list.append({
+                    "id": task.get("id", "N/A"),
+                    "name": task.get("name", "N/A"),
+                    "state": status_map.get(task.get("state"), "未知"),
+                    "status_text": task.get("status", "N/A"),
+                    "progress": task.get("progress", 0),
+                    "error": task.get("error", "")
+                })
+
+        return {"code": 0, "message": "success", "data": task_list}
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [
@@ -275,7 +310,7 @@ class OpenlistMover(_PluginBase):
                                             "type": "warning",
                                             "variant": "tonal",
                                             "title": "Openlist API 配置",
-                                            "text": "用于调用 Openlist 移动文件 API。URL 必须包含 http/https 协议头。",
+                                            "text": "用于调用 Openlist 移动文件 API。URL 必须包含 http/https 协议头。需要管理员权限的 Token 才能查询任务状态。",
                                         },
                                     }
                                 ],
@@ -373,7 +408,47 @@ class OpenlistMover(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        pass
+        """
+        返回用于显示任务状态的自定义页面
+        """
+        return [
+            {
+                "component": "VForm",
+                "content": [
+                    {
+                        "component": "VAlert",
+                        "props": {
+                            "type": "info",
+                            "variant": "tonal",
+                            "title": "Openlist 移动任务状态",
+                            "text": "此页面显示 Openlist 中未完成的移动（复制）任务。任务状态由 Openlist API `/api/admin/task/copy/undone` 提供。",
+                        },
+                    },
+                    {
+                        "component": "VCard",
+                        "props": {"title": "未完成的移动任务"},
+                        "content": [
+                            {
+                                "component": "VDataTable",
+                                "props": {
+                                    "custom-api": self.get_full_path("tasks_undone"),
+                                    "loading-text": "加载 Openlist 任务中...",
+                                    "no-data-text": "Openlist 中没有未完成的移动任务。",
+                                    "headers": [
+                                        {"key": "name", "title": "任务名称"},
+                                        {"key": "state", "title": "状态"}, # 0-等待中，1-进行中，2-成功
+                                        {"key": "progress", "title": "进度 (%)"},
+                                        {"key": "status_text", "title": "详细状态"},
+                                        {"key": "error", "title": "错误信息"},
+                                    ],
+                                    "items": [], # 初始空数组，数据通过 custom-api 获取
+                                },
+                            }
+                        ],
+                    },
+                ],
+            }
+        ]
 
     def stop_service(self):
         """
@@ -522,20 +597,23 @@ class OpenlistMover(_PluginBase):
             logger.info(f"准备调用 Openlist API 移动文件: {payload}")
 
             # 3. 调用 API
-            if self._call_openlist_move_api(payload):
-                logger.info(f"成功移动文件: {name} 从 {src_dir} 到 {dst_dir}")
+            task_info = self._call_openlist_move_api(payload)
+            
+            if task_info and isinstance(task_info, dict):
+                task_id = task_info.get('id', 'N/A')
+                logger.info(f"成功调用 Openlist API 发起移动任务: ID={task_id}, 文件={name}")
                 if self._notify:
                     self.post_message(
                         mtype=NotificationType.SiteMessage,
-                        title="Openlist 移动成功",
-                        text=f"文件：{name}\n已移动到：{dst_dir}",
+                        title="Openlist 移动任务已发起",
+                        text=f"文件：{name}\n源：{src_dir}\n目标：{dst_dir}\n任务ID：{task_id}",
                     )
             else:
-                logger.error(f"Openlist API 移动失败: {name}")
+                logger.error(f"Openlist API 移动任务发起失败: {name}")
                 if self._notify:
                     self.post_message(
                         mtype=NotificationType.SiteMessage,
-                        title="Openlist 移动失败",
+                        title="Openlist 移动任务发起失败",
                         text=f"文件：{name}\n源：{src_dir}\n目标：{dst_dir}\n请检查 Openlist 日志。",
                     )
         except Exception as e:
@@ -547,13 +625,13 @@ class OpenlistMover(_PluginBase):
                     text=f"文件：{file_path}\n错误：{str(e)}",
                 )
 
-    def _call_openlist_move_api(self, payload: dict) -> bool:
+    def _call_openlist_api(self, api_path: str, payload: dict = None, method: str = "POST") -> Any:
         """
-        调用 Openlist API /api/fs/move
+        通用 Openlist API 调用
         """
         try:
-            data = json.dumps(payload).encode("utf-8")
-            api_url = f"{self._openlist_url}/api/fs/move"
+            data = json.dumps(payload).encode("utf-8") if payload else None
+            api_url = f"{self._openlist_url}{api_path}"
 
             headers = {
                 "Content-Type": "application/json",
@@ -561,10 +639,11 @@ class OpenlistMover(_PluginBase):
                 "User-Agent": "MoviePilot-OpenlistMover-Plugin",
             }
 
-            req = urllib.request.Request(api_url, data=data, headers=headers, method="POST")
+            req = urllib.request.Request(api_url, data=data, headers=headers, method=method)
 
-            logger.info(f"调用 Openlist Move API: {api_url}")
-            logger.debug(f"API Payload: {payload}")
+            logger.info(f"调用 Openlist API: {api_url}")
+            if payload:
+                logger.debug(f"API Payload: {payload}")
 
             with urllib.request.urlopen(req, timeout=30) as response:
                 response_body = response.read().decode("utf-8")
@@ -577,11 +656,10 @@ class OpenlistMover(_PluginBase):
                     try:
                         response_data = json.loads(response_body)
                         if response_data.get("code") == 200:
-                            logger.info(f"Openlist API 成功移动: {payload.get('names')}")
-                            return True
+                            return response_data.get("data")
                         else:
                             error_msg = response_data.get('message', '未知错误')
-                            logger.warning(f"Openlist API 报告失败: {error_msg} (Payload: {payload})")
+                            logger.warning(f"Openlist API 报告失败: {error_msg} (API: {api_path})")
                             return False
                     except json.JSONDecodeError:
                         logger.error(f"Openlist API 响应JSON解析失败: {response_body}")
@@ -596,3 +674,23 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist API 时出错: {e} - {traceback.format_exc()}")
             return False
+
+    def _call_openlist_move_api(self, payload: dict) -> Dict[str, Any] or bool:
+        """
+        调用 Openlist API /api/fs/move
+        期望 Openlist /api/fs/move 接口返回任务列表，如: {'tasks': [task_info]}
+        这里简化为只返回第一个任务的 info
+        """
+        result = self._call_openlist_api(api_path="/api/fs/move", payload=payload, method="POST")
+        if result and isinstance(result, dict) and 'tasks' in result and result['tasks']:
+            return result['tasks'][0] # 返回第一个任务的信息
+        return False
+        
+    def _get_openlist_tasks(self, api_path: str) -> List[Dict[str, Any]] or bool:
+        """
+        调用 Openlist API 获取任务列表
+        """
+        result = self._call_openlist_api(api_path=api_path, method="GET")
+        if result and isinstance(result, list):
+            return result # 任务列表
+        return False
