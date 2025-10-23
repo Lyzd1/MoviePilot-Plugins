@@ -7,7 +7,7 @@ import json
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional # <-- 确保这一行是完整的
 from urllib.parse import quote
 from datetime import datetime, timedelta
 from threading import Lock
@@ -108,7 +108,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.6"
+    plugin_version = "2.7"
     # 插件作者
     plugin_author = "lyzd1"
     # 作者主页
@@ -264,6 +264,10 @@ class OpenlistMover(_PluginBase):
         pass
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """
+        返回插件的配置表单结构和默认值。
+        注意：返回值必须是 (List[dict], Dict[str, Any]) 结构
+        """
         return [
             {
                 "component": "VForm",
@@ -453,8 +457,9 @@ class OpenlistMover(_PluginBase):
             "monitor_paths": "",
             "path_mappings": "",
             "strm_path_mappings": "",
-            "archive_days": 30 # 新增默认值
+            "archive_days": 30 # 任务归档天数默认值
         }
+
 
     def get_page(self) -> List[dict]:
         """
@@ -1337,3 +1342,4 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist Copy API 时出错: {e} - {traceback.format_exc()}")
             return False
+
