@@ -9,7 +9,7 @@
         "level": 1,
         "v2": true,
         "history": {
-            "v2.5": "监控strm删除，修复MP不能正确删除openlist空目录。将延迟删除也应用于strm删除",
+            "v2.6": "监控strm删除，修复MP不能正确删除openlist空目录。将延迟删除也应用于strm删除",
             "v2.5": "监控strm删除，联动删除云盘源文件",
             "v2.4": "一些优化(可能是负的)",
             "v2.3": "增加延迟删除功能，防止重新整理导致的误删",
@@ -22,17 +22,17 @@
             "v1.6": "提升插件性能"
         }
     },
-    "AlistMover": {
-        "name": "Openlist视频同步",
-        "description": "监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录。",
-        "labels": "openlist",
+    "OpenlistMover": {
+        "name": "Openlist 视频文件同步",
+        "description": "监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录",
+        "labels": "云盘同步",
         "version": "1.0",
-        "icon": "zvideo.png",
+        "icon": "Ombi_A.png",
         "author": "lyzd1",
         "level": 1,
         "v2": true,
         "history": {
-            "v1.0": "使用openlist api进行同步"
+            "v1.0": "初始版本，支持监控本地目录并自动通过Openlist API移动视频文件到云盘"
         }
     }
 }
