@@ -26,13 +26,12 @@
         "name": "Openlist 视频文件同步",
         "description": "监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录",
         "labels": "云盘同步",
-        "version": "1.1",
+        "version": "1.0",
         "icon": "Ombi_A.png",
         "author": "lyzd1",
         "level": 1,
         "v2": true,
         "history": {
-            "v1.1": "增加前端ui表格"
             "v1.0": "初始版本，支持监控本地目录并自动通过Openlist API移动视频文件到云盘"
         }
     }
