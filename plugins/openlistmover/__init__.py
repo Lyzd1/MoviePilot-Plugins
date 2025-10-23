@@ -108,7 +108,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.2"
+    plugin_version = "1.1"
     # 插件作者
     plugin_author = "lyzd1"
     # 作者主页
@@ -469,7 +469,7 @@ class OpenlistMover(_PluginBase):
                 'component': 'tr',
                 'props': {'class': 'text-sm'},
                 'content': [
-                    {'component': 'td', 'text': task.get('id', 'N/A')},
+                    # 移除 任务ID 的显示
                     {'component': 'td', 'text': task.get('file', 'N/A')},
                     {'component': 'td', 'text': task.get('dst_dir', 'N/A')},
                     {'component': 'td', 'text': task['start_time'].strftime('%Y-%m-%d %H:%M:%S') if 'start_time' in task else 'N/A'},
@@ -488,7 +488,7 @@ class OpenlistMover(_PluginBase):
             }
 
         table_headers = [
-            {'text': '任务ID', 'class': 'text-start ps-4'},
+            # 移除 任务ID 的表头
             {'text': '文件名', 'class': 'text-start ps-4'},
             {'text': '目标目录', 'class': 'text-start ps-4'},
             {'text': '开始时间', 'class': 'text-start ps-4'},
@@ -594,6 +594,17 @@ class OpenlistMover(_PluginBase):
             logger.info("Openlist Mover 任务监控服务已启动")
         except Exception as e:
             logger.error(f"启动 Openlist Mover 任务监控服务失败: {e}")
+            
+    def _send_task_notification(self, task: Dict[str, Any], title: str, text: str):
+        """
+        发送通知消息 (修复: 重新添加此方法)
+        """
+        if self._notify:
+            self.post_message(
+                mtype=NotificationType.SiteMessage,
+                title=title,
+                text=text,
+            )
 
     def _check_move_tasks(self):
         """
@@ -651,8 +662,10 @@ class OpenlistMover(_PluginBase):
         # 1. 查找 STRM 路径映射
         dst_dir = task['dst_dir']
         file_name_ext = task['file']
-        strm_file_name = Path(file_name_ext).with_suffix('.strm').name
-        
+        # 确保文件名处理正确，只替换最后一个后缀
+        file_name_path = Path(file_name_ext)
+        strm_file_name = file_name_path.with_suffix('.strm').name
+
         # 查找最匹配的（最长的）Openlist目标前缀
         best_match = ""
         for dst_prefix in self._parsed_strm_mappings.keys():
@@ -664,7 +677,7 @@ class OpenlistMover(_PluginBase):
         
         if not best_match:
             task['strm_status'] = '跳过 (无映射规则)'
-            logger.info(f"任务 {task['id']} 移动成功，但未找到匹配的 STRM 映射规则，跳过 STRM 复制。")
+            logger.debug(f"任务 {task['id']} 移动成功，但未找到匹配的 STRM 映射规则，跳过 STRM 复制。")
             return
             
         try:
@@ -672,21 +685,23 @@ class OpenlistMover(_PluginBase):
             strm_src_prefix, strm_dst_prefix = self._parsed_strm_mappings[dst_prefix]
             
             # 计算相对路径
-            relative_dir_path = Path(dst_dir).relative_to(Path(dst_prefix))
-            relative_dir = str(relative_dir_path).replace(os.path.sep, '/')
+            # Path(dst_dir).relative_to(Path(dst_prefix)) 可能会在路径不规范时失败，使用 os.path.relpath
+            # 确保路径都是绝对路径或规范化
+            relative_dir_str = os.path.relpath(dst_dir, dst_prefix)
+            relative_dir = relative_dir_str.replace(os.path.sep, '/')
             
-            # 构建 List 路径
+            # 构建 List 路径 (需要 List 目录，而不是文件)
             list_path = f"{strm_src_prefix.rstrip('/')}/{relative_dir}"
             
-            # 构建 Copy 路径
+            # 构建 Copy 路径 (源和目标目录)
             copy_src_dir = list_path
             copy_dst_dir = f"{strm_dst_prefix.rstrip('/')}/{relative_dir}"
             
-            logger.info(f"任务 {task['id']} 成功，开始 STRM 处理:")
-            logger.info(f"  List 路径: {list_path}")
-            logger.info(f"  Copy 源: {copy_src_dir}")
-            logger.info(f"  Copy 目标: {copy_dst_dir}")
-            logger.info(f"  文件名: {strm_file_name}")
+            logger.debug(f"任务 {task['id']} 成功，开始 STRM 处理:")
+            logger.debug(f"  List 路径: {list_path}")
+            logger.debug(f"  Copy 源: {copy_src_dir}")
+            logger.debug(f"  Copy 目标: {copy_dst_dir}")
+            logger.debug(f"  文件名: {strm_file_name}")
 
             # 2. 调用 /api/fs/list 强制生成 .strm
             list_success = self._call_openlist_list_api(list_path)
@@ -707,7 +722,7 @@ class OpenlistMover(_PluginBase):
             
             if copy_success:
                 task['strm_status'] = '成功'
-                logger.info(f"任务 {task['id']} STRM 文件复制成功：{strm_file_name} -> {copy_dst_dir}")
+                logger.debug(f"任务 {task['id']} STRM 文件复制成功：{strm_file_name} -> {copy_dst_dir}")
             else:
                 task['strm_status'] = '失败 (Copy API 失败)'
                 logger.error(f"任务 {task['id']} STRM 文件复制失败。")
@@ -770,9 +785,7 @@ class OpenlistMover(_PluginBase):
         
         return mappings
 
-    # ... (Other methods like _find_mapping, process_new_file are unchanged)
     def _find_mapping(self, local_file_path: Path) -> Tuple[str, str, str, str]:
-        # ... (Same as original)
         """
         根据本地文件路径查找 Openlist 路径
         返回 (openlist_src_dir, openlist_dst_dir, file_name, error_msg)
@@ -830,7 +843,8 @@ class OpenlistMover(_PluginBase):
         max_wait_time = 60  # 最大等待60秒
         wait_interval = 3   # 每3秒检查一次
         
-        logger.info(f"开始处理新文件: {file_path}")
+        # 日志级别调整为 DEBUG
+        logger.debug(f"开始处理新文件: {file_path}")
         
         # 等待文件稳定
         for i in range(max_wait_time // wait_interval):
@@ -925,7 +939,6 @@ class OpenlistMover(_PluginBase):
         此方法被修改为假设 Openlist/AList API 成功时会返回任务ID。
         返回任务ID (string) 或 None。
         """
-        # ... (Move API implementation - logic remains same as previous step)
         try:
             data = json.dumps(payload).encode("utf-8")
             api_url = f"{self._openlist_url}/api/fs/move"
@@ -938,7 +951,8 @@ class OpenlistMover(_PluginBase):
 
             req = urllib.request.Request(api_url, data=data, headers=headers, method="POST")
 
-            logger.info(f"调用 Openlist Move API: {api_url}")
+            # 日志级别调整为 DEBUG
+            logger.debug(f"调用 Openlist Move API: {api_url}")
             logger.debug(f"API Payload: {payload}")
 
             with urllib.request.urlopen(req, timeout=30) as response:
@@ -1008,7 +1022,6 @@ class OpenlistMover(_PluginBase):
 
             with urllib.request.urlopen(req, timeout=30) as response:
                 response_body = response.read().decode("utf-8")
-                # ... (rest of task API call logic remains same)
                 response_code = response.getcode()
 
                 if response_code == 200:
@@ -1056,7 +1069,8 @@ class OpenlistMover(_PluginBase):
 
             req = urllib.request.Request(api_url, data=data, headers=headers, method="POST")
 
-            logger.info(f"调用 Openlist List API (STRM): {api_url}")
+            # 日志级别调整为 DEBUG
+            logger.debug(f"调用 Openlist List API (STRM): {api_url}")
             logger.debug(f"List API Payload: {payload}")
 
             with urllib.request.urlopen(req, timeout=30) as response:
@@ -1066,7 +1080,7 @@ class OpenlistMover(_PluginBase):
                 if response_code == 200:
                     response_data = json.loads(response_body)
                     if response_data.get("code") == 200:
-                        logger.info(f"Openlist List API 成功触发 .strm 文件生成：{path}")
+                        logger.debug(f"Openlist List API 成功触发 .strm 文件生成：{path}")
                         return True
                     else:
                         error_msg = response_data.get('message', '未知错误')
@@ -1101,7 +1115,8 @@ class OpenlistMover(_PluginBase):
 
             req = urllib.request.Request(api_url, data=data, headers=headers, method="POST")
 
-            logger.info(f"调用 Openlist Copy API (STRM): {api_url}")
+            # 日志级别调整为 DEBUG
+            logger.debug(f"调用 Openlist Copy API (STRM): {api_url}")
             logger.debug(f"Copy API Payload: {payload}")
 
             with urllib.request.urlopen(req, timeout=30) as response:
@@ -1111,8 +1126,8 @@ class OpenlistMover(_PluginBase):
                 if response_code == 200:
                     response_data = json.loads(response_body)
                     if response_data.get("code") == 200:
-                        # Copy 任务通常是同步或快速完成，这里不启动监控，直接视为成功
-                        logger.info(f"Openlist Copy API 成功复制 .strm 文件：{names} -> {dst_dir}")
+                        # 日志级别调整为 DEBUG
+                        logger.debug(f"Openlist Copy API 成功复制 .strm 文件：{names} -> {dst_dir}")
                         return True
                     else:
                         error_msg = response_data.get('message', '未知错误')
