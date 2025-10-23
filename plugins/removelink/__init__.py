@@ -3,6 +3,9 @@ import platform
 import threading
 import time
 import traceback
+import json
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import List, Tuple, Dict, Any
 from dataclasses import dataclass
@@ -260,6 +263,10 @@ class RemoveLink(_PluginBase):
     deletion_queue: List[DeletionTask] = []
     # 延迟删除定时器
     _deletion_timer = None
+    # AList API 配置
+    _api_delete_empty_dirs = False
+    _api_delete_url = ""
+    _api_delete_token = ""
 
     @staticmethod
     def __choose_observer():
@@ -307,6 +314,10 @@ class RemoveLink(_PluginBase):
             self._delay_seconds = (
                 max(10, min(300, int(delay_seconds))) if delay_seconds else 30
             )
+            # AList API 配置
+            self._api_delete_empty_dirs = config.get("api_delete_empty_dirs", False)
+            self._api_delete_url = config.get("api_delete_url") or ""
+            self._api_delete_token = config.get("api_delete_token") or ""
 
         # 停止现有任务
         self.stop_service()
@@ -333,6 +344,12 @@ class RemoveLink(_PluginBase):
                     logger.info(f"STRM 监控目录：{strm_monitor_dirs}")
                 else:
                     logger.warning("STRM 监控已启用但未配置路径映射")
+                
+                if self._api_delete_empty_dirs:
+                    if self._api_delete_url and self._api_delete_token:
+                        logger.info(f"AList API 空目录清理功能已启用，URL: {self._api_delete_url}")
+                    else:
+                        logger.warning("AList API 空目录清理已启用，但 URL 或 Token 未配置")
             else:
                 logger.info("STRM 文件删除监控功能已禁用")
 
@@ -780,6 +797,74 @@ class RemoveLink(_PluginBase):
                             }
                         ],
                     },
+                    # AList API 删除空目录配置
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "title": "AList API 空目录清理 (可选)",
+                                            "text": "启用后，当清理 Alist 上的 STRM 对应文件后，将调用 AList API 来删除空目录。仅当存储类型为 'alist' 时生效。",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "api_delete_empty_dirs",
+                                            "label": "启用 AList API 删除空目录",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "api_delete_url",
+                                            "label": "AList URL",
+                                            "placeholder": "例如: http://127.0.0.1:5244",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "api_delete_token",
+                                            "label": "AList Token",
+                                            "type": "password",
+                                            "placeholder": "AList 管理员 Token",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
                     # STRM配置说明
                     {
                         "component": "VRow",
@@ -869,6 +954,9 @@ class RemoveLink(_PluginBase):
             "exclude_keywords": "",
             "monitor_strm_deletion": False,
             "strm_path_mappings": "",
+            "api_delete_empty_dirs": False,
+            "api_delete_url": "",
+            "api_delete_token": "",
         }
 
     def get_page(self) -> List[dict]:
@@ -1496,6 +1584,64 @@ class RemoveLink(_PluginBase):
 
         return deleted_count
 
+    def _call_api_delete_dir(self, dir_path: str) -> bool:
+        """
+        使用 AList API 删除空目录
+        """
+        try:
+            p = Path(dir_path)
+            parent_dir = str(p.parent)
+            dir_name = p.name
+
+            payload = {
+                "dir": parent_dir,
+                "names": [dir_name]
+            }
+            data = json.dumps(payload).encode("utf-8")
+
+            # 构建 API URL
+            # self._api_delete_url should be like http://127.0.0.1:5244
+            api_url = f"{self._api_delete_url.rstrip('/')}/api/fs/remove"
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": self._api_delete_token,
+                "User-Agent": "MoviePilot-RemoveLink-Plugin",
+            }
+
+            req = urllib.request.Request(api_url, data=data, headers=headers, method="POST")
+
+            logger.debug(f"Calling API to delete directory: {api_url} with payload: {payload}")
+
+            with urllib.request.urlopen(req, timeout=10) as response:
+                response_body = response.read().decode("utf-8")
+                response_code = response.getcode()
+
+                if response_code == 200:
+                    try:
+                        # AList API success response
+                        # {"code":200,"message":"success","data":null}
+                        response_data = json.loads(response_body)
+                        if response_data.get("code") == 200:
+                            logger.info(f"API successfuly deleted directory: {dir_path}")
+                            return True
+                        else:
+                            logger.warning(f"API reported failure for {dir_path}: {response_data.get('message')}")
+                            return False
+                    except json.JSONDecodeError:
+                        logger.error(f"Failed to decode API response: {response_body}")
+                        return False
+                else:
+                    logger.warning(f"API returned non-200 status code {response_code} for {dir_path}: {response_body}")
+                    return False
+
+        except urllib.error.URLError as e:
+            logger.error(f"API call to delete {dir_path} failed (URLError): {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Error calling API to delete {dir_path}: {e} - {traceback.format_exc()}")
+            return False
+
     def _delete_storage_empty_folders(
         self, storage_type: str, storage_file_item: schemas.FileItem
     ) -> int:
@@ -1508,6 +1654,14 @@ class RemoveLink(_PluginBase):
             # 获取父目录
             parent_path = str(Path(storage_file_item.path).parent)
             current_path = parent_path
+
+            # 检查是否使用 API 删除
+            use_api_delete = (
+                self._api_delete_empty_dirs
+                and self._api_delete_url
+                and self._api_delete_token
+                and storage_type == "alist"
+            )
 
             # 逐级向上检查并删除空目录
             while current_path and current_path != "/" and current_path != "\\":
@@ -1522,7 +1676,13 @@ class RemoveLink(_PluginBase):
 
                 if not files:
                     # 目录为空，删除它
-                    if self._storagechain.delete_file(current_item):
+                    deleted_successfully = False
+                    if use_api_delete:
+                        deleted_successfully = self._call_api_delete_dir(current_path)
+                    else:
+                        deleted_successfully = self._storagechain.delete_file(current_item)
+                    
+                    if deleted_successfully:
                         logger.info(f"删除网盘空目录: [{storage_type}] {current_path}")
                         deleted_count += 1
 
@@ -1575,7 +1735,13 @@ class RemoveLink(_PluginBase):
                             )
                             if not files:
                                 # 现在目录为空，删除它
-                                if self._storagechain.delete_file(current_item):
+                                deleted_successfully = False
+                                if use_api_delete:
+                                    deleted_successfully = self._call_api_delete_dir(current_path)
+                                else:
+                                    deleted_successfully = self._storagechain.delete_file(current_item)
+
+                                if deleted_successfully:
                                     logger.info(
                                         f"删除网盘空目录: [{storage_type}] {current_path}"
                                     )
@@ -1742,6 +1908,15 @@ class RemoveLink(_PluginBase):
                         # 添加空目录清理信息
                         if storage_dirs_deleted > 0:
                             scrap_msg += f"，清理空目录 {storage_dirs_deleted} 个"
+                        
+                        if use_api_delete := (
+                            self._api_delete_empty_dirs
+                            and self._api_delete_url
+                            and self._api_delete_token
+                            and storage_type == "alist"
+                        ):
+                            if storage_dirs_deleted > 0:
+                                scrap_msg += " (使用 AList API)"
 
                         notification_parts.append(scrap_msg)
 
