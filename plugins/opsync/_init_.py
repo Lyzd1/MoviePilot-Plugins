@@ -88,7 +88,7 @@ class NewFileMonitorHandler(FileSystemEventHandler):
 
 class AlistMover(_PluginBase):
     # 插件名称
-    plugin_name = "Openlist 视频文件同步"
+    plugin_name = "Openlist视频同步"
     # 插件描述
     plugin_desc = "监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录。"
     # 插件图标
@@ -559,4 +559,5 @@ class AlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Alist API 时出错: {e} - {traceback.format_exc()}")
             return False
+
 
