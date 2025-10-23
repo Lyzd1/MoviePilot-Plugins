@@ -90,11 +90,11 @@ class OpenlistMover(_PluginBase):
     # 插件名称
     plugin_name = "Openlist 视频文件同步"
     # 插件描述
-    plugin_desc = "监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录。需要管理员 Token 来查询任务状态。"
+    plugin_desc = "监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录。"
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "1.1"
+    plugin_version = "1.0"
     # 插件作者
     plugin_author = "lyzd1"
     # 作者主页
@@ -220,43 +220,7 @@ class OpenlistMover(_PluginBase):
         pass
 
     def get_api(self) -> List[Dict[str, Any]]:
-        """
-        新增 API 接口用于前端查询 Openlist 任务状态
-        """
-        return [
-            {
-                "title": "获取 Openlist 未完成任务",
-                "path": "tasks_undone",
-                "method": "GET",
-                "handler": self._api_tasks_undone,
-            },
-        ]
-        
-    def _api_tasks_undone(self, *args, **kwargs) -> dict:
-        """
-        API 处理器：获取 Openlist 未完成的任务列表
-        """
-        logger.debug("接收到获取 Openlist 未完成任务的 API 调用")
-        # 根据 alistClient.py, Openlist/Alist 使用 /api/admin/task/copy/undone
-        tasks = self._get_openlist_tasks(api_path="/api/admin/task/copy/undone")
-        
-        # Openlist/Alist 任务状态: 0-等待中，1-进行中，2-成功，3-失败
-        status_map = {0: "等待中", 1: "进行中", 2: "成功", 3: "失败"}
-        
-        task_list = []
-        if tasks and isinstance(tasks, list):
-            for task in tasks:
-                task_list.append({
-                    "id": task.get("id", "N/A"),
-                    "name": task.get("name", "N/A"),
-                    # 状态转换，确保状态文本显示正确
-                    "state": status_map.get(task.get("state"), "未知"),
-                    "status_text": task.get("status", "N/A"),
-                    "progress": f"{task.get('progress', 0)} %", # 增加百分号，适配前端展示
-                    "error": task.get("error", "")
-                })
-
-        return {"code": 0, "message": "success", "data": task_list}
+        pass
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [
@@ -311,7 +275,7 @@ class OpenlistMover(_PluginBase):
                                             "type": "warning",
                                             "variant": "tonal",
                                             "title": "Openlist API 配置",
-                                            "text": "用于调用 Openlist 移动文件 API。URL 必须包含 http/https 协议头。**需要管理员权限的 Token 才能查询任务状态。**",
+                                            "text": "用于调用 Openlist 移动文件 API。URL 必须包含 http/https 协议头。",
                                         },
                                     }
                                 ],
@@ -409,54 +373,7 @@ class OpenlistMover(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        """
-        **前端表格 UI 设计**
-        返回用于显示任务状态的自定义页面
-        """
-        return [
-            {
-                "component": "VForm",
-                "content": [
-                    {
-                        "component": "VAlert",
-                        "props": {
-                            "type": "info",
-                            "variant": "tonal",
-                            "title": "Openlist 移动任务状态",
-                            "text": "此页面显示 Openlist 中未完成的移动（复制）任务。数据通过调用插件自定义 API 获取，并定期刷新。",
-                        },
-                    },
-                    {
-                        "component": "VCard",
-                        "props": {"title": "未完成的移动任务"},
-                        "content": [
-                            {
-                                "component": "VDataTable",
-                                "props": {
-                                    # 引用插件暴露的 API 接口
-                                    "custom-api": self.get_full_path("tasks_undone"), 
-                                    "loading-text": "加载 Openlist 任务中...",
-                                    "no-data-text": "Openlist 中没有未完成的移动任务。",
-                                    "headers": [
-                                        {"key": "name", "title": "任务名称"},
-                                        # "state" 字段显示状态文本
-                                        {"key": "state", "title": "状态", "sortable": False}, 
-                                        # "progress" 字段显示百分比
-                                        {"key": "progress", "title": "进度", "sortable": False},
-                                        {"key": "status_text", "title": "详细状态", "sortable": False},
-                                        {"key": "error", "title": "错误信息", "sortable": False},
-                                    ],
-                                    # custom-api 会自动触发数据加载，items 保持为空
-                                    "items": [], 
-                                    # 自动刷新配置 (例如每10秒刷新一次)
-                                    "api-interval": 10
-                                },
-                            }
-                        ],
-                    },
-                ],
-            }
-        ]
+        pass
 
     def stop_service(self):
         """
@@ -484,7 +401,6 @@ class OpenlistMover(_PluginBase):
 
         for line in self._path_mappings.split("\n"):
             line = line.strip()
-            # 确保有且只有两个冒号分隔符
             if not line or line.count(":") != 2:
                 if line:
                     logger.warning(f"无效的路径映射格式: {line}")
@@ -514,8 +430,7 @@ class OpenlistMover(_PluginBase):
             # 标准化路径比较
             normalized_local = os.path.normpath(local_prefix)
             normalized_file = os.path.normpath(local_file_str)
-            # 确保文件路径以监控路径开头，并且只匹配完整目录名（避免/path/to/A匹配/path/to/A_B）
-            if normalized_file.startswith(normalized_local) and (len(normalized_file) == len(normalized_local) or normalized_file[len(normalized_local)] in ['/', os.path.sep]):
+            if normalized_file.startswith(normalized_local):
                 if len(local_prefix) > len(best_match):
                     best_match = local_prefix
 
@@ -526,20 +441,15 @@ class OpenlistMover(_PluginBase):
             src_prefix, dst_prefix = self._parsed_mappings[best_match]
             
             # 计算相对路径
-            # Path().relative_to 可能会因为大小写或路径斜杠问题失败，使用 os.path.relpath 更可靠
             relative_path = os.path.relpath(local_file_str, best_match)
             relative_dir = os.path.dirname(relative_path)
             
             # 构建Openlist路径
             def build_openlist_path(base_path, rel_path):
-                # 确保 Openlist 路径使用 / 分隔符
-                base_path = base_path.rstrip('/')
                 if rel_path == '.':
-                    return base_path
+                    return base_path.rstrip('/')
                 else:
-                    # 替换本地分隔符为 Openlist 的 /
-                    rel_path = rel_path.replace(os.path.sep, '/') 
-                    return f"{base_path}/{rel_path}"
+                    return f"{base_path.rstrip('/')}/{rel_path.replace(os.path.sep, '/')}"
 
             openlist_src_dir = build_openlist_path(src_prefix, relative_dir)
             openlist_dst_dir = build_openlist_path(dst_prefix, relative_dir)
@@ -547,8 +457,8 @@ class OpenlistMover(_PluginBase):
             logger.debug(f"路径映射结果: 本地={local_file_str}")
             logger.debug(f"  匹配规则: {best_match} -> {src_prefix}:{dst_prefix}")
             logger.debug(f"  相对路径: {relative_path}")
-            logger.debug(f"  Openlist源目录: {openlist_src_dir}")
-            logger.debug(f"  Openlist目标目录: {openlist_dst_dir}")
+            logger.debug(f"  Openlist源: {openlist_src_dir}")
+            logger.debug(f"  Openlist目标: {openlist_dst_dir}")
             logger.debug(f"  文件名: {file_name}")
             
             return openlist_src_dir, openlist_dst_dir, file_name, None
@@ -575,12 +485,6 @@ class OpenlistMover(_PluginBase):
                     
                 file_size = file_path.stat().st_size
                 time.sleep(wait_interval)
-                
-                # 在下次检查前，再次确认文件存在
-                if not file_path.exists():
-                     logger.warning(f"文件 {file_path} 在等待过程中消失了")
-                     return
-                     
                 new_size = file_path.stat().st_size
                 
                 # 文件大小稳定且大于0，认为文件就绪
@@ -589,19 +493,10 @@ class OpenlistMover(_PluginBase):
                     break
                 else:
                     logger.debug(f"文件 {file_path} 仍在写入中... ({file_size} -> {new_size})")
-                
-                # 如果是最后一次循环，且文件仍不稳定，则等待结束后再进行处理
-                if i == (max_wait_time // wait_interval) - 1:
-                    logger.warning(f"文件 {file_path} 写入超时（{max_wait_time}秒）")
                     
             except OSError as e:
                 logger.warning(f"检查文件状态时出错: {e}")
                 time.sleep(wait_interval)
-            except Exception:
-                 # 捕获其他异常，如权限问题
-                logger.error(f"检查文件 {file_path} 状态时发生意外错误: {traceback.format_exc()}")
-                return # 发生异常，停止处理
-
         
         try:
             if not file_path.exists():
@@ -627,24 +522,20 @@ class OpenlistMover(_PluginBase):
             logger.info(f"准备调用 Openlist API 移动文件: {payload}")
 
             # 3. 调用 API
-            task_info = self._call_openlist_move_api(payload)
-            
-            if task_info and isinstance(task_info, dict):
-                # 假设 Openlist/Alist move 接口返回任务 ID
-                task_id = task_info.get('id', 'N/A')
-                logger.info(f"成功调用 Openlist API 发起移动任务: ID={task_id}, 文件={name}")
+            if self._call_openlist_move_api(payload):
+                logger.info(f"成功移动文件: {name} 从 {src_dir} 到 {dst_dir}")
                 if self._notify:
                     self.post_message(
                         mtype=NotificationType.SiteMessage,
-                        title="Openlist 移动任务已发起",
-                        text=f"文件：{name}\n源：{src_dir}\n目标：{dst_dir}\n任务ID：{task_id}",
+                        title="Openlist 移动成功",
+                        text=f"文件：{name}\n已移动到：{dst_dir}",
                     )
             else:
-                logger.error(f"Openlist API 移动任务发起失败: {name}")
+                logger.error(f"Openlist API 移动失败: {name}")
                 if self._notify:
                     self.post_message(
                         mtype=NotificationType.SiteMessage,
-                        title="Openlist 移动任务发起失败",
+                        title="Openlist 移动失败",
                         text=f"文件：{name}\n源：{src_dir}\n目标：{dst_dir}\n请检查 Openlist 日志。",
                     )
         except Exception as e:
@@ -656,30 +547,24 @@ class OpenlistMover(_PluginBase):
                     text=f"文件：{file_path}\n错误：{str(e)}",
                 )
 
-    def _call_openlist_api(self, api_path: str, payload: dict = None, method: str = "POST") -> Any:
+    def _call_openlist_move_api(self, payload: dict) -> bool:
         """
-        通用 Openlist API 调用
+        调用 Openlist API /api/fs/move
         """
         try:
-            data = json.dumps(payload).encode("utf-8") if payload else None
-            api_url = f"{self._openlist_url}{api_path}"
+            data = json.dumps(payload).encode("utf-8")
+            api_url = f"{self._openlist_url}/api/fs/move"
 
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": self._openlist_token,
                 "User-Agent": "MoviePilot-OpenlistMover-Plugin",
             }
-            
-            if method == "GET" and payload:
-                # GET 请求不应有 body
-                api_url += "?" + urllib.parse.urlencode(payload)
-                data = None
 
-            req = urllib.request.Request(api_url, data=data, headers=headers, method=method)
+            req = urllib.request.Request(api_url, data=data, headers=headers, method="POST")
 
-            logger.info(f"调用 Openlist API: {api_url} (Method: {method})")
-            if payload and method == "POST":
-                logger.debug(f"API Payload: {payload}")
+            logger.info(f"调用 Openlist Move API: {api_url}")
+            logger.debug(f"API Payload: {payload}")
 
             with urllib.request.urlopen(req, timeout=30) as response:
                 response_body = response.read().decode("utf-8")
@@ -691,12 +576,12 @@ class OpenlistMover(_PluginBase):
                 if response_code == 200:
                     try:
                         response_data = json.loads(response_body)
-                        # Openlist/Alist 成功 code 是 200
                         if response_data.get("code") == 200:
-                            return response_data.get("data")
+                            logger.info(f"Openlist API 成功移动: {payload.get('names')}")
+                            return True
                         else:
                             error_msg = response_data.get('message', '未知错误')
-                            logger.warning(f"Openlist API 报告失败: {error_msg} (API: {api_path})")
+                            logger.warning(f"Openlist API 报告失败: {error_msg} (Payload: {payload})")
                             return False
                     except json.JSONDecodeError:
                         logger.error(f"Openlist API 响应JSON解析失败: {response_body}")
@@ -711,24 +596,3 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist API 时出错: {e} - {traceback.format_exc()}")
             return False
-
-    def _call_openlist_move_api(self, payload: dict) -> Dict[str, Any] or bool:
-        """
-        调用 Openlist API /api/fs/move，返回任务信息
-        """
-        result = self._call_openlist_api(api_path="/api/fs/move", payload=payload, method="POST")
-        if result and isinstance(result, dict) and 'tasks' in result and result['tasks']:
-            # 返回第一个任务的信息
-            return result['tasks'][0] 
-        return False
-        
-    def _get_openlist_tasks(self, api_path: str) -> List[Dict[str, Any]] or bool:
-        """
-        调用 Openlist API 获取任务列表
-        """
-        # GET 请求，没有 body
-        result = self._call_openlist_api(api_path=api_path, method="GET") 
-        # Openlist/Alist 任务 API 成功时 data 是一个任务列表
-        if result and isinstance(result, list):
-            return result 
-        return False
