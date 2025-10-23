@@ -102,7 +102,7 @@ class AlistMover(_PluginBase):
     # 插件配置项ID前缀
     plugin_config_prefix = "alistmover_"
     # 加载顺序
-    plugin_order = 10
+    plugin_order = 0
     # 可使用的用户级别
     auth_level = 1
 
@@ -559,5 +559,6 @@ class AlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Alist API 时出错: {e} - {traceback.format_exc()}")
             return False
+
 
 
