@@ -108,7 +108,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.3"
+    plugin_version = "3.5"
     # 插件作者
     plugin_author = "lyzd1"
     # 作者主页
@@ -1047,12 +1047,12 @@ class OpenlistMover(_PluginBase):
             # 2. 准备 Payload
             payload = {"src_dir": src_dir, "dst_dir": dst_dir, "names": [name]}
             
-            logger.info(f"准备调用 Openlist API 移动文件: {payload}")
+            logger.debug(f"准备调用 Openlist API 移动文件: {payload}")
 
             # 3. 调用 API
             task_id = self._call_openlist_move_api(payload)
             if task_id:
-                logger.info(f"Openlist API 成功启动移动任务: {task_id} - {name} 从 {src_dir} 到 {dst_dir}")
+                logger.info(f"启动移动任务:  {name} 从 {src_dir} 到 {dst_dir}")
                 
                 # Add task to monitor list
                 new_task = {
@@ -1336,4 +1336,5 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist 清空 {task_type} 任务 API 时出错: {e} - {traceback.format_exc()}")
             return False
+
 
