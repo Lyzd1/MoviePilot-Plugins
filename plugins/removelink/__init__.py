@@ -7,7 +7,7 @@ import json
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
 from typing import NamedTuple
@@ -39,8 +39,9 @@ class DeletionTask:
     """延迟删除任务"""
 
     file_path: Path
-    deleted_inode: int
     timestamp: datetime
+    task_type: str  # "hardlink" 或 "strm"
+    deleted_inode: Optional[int] = None  # 仅 hardlink 任务使用
     processed: bool = False
 
 
@@ -329,6 +330,7 @@ class RemoveLink(_PluginBase):
             # 记录延迟删除配置状态
             if self._delayed_deletion:
                 logger.info(f"延迟删除功能已启用，延迟时间: {self._delay_seconds} 秒")
+                logger.info("延迟删除将同时应用于硬链接和STRM文件")
             else:
                 logger.info("延迟删除功能已禁用，将使用立即删除模式")
 
@@ -551,6 +553,77 @@ class RemoveLink(_PluginBase):
                             },
                         ],
                     },
+                    # 延迟删除配置（通用）
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VDivider",
+                                        "props": {"style": "margin: 20px 0;"},
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "warning",
+                                            "variant": "tonal",
+                                            "title": "⏰ 通用延迟删除配置",
+                                            "text": "启用后，文件删除（包括硬链接和STRM文件）不会立即触发清理，而是等待指定时间后再检查。这可以防止媒体重整理或误操作导致的意外删除。",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "delayed_deletion",
+                                            "label": "启用延迟删除 (同时用于硬链接和STRM)",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "delay_seconds",
+                                            "label": "延迟时间(秒)",
+                                            "type": "number",
+                                            "min": 10,
+                                            "max": 300,
+                                            "placeholder": "30",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
                     # 硬链接清理配置分隔线
                     {
                         "component": "VRow",
@@ -582,42 +655,6 @@ class RemoveLink(_PluginBase):
                                             "variant": "tonal",
                                             "title": "🔗 硬链接清理配置",
                                             "text": "监控硬链接文件删除，自动清理相关的硬链接文件、刮削文件和转移记录。",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    # 硬链接延迟删除配置
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "delayed_deletion",
-                                            "label": "启用延迟删除",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "delay_seconds",
-                                            "label": "延迟时间(秒)",
-                                            "type": "number",
-                                            "min": 10,
-                                            "max": 300,
-                                            "placeholder": "30",
                                         },
                                     }
                                 ],
@@ -682,25 +719,6 @@ class RemoveLink(_PluginBase):
                         ],
                     },
                     # 硬链接配置说明
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VAlert",
-                                        "props": {
-                                            "type": "warning",
-                                            "variant": "tonal",
-                                            "text": "延迟删除功能：启用后，文件删除时不会立即删除硬链接，而是等待指定时间后再检查文件是否仍被删除。这可以防止媒体重整理导致的意外删除。",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
                     {
                         "component": "VRow",
                         "content": [
@@ -1114,105 +1132,136 @@ class RemoveLink(_PluginBase):
 
     def _execute_delayed_deletion(self, task: DeletionTask):
         """
-        执行延迟删除任务
+        执行延迟删除任务 - 路由到特定处理器
         """
         try:
-            logger.debug(f"开始执行延迟删除任务: {task.file_path}")
-
-            # 验证原文件是否仍然被删除（未被重新创建）
-            if task.file_path.exists():
-                logger.info(f"文件 {task.file_path} 已被重新创建，跳过删除操作")
-                return
-
-            # 检查是否有相同inode的新文件（重新硬链接的情况）
-            with state_lock:
-                for path, file_info in self.file_state.items():
-                    if file_info.inode == task.deleted_inode and path != str(
-                        task.file_path
-                    ):
-                        # 检查文件是否在删除任务创建之后被添加到监控中
-                        if file_info.add_time > task.timestamp:
-                            logger.info(
-                                f"检测到相同inode的新文件 {path}，添加时间 {file_info.add_time} 晚于删除时间 {task.timestamp}，可能是重新硬链接，跳过删除操作"
-                            )
-                            return
-
-            # 延迟执行所有删除相关操作
-            logger.debug(
-                f"文件 {task.file_path} 确认被删除且无重新硬链接，开始执行延迟删除操作"
-            )
-
-            # 清理刮削文件
-            self.delete_scrap_infos(task.file_path)
-            if self._delete_torrents:
-                # 只有非刮削文件才发送 DownloadFileDeleted 事件
-                if task.file_path.suffix.lower() not in self.SCRAP_EXTENSIONS:
-                    eventmanager.send_event(
-                        EventType.DownloadFileDeleted, {"src": str(task.file_path)}
-                    )
-            # 删除转移记录
-            self.delete_history(str(task.file_path))
-
-            # 查找并删除硬链接文件
-            deleted_files = []
-
-            with state_lock:
-                for path, file_info in self.file_state.copy().items():
-                    if file_info.inode == task.deleted_inode:
-                        file = Path(path)
-                        if self.__is_excluded(file):
-                            logger.debug(f"文件 {file} 在不删除目录中，跳过")
-                            continue
-
-                        # 删除硬链接文件
-                        logger.info(f"延迟删除硬链接文件：{path}")
-                        file.unlink()
-                        deleted_files.append(path)
-
-                        # 清理硬链接文件相关的刮削文件
-                        self.delete_scrap_infos(file)
-                        if self._delete_torrents:
-                            # 只有非刮削文件才发送 DownloadFileDeleted 事件
-                            if file.suffix.lower() not in self.SCRAP_EXTENSIONS:
-                                eventmanager.send_event(
-                                    EventType.DownloadFileDeleted, {"src": str(file)}
-                                )
-                        # 删除硬链接文件的转移记录
-                        self.delete_history(str(file))
-
-                        # 从状态集合中移除
-                        self.file_state.pop(path, None)
-
-            # 发送通知（在锁外执行）
-            if self._notify and deleted_files:
-                file_count = len(deleted_files)
-
-                # 构建通知内容
-                notification_parts = [f"🗂️ 源文件：{task.file_path}"]
-
-                if file_count == 1:
-                    notification_parts.append(f"🔗 硬链接：{deleted_files[0]}")
-                else:
-                    notification_parts.append(f"🔗 删除了 {file_count} 个硬链接文件")
-
-                # 添加其他操作记录
-                if self._delete_history:
-                    notification_parts.append("📝 已清理转移记录")
-                if self._delete_torrents:
-                    notification_parts.append("🌱 已联动删除种子")
-                if self._delete_scrap_infos:
-                    notification_parts.append("🖼️ 已清理刮削文件")
-
-                self.post_message(
-                    mtype=NotificationType.SiteMessage,
-                    title="🧹 媒体文件清理",
-                    text=f"⏰ 延迟删除完成\n\n" + "\n".join(notification_parts),
-                )
-
+            if task.task_type == "hardlink":
+                # Call the renamed function
+                self._execute_hardlink_delayed_deletion(task)
+            elif task.task_type == "strm":
+                # Call the new STRM delay handler
+                self._execute_strm_delayed_deletion(task)
+            else:
+                logger.warning(f"未知的延迟删除任务类型: {task.task_type}")
+        
         except Exception as e:
-            logger.error(f"执行延迟删除任务失败：{str(e)} - {traceback.format_exc()}")
+            logger.error(f"执行延迟删除任务失败 ({task.task_type}): {str(e)} - {traceback.format_exc()}")
         finally:
+            # This is the finally block from the original _execute_delayed_deletion
             task.processed = True
+            
+    def _execute_strm_delayed_deletion(self, task: DeletionTask):
+        """
+        执行 STRM 的延迟删除任务
+        """
+        logger.debug(f"开始执行延迟删除任务 (strm): {task.file_path}")
+        
+        # 1. 检查文件是否被重新创建
+        if task.file_path.exists():
+            logger.info(f"STRM 文件 {task.file_path} 已被重新创建，跳过删除操作")
+            return
+        
+        # 2. 执行实际的删除逻辑
+        logger.debug(
+            f"STRM 文件 {task.file_path} 确认被删除，开始执行延迟删除操作"
+        )
+        self._execute_strm_deletion(task.file_path)
+
+    def _execute_hardlink_delayed_deletion(self, task: DeletionTask):
+        """
+        执行硬链接的延迟删除任务
+        """
+        logger.debug(f"开始执行延迟删除任务 (hardlink): {task.file_path}")
+
+        # 验证原文件是否仍然被删除（未被重新创建）
+        if task.file_path.exists():
+            logger.info(f"文件 {task.file_path} (hardlink) 已被重新创建，跳过删除操作")
+            return
+
+        # 检查是否有相同inode的新文件（重新硬链接的情况）
+        with state_lock:
+            for path, file_info in self.file_state.items():
+                if file_info.inode == task.deleted_inode and path != str(
+                    task.file_path
+                ):
+                    # 检查文件是否在删除任务创建之后被添加到监控中
+                    if file_info.add_time > task.timestamp:
+                        logger.info(
+                            f"检测到相同inode的新文件 {path}，添加时间 {file_info.add_time} 晚于删除时间 {task.timestamp}，可能是重新硬链接，跳过删除操作"
+                        )
+                        return
+
+        # 延迟执行所有删除相关操作
+        logger.debug(
+            f"文件 {task.file_path} 确认被删除且无重新硬链接，开始执行延迟删除操作"
+        )
+
+        # 清理刮削文件
+        self.delete_scrap_infos(task.file_path)
+        if self._delete_torrents:
+            # 只有非刮削文件才发送 DownloadFileDeleted 事件
+            if task.file_path.suffix.lower() not in self.SCRAP_EXTENSIONS:
+                eventmanager.send_event(
+                    EventType.DownloadFileDeleted, {"src": str(task.file_path)}
+                )
+        # 删除转移记录
+        self.delete_history(str(task.file_path))
+
+        # 查找并删除硬链接文件
+        deleted_files = []
+
+        with state_lock:
+            for path, file_info in self.file_state.copy().items():
+                if file_info.inode == task.deleted_inode:
+                    file = Path(path)
+                    if self.__is_excluded(file):
+                        logger.debug(f"文件 {file} 在不删除目录中，跳过")
+                        continue
+
+                    # 删除硬链接文件
+                    logger.info(f"延迟删除硬链接文件：{path}")
+                    file.unlink()
+                    deleted_files.append(path)
+
+                    # 清理硬链接文件相关的刮削文件
+                    self.delete_scrap_infos(file)
+                    if self._delete_torrents:
+                        # 只有非刮削文件才发送 DownloadFileDeleted 事件
+                        if file.suffix.lower() not in self.SCRAP_EXTENSIONS:
+                            eventmanager.send_event(
+                                EventType.DownloadFileDeleted, {"src": str(file)}
+                            )
+                    # 删除硬链接文件的转移记录
+                    self.delete_history(str(file))
+
+                    # 从状态集合中移除
+                    self.file_state.pop(path, None)
+
+        # 发送通知（在锁外执行）
+        if self._notify and deleted_files:
+            file_count = len(deleted_files)
+
+            # 构建通知内容
+            notification_parts = [f"🗂️ 源文件：{task.file_path}"]
+
+            if file_count == 1:
+                notification_parts.append(f"🔗 硬链接：{deleted_files[0]}")
+            else:
+                notification_parts.append(f"🔗 删除了 {file_count} 个硬链接文件")
+
+            # 添加其他操作记录
+            if self._delete_history:
+                notification_parts.append("📝 已清理转移记录")
+            if self._delete_torrents:
+                notification_parts.append("🌱 已联动删除种子")
+            if self._delete_scrap_infos:
+                notification_parts.append("🖼️ 已清理刮削文件")
+
+            self.post_message(
+                mtype=NotificationType.SiteMessage,
+                title="🧹 媒体文件清理",
+                text=f"⏰ 延迟删除完成 (硬链接)\n\n" + "\n".join(notification_parts),
+            )
 
     def _process_deletion_queue(self):
         """
@@ -1319,8 +1368,9 @@ class RemoveLink(_PluginBase):
                 )
                 task = DeletionTask(
                     file_path=file_path,
-                    deleted_inode=deleted_inode,
                     timestamp=datetime.now(),
+                    task_type="hardlink",
+                    deleted_inode=deleted_inode
                 )
 
                 with deletion_queue_lock:
@@ -1817,12 +1867,10 @@ class RemoveLink(_PluginBase):
             )
             return None
 
-    def handle_strm_deleted(self, strm_file_path: Path):
+    def _execute_strm_deletion(self, strm_file_path: Path):
         """
-        处理 strm 文件删除事件
+        执行 strm 文件的实际删除逻辑（用于立即删除或延迟删除）
         """
-        logger.info(f"处理 strm 文件删除: {strm_file_path}")
-
         try:
             # 获取对应的网盘文件路径
             storage_type, storage_path = self._get_storage_path_from_strm(
@@ -1886,6 +1934,10 @@ class RemoveLink(_PluginBase):
                     notification_parts.append(
                         f"🗑️ 已删除网盘文件：[{storage_type}] {storage_file_item.path}"
                     )
+                    
+                    # 检查是否为延迟删除
+                    is_delayed = self._delayed_deletion
+                    title_prefix = "⏰ 延迟删除完成 (STRM)" if is_delayed else "⚡ 立即删除完成 (STRM)"
 
                     # 添加其他操作记录
                     if self._delete_history:
@@ -1923,7 +1975,7 @@ class RemoveLink(_PluginBase):
                     self.post_message(
                         mtype=NotificationType.SiteMessage,
                         title="🧹 媒体文件清理",
-                        text=f"✅ 清理完成\n\n" + "\n".join(notification_parts),
+                        text=f"{title_prefix}\n\n" + "\n".join(notification_parts),
                     )
             else:
                 logger.error(
@@ -1934,6 +1986,38 @@ class RemoveLink(_PluginBase):
             logger.error(
                 f"处理 strm 文件删除失败: {strm_file_path} - {str(e)} - {traceback.format_exc()}"
             )
+
+    def handle_strm_deleted(self, strm_file_path: Path):
+        """
+        处理 strm 文件删除事件
+        """
+        logger.info(f"处理 strm 文件删除: {strm_file_path}")
+        
+        # 根据配置选择立即删除或延迟删除
+        if self._delayed_deletion:
+            # 延迟删除模式
+            logger.info(
+                f"STRM 文件 {strm_file_path.name} 加入延迟删除队列，延迟 {self._delay_seconds} 秒"
+            )
+            task = DeletionTask(
+                file_path=strm_file_path,
+                timestamp=datetime.now(),
+                task_type="strm"
+                # deleted_inode is not needed
+            )
+
+            with deletion_queue_lock:
+                self.deletion_queue.append(task)
+                # 只有在没有定时器运行时才启动新的定时器
+                if not self._deletion_timer:
+                    self._start_deletion_timer()
+                    logger.debug("启动延迟删除定时器")
+                else:
+                    logger.debug("延迟删除定时器已在运行，任务已加入队列")
+        else:
+            # 立即删除模式
+            logger.debug(f"STRM 文件 {strm_file_path.name} 立即删除")
+            self._execute_strm_deletion(strm_file_path)
 
     def delete_history_by_dest(self, dest_path: str) -> bool:
         """
