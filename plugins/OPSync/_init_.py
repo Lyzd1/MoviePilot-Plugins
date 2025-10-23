@@ -560,3 +560,4 @@ class AlistMover(_PluginBase):
             logger.error(f"调用 Alist API 时出错: {e} - {traceback.format_exc()}")
             return False
 
+
