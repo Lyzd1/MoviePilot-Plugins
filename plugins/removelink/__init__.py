@@ -1513,7 +1513,6 @@ class RemoveLink(_PluginBase):
 
         return deleted_count
 
-    
     def _delete_storage_empty_folders(
         self, storage_type: str, storage_file_item: schemas.FileItem
     ) -> int:
