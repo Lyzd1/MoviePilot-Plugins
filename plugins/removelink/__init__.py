@@ -3,8 +3,11 @@ import platform
 import threading
 import time
 import traceback
+import json
+import urllib.request
+import urllib.error
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
 from typing import NamedTuple
@@ -38,7 +41,7 @@ class DeletionTask:
     file_path: Path
     timestamp: datetime
     task_type: str  # "hardlink" 或 "strm"
-    deleted_inode: int = 0  # 仅用于 hardlink
+    deleted_inode: Optional[int] = None  # 仅 hardlink 任务使用
     processed: bool = False
 
 
@@ -197,9 +200,9 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.1"
+    plugin_version = "2.6"
     # 插件作者
-    plugin_author = "DzAvril"
+    plugin_author = "lyzd1,DzAvril"
     # 作者主页
     author_url = "https://github.com/DzAvril"
     # 插件配置项ID前缀
@@ -261,6 +264,10 @@ class RemoveLink(_PluginBase):
     deletion_queue: List[DeletionTask] = []
     # 延迟删除定时器
     _deletion_timer = None
+    # AList API 配置
+    _api_delete_empty_dirs = False
+    _api_delete_url = ""
+    _api_delete_token = ""
 
     @staticmethod
     def __choose_observer():
@@ -308,6 +315,10 @@ class RemoveLink(_PluginBase):
             self._delay_seconds = (
                 max(10, min(300, int(delay_seconds))) if delay_seconds else 30
             )
+            # AList API 配置
+            self._api_delete_empty_dirs = config.get("api_delete_empty_dirs", False)
+            self._api_delete_url = config.get("api_delete_url") or ""
+            self._api_delete_token = config.get("api_delete_token") or ""
 
         # 停止现有任务
         self.stop_service()
@@ -319,6 +330,7 @@ class RemoveLink(_PluginBase):
             # 记录延迟删除配置状态
             if self._delayed_deletion:
                 logger.info(f"延迟删除功能已启用，延迟时间: {self._delay_seconds} 秒")
+                logger.info("延迟删除将同时应用于硬链接和STRM文件")
             else:
                 logger.info("延迟删除功能已禁用，将使用立即删除模式")
 
@@ -334,6 +346,12 @@ class RemoveLink(_PluginBase):
                     logger.info(f"STRM 监控目录：{strm_monitor_dirs}")
                 else:
                     logger.warning("STRM 监控已启用但未配置路径映射")
+                
+                if self._api_delete_empty_dirs:
+                    if self._api_delete_url and self._api_delete_token:
+                        logger.info(f"AList API 空目录清理功能已启用，URL: {self._api_delete_url}")
+                    else:
+                        logger.warning("AList API 空目录清理已启用，但 URL 或 Token 未配置")
             else:
                 logger.info("STRM 文件删除监控功能已禁用")
 
@@ -535,6 +553,77 @@ class RemoveLink(_PluginBase):
                             },
                         ],
                     },
+                    # 延迟删除配置（通用）
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VDivider",
+                                        "props": {"style": "margin: 20px 0;"},
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "warning",
+                                            "variant": "tonal",
+                                            "title": "⏰ 通用延迟删除配置",
+                                            "text": "启用后，文件删除（包括硬链接和STRM文件）不会立即触发清理，而是等待指定时间后再检查。这可以防止媒体重整理或误操作导致的意外删除。",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "delayed_deletion",
+                                            "label": "启用延迟删除 (同时用于硬链接和STRM)",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "delay_seconds",
+                                            "label": "延迟时间(秒)",
+                                            "type": "number",
+                                            "min": 10,
+                                            "max": 300,
+                                            "placeholder": "30",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
                     # 硬链接清理配置分隔线
                     {
                         "component": "VRow",
@@ -566,42 +655,6 @@ class RemoveLink(_PluginBase):
                                             "variant": "tonal",
                                             "title": "🔗 硬链接清理配置",
                                             "text": "监控硬链接文件删除，自动清理相关的硬链接文件、刮削文件和转移记录。",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    # 硬链接延迟删除配置
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "delayed_deletion",
-                                            "label": "启用延迟删除",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "delay_seconds",
-                                            "label": "延迟时间(秒)",
-                                            "type": "number",
-                                            "min": 10,
-                                            "max": 300,
-                                            "placeholder": "30",
                                         },
                                     }
                                 ],
@@ -666,25 +719,6 @@ class RemoveLink(_PluginBase):
                         ],
                     },
                     # 硬链接配置说明
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VAlert",
-                                        "props": {
-                                            "type": "warning",
-                                            "variant": "tonal",
-                                            "text": "延迟删除功能：启用后，文件删除时不会立即删除硬链接，而是等待指定时间后再检查文件是否仍被删除。这可以防止媒体重整理导致的意外删除。此设置对硬链接和STRM清理同时生效。",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
                     {
                         "component": "VRow",
                         "content": [
@@ -781,6 +815,74 @@ class RemoveLink(_PluginBase):
                             }
                         ],
                     },
+                    # AList API 删除空目录配置
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "title": "AList API 空目录清理 (可选)",
+                                            "text": "启用后，当清理 Alist 上的 STRM 对应文件后，将调用 AList API 来删除空目录。仅当存储类型为 'alist' 时生效。",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "api_delete_empty_dirs",
+                                            "label": "启用 AList API 删除空目录",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "api_delete_url",
+                                            "label": "AList URL",
+                                            "placeholder": "例如: http://127.0.0.1:5244",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "api_delete_token",
+                                            "label": "AList Token",
+                                            "type": "password",
+                                            "placeholder": "AList 管理员 Token",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
                     # STRM配置说明
                     {
                         "component": "VRow",
@@ -870,6 +972,9 @@ class RemoveLink(_PluginBase):
             "exclude_keywords": "",
             "monitor_strm_deletion": False,
             "strm_path_mappings": "",
+            "api_delete_empty_dirs": False,
+            "api_delete_url": "",
+            "api_delete_token": "",
         }
 
     def get_page(self) -> List[dict]:
@@ -1027,35 +1132,51 @@ class RemoveLink(_PluginBase):
 
     def _execute_delayed_deletion(self, task: DeletionTask):
         """
-        执行延迟删除任务（分发器）
+        执行延迟删除任务 - 路由到特定处理器
         """
         try:
-            logger.debug(f"开始执行延迟删除任务: {task.file_path} (类型: {task.task_type})")
-
-            # 共通检查：验证原文件是否仍然被删除（未被重新创建）
-            if task.file_path.exists():
-                logger.info(f"文件 {task.file_path} 已被重新创建，跳过删除操作")
-                return
-
-            # 根据任务类型分发
-            if task.task_type == "strm":
-                # 执行 STRM 删除
-                self._execute_strm_deletion(task.file_path)
-            
-            elif task.task_type == "hardlink":
-                # 执行硬链接删除
-                self._execute_hardlink_deletion(task)
-            
+            if task.task_type == "hardlink":
+                # Call the renamed function
+                self._execute_hardlink_delayed_deletion(task)
+            elif task.task_type == "strm":
+                # Call the new STRM delay handler
+                self._execute_strm_delayed_deletion(task)
+            else:
+                logger.warning(f"未知的延迟删除任务类型: {task.task_type}")
+        
         except Exception as e:
-            logger.error(f"执行延迟删除任务失败：{str(e)} - {traceback.format_exc()}")
+            logger.error(f"执行延迟删除任务失败 ({task.task_type}): {str(e)} - {traceback.format_exc()}")
         finally:
+            # This is the finally block from the original _execute_delayed_deletion
             task.processed = True
+            
+    def _execute_strm_delayed_deletion(self, task: DeletionTask):
+        """
+        执行 STRM 的延迟删除任务
+        """
+        logger.debug(f"开始执行延迟删除任务 (strm): {task.file_path}")
+        
+        # 1. 检查文件是否被重新创建
+        if task.file_path.exists():
+            logger.info(f"STRM 文件 {task.file_path} 已被重新创建，跳过删除操作")
+            return
+        
+        # 2. 执行实际的删除逻辑
+        logger.debug(
+            f"STRM 文件 {task.file_path} 确认被删除，开始执行延迟删除操作"
+        )
+        self._execute_strm_deletion(task.file_path)
 
-    def _execute_hardlink_deletion(self, task: DeletionTask):
+    def _execute_hardlink_delayed_deletion(self, task: DeletionTask):
         """
-        执行延迟硬链接删除任务
+        执行硬链接的延迟删除任务
         """
-        logger.debug(f"开始执行延迟硬链接删除任务: {task.file_path}")
+        logger.debug(f"开始执行延迟删除任务 (hardlink): {task.file_path}")
+
+        # 验证原文件是否仍然被删除（未被重新创建）
+        if task.file_path.exists():
+            logger.info(f"文件 {task.file_path} (hardlink) 已被重新创建，跳过删除操作")
+            return
 
         # 检查是否有相同inode的新文件（重新硬链接的情况）
         with state_lock:
@@ -1139,7 +1260,7 @@ class RemoveLink(_PluginBase):
             self.post_message(
                 mtype=NotificationType.SiteMessage,
                 title="🧹 媒体文件清理",
-                text=f"⏰ 延迟删除完成\n\n" + "\n".join(notification_parts),
+                text=f"⏰ 延迟删除完成 (硬链接)\n\n" + "\n".join(notification_parts),
             )
 
     def _process_deletion_queue(self):
@@ -1247,9 +1368,9 @@ class RemoveLink(_PluginBase):
                 )
                 task = DeletionTask(
                     file_path=file_path,
-                    deleted_inode=deleted_inode,
                     timestamp=datetime.now(),
                     task_type="hardlink",
+                    deleted_inode=deleted_inode
                 )
 
                 with deletion_queue_lock:
@@ -1513,6 +1634,64 @@ class RemoveLink(_PluginBase):
 
         return deleted_count
 
+    def _call_api_delete_dir(self, dir_path: str) -> bool:
+        """
+        使用 AList API 删除空目录
+        """
+        try:
+            p = Path(dir_path)
+            parent_dir = str(p.parent)
+            dir_name = p.name
+
+            payload = {
+                "dir": parent_dir,
+                "names": [dir_name]
+            }
+            data = json.dumps(payload).encode("utf-8")
+
+            # 构建 API URL
+            # self._api_delete_url should be like http://127.0.0.1:5244
+            api_url = f"{self._api_delete_url.rstrip('/')}/api/fs/remove"
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": self._api_delete_token,
+                "User-Agent": "MoviePilot-RemoveLink-Plugin",
+            }
+
+            req = urllib.request.Request(api_url, data=data, headers=headers, method="POST")
+
+            logger.debug(f"Calling API to delete directory: {api_url} with payload: {payload}")
+
+            with urllib.request.urlopen(req, timeout=10) as response:
+                response_body = response.read().decode("utf-8")
+                response_code = response.getcode()
+
+                if response_code == 200:
+                    try:
+                        # AList API success response
+                        # {"code":200,"message":"success","data":null}
+                        response_data = json.loads(response_body)
+                        if response_data.get("code") == 200:
+                            logger.info(f"API successfuly deleted directory: {dir_path}")
+                            return True
+                        else:
+                            logger.warning(f"API reported failure for {dir_path}: {response_data.get('message')}")
+                            return False
+                    except json.JSONDecodeError:
+                        logger.error(f"Failed to decode API response: {response_body}")
+                        return False
+                else:
+                    logger.warning(f"API returned non-200 status code {response_code} for {dir_path}: {response_body}")
+                    return False
+
+        except urllib.error.URLError as e:
+            logger.error(f"API call to delete {dir_path} failed (URLError): {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Error calling API to delete {dir_path}: {e} - {traceback.format_exc()}")
+            return False
+
     def _delete_storage_empty_folders(
         self, storage_type: str, storage_file_item: schemas.FileItem
     ) -> int:
@@ -1524,8 +1703,15 @@ class RemoveLink(_PluginBase):
         try:
             # 获取父目录
             parent_path = str(Path(storage_file_item.path).parent)
-			grandparent_path = str(Path(parent_path).parent)
             current_path = parent_path
+
+            # 检查是否使用 API 删除
+            use_api_delete = (
+                self._api_delete_empty_dirs
+                and self._api_delete_url
+                and self._api_delete_token
+                and storage_type == "alist"
+            )
 
             # 逐级向上检查并删除空目录
             while current_path and current_path != "/" and current_path != "\\":
@@ -1540,7 +1726,13 @@ class RemoveLink(_PluginBase):
 
                 if not files:
                     # 目录为空，删除它
-                    if self._storagechain.delete_file(grandparent_path):
+                    deleted_successfully = False
+                    if use_api_delete:
+                        deleted_successfully = self._call_api_delete_dir(current_path)
+                    else:
+                        deleted_successfully = self._storagechain.delete_file(current_item)
+                    
+                    if deleted_successfully:
                         logger.info(f"删除网盘空目录: [{storage_type}] {current_path}")
                         deleted_count += 1
 
@@ -1593,7 +1785,13 @@ class RemoveLink(_PluginBase):
                             )
                             if not files:
                                 # 现在目录为空，删除它
-                                if self._storagechain.delete_file(current_item):
+                                deleted_successfully = False
+                                if use_api_delete:
+                                    deleted_successfully = self._call_api_delete_dir(current_path)
+                                else:
+                                    deleted_successfully = self._storagechain.delete_file(current_item)
+
+                                if deleted_successfully:
                                     logger.info(
                                         f"删除网盘空目录: [{storage_type}] {current_path}"
                                     )
@@ -1626,7 +1824,7 @@ class RemoveLink(_PluginBase):
             )
 
         return deleted_count
-        
+
     def _get_storage_dir_item(
         self, storage_type: str, dir_path: str
     ) -> schemas.FileItem:
@@ -1669,43 +1867,10 @@ class RemoveLink(_PluginBase):
             )
             return None
 
-    def handle_strm_deleted(self, strm_file_path: Path):
-        """
-        处理 strm 文件删除事件（分发器）
-        """
-        logger.debug(f"处理 strm 删除事件: {strm_file_path}")
-
-        # 根据配置选择立即删除或延迟删除
-        if self._delayed_deletion:
-            # 延迟删除模式
-            logger.info(
-                f"STRM 文件 {strm_file_path.name} 加入延迟删除队列，延迟 {self._delay_seconds} 秒"
-            )
-            task = DeletionTask(
-                file_path=strm_file_path,
-                timestamp=datetime.now(),
-                task_type="strm",
-            )
-
-            with deletion_queue_lock:
-                self.deletion_queue.append(task)
-                # 只有在没有定时器运行时才启动新的定时器
-                if not self._deletion_timer:
-                    self._start_deletion_timer()
-                    logger.debug("启动延迟删除定时器")
-                else:
-                    logger.debug("延迟删除定时器已在运行，任务已加入队列")
-        else:
-            # 立即删除模式
-            logger.info(f"立即执行 strm 删除: {strm_file_path}")
-            self._execute_strm_deletion(strm_file_path)
-
     def _execute_strm_deletion(self, strm_file_path: Path):
         """
-        执行 strm 文件删除的实际逻辑
+        执行 strm 文件的实际删除逻辑（用于立即删除或延迟删除）
         """
-        logger.info(f"执行 strm 文件删除: {strm_file_path}")
-
         try:
             # 获取对应的网盘文件路径
             storage_type, storage_path = self._get_storage_path_from_strm(
@@ -1769,6 +1934,10 @@ class RemoveLink(_PluginBase):
                     notification_parts.append(
                         f"🗑️ 已删除网盘文件：[{storage_type}] {storage_file_item.path}"
                     )
+                    
+                    # 检查是否为延迟删除
+                    is_delayed = self._delayed_deletion
+                    title_prefix = "⏰ 延迟删除完成 (STRM)" if is_delayed else "⚡ 立即删除完成 (STRM)"
 
                     # 添加其他操作记录
                     if self._delete_history:
@@ -1791,13 +1960,22 @@ class RemoveLink(_PluginBase):
                         # 添加空目录清理信息
                         if storage_dirs_deleted > 0:
                             scrap_msg += f"，清理空目录 {storage_dirs_deleted} 个"
+                        
+                        if use_api_delete := (
+                            self._api_delete_empty_dirs
+                            and self._api_delete_url
+                            and self._api_delete_token
+                            and storage_type == "alist"
+                        ):
+                            if storage_dirs_deleted > 0:
+                                scrap_msg += " (使用 AList API)"
 
                         notification_parts.append(scrap_msg)
 
                     self.post_message(
                         mtype=NotificationType.SiteMessage,
                         title="🧹 媒体文件清理",
-                        text=f"✅ 清理完成\n\n" + "\n".join(notification_parts),
+                        text=f"{title_prefix}\n\n" + "\n".join(notification_parts),
                     )
             else:
                 logger.error(
@@ -1808,6 +1986,38 @@ class RemoveLink(_PluginBase):
             logger.error(
                 f"处理 strm 文件删除失败: {strm_file_path} - {str(e)} - {traceback.format_exc()}"
             )
+
+    def handle_strm_deleted(self, strm_file_path: Path):
+        """
+        处理 strm 文件删除事件
+        """
+        logger.info(f"处理 strm 文件删除: {strm_file_path}")
+        
+        # 根据配置选择立即删除或延迟删除
+        if self._delayed_deletion:
+            # 延迟删除模式
+            logger.info(
+                f"STRM 文件 {strm_file_path.name} 加入延迟删除队列，延迟 {self._delay_seconds} 秒"
+            )
+            task = DeletionTask(
+                file_path=strm_file_path,
+                timestamp=datetime.now(),
+                task_type="strm"
+                # deleted_inode is not needed
+            )
+
+            with deletion_queue_lock:
+                self.deletion_queue.append(task)
+                # 只有在没有定时器运行时才启动新的定时器
+                if not self._deletion_timer:
+                    self._start_deletion_timer()
+                    logger.debug("启动延迟删除定时器")
+                else:
+                    logger.debug("延迟删除定时器已在运行，任务已加入队列")
+        else:
+            # 立即删除模式
+            logger.debug(f"STRM 文件 {strm_file_path.name} 立即删除")
+            self._execute_strm_deletion(strm_file_path)
 
     def delete_history_by_dest(self, dest_path: str) -> bool:
         """
