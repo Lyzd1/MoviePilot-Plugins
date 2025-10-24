@@ -1539,11 +1539,9 @@ class RemoveLink(_PluginBase):
 
                 if not files:
                     # 目录为空，删除它的父目录 (用户要求)
-                    parent_dir_path = str(Path(current_path).parent)
-                    
+                    parent_dir_path = str(Path(current_path).parent)
                     # 1. 获取父目录的 FileItem 对象，以解决 'str' object has no attribute 'storage' 错误
                     parent_item_to_delete = self._get_storage_dir_item(storage_type, parent_dir_path)
-                    
                     # 2. 使用 FileItem 对象进行删除
                     if parent_item_to_delete and self._storagechain.delete_file(parent_item_to_delete):
                         logger.info(f"删除网盘空目录: [{storage_type}] {current_path}")
