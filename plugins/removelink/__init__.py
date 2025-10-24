@@ -1513,9 +1513,10 @@ class RemoveLink(_PluginBase):
 
         return deleted_count
 
-    def _delete_storage_empty_folders(
+    
+     def _delete_storage_empty_folders(
         self, storage_type: str, storage_file_item: schemas.FileItem
-    ) -> int:
+     ) -> int:
         """
         删除网盘中的空目录
         返回删除的目录数量
@@ -1524,6 +1525,7 @@ class RemoveLink(_PluginBase):
         try:
             # 获取父目录
             parent_path = str(Path(storage_file_item.path).parent)
+			grandparent_path = str(Path(parent_path).parent)
             current_path = parent_path
 
             # 逐级向上检查并删除空目录
@@ -1538,12 +1540,8 @@ class RemoveLink(_PluginBase):
                 files = self._storagechain.list_files(current_item, recursion=False)
 
                 if not files:
-                    # 目录为空，删除它的父目录 (用户要求)
-                    parent_dir_path = str(Path(current_path).parent)
-                    # 1. 获取父目录的 FileItem 对象，以解决 'str' object has no attribute 'storage' 错误
-                    parent_item_to_delete = self._get_storage_dir_item(storage_type, parent_dir_path)
-                    # 2. 使用 FileItem 对象进行删除
-                    if parent_item_to_delete and self._storagechain.delete_file(parent_item_to_delete):
+                    # 目录为空，删除它
+                    if self._storagechain.delete_file(grandparent_path):
                         logger.info(f"删除网盘空目录: [{storage_type}] {current_path}")
                         deleted_count += 1
 
@@ -1629,7 +1627,7 @@ class RemoveLink(_PluginBase):
             )
 
         return deleted_count
-
+        
     def _get_storage_dir_item(
         self, storage_type: str, dir_path: str
     ) -> schemas.FileItem:
