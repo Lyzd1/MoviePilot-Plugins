@@ -1514,9 +1514,9 @@ class RemoveLink(_PluginBase):
         return deleted_count
 
     
-     def _delete_storage_empty_folders(
+    def _delete_storage_empty_folders(
         self, storage_type: str, storage_file_item: schemas.FileItem
-     ) -> int:
+    ) -> int:
         """
         删除网盘中的空目录
         返回删除的目录数量
