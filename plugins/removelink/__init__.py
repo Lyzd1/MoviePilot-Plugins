@@ -197,7 +197,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.0"
+    plugin_version = "3.1"
     # 插件作者
     plugin_author = "DzAvril"
     # 作者主页
@@ -1538,9 +1538,14 @@ class RemoveLink(_PluginBase):
                 files = self._storagechain.list_files(current_item, recursion=False)
 
                 if not files:
-                    # 目录为空，删除它
-                    parent_dir_path = str(Path(current_path).parent)
-                    if self._storagechain.delete_file(parent_dir_path):
+                    # 目录为空，删除它的父目录 (用户要求)
+                    parent_dir_path = str(Path(current_path).parent)
+                    
+                    # 1. 获取父目录的 FileItem 对象，以解决 'str' object has no attribute 'storage' 错误
+                    parent_item_to_delete = self._get_storage_dir_item(storage_type, parent_dir_path)
+                    
+                    # 2. 使用 FileItem 对象进行删除
+                    if parent_item_to_delete and self._storagechain.delete_file(parent_item_to_delete):
                         logger.info(f"删除网盘空目录: [{storage_type}] {current_path}")
                         deleted_count += 1
 
