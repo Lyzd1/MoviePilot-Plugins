@@ -197,7 +197,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.7"
+    plugin_version = "2.8"
     # 插件作者
     plugin_author = "DzAvril"
     # 作者主页
@@ -1538,20 +1538,8 @@ class RemoveLink(_PluginBase):
                 files = self._storagechain.list_files(current_item, recursion=False)
 
                 if not files:
-                    # 目录为空，删除它 - 修改这里使用 remove API
-                    # 创建父目录和目录名的 FileItem
-                    dir_name = Path(current_path).name
-                    parent_dir = str(Path(current_path).parent)
-                    
-                    # 创建用于删除的 FileItem
-                    delete_item = schemas.FileItem(
-                        storage=storage_type,
-                        type="dir",
-                        path=current_path,
-                        name=dir_name
-                    )
-                    
-                    if self._storagechain.delete_file(delete_item):
+                    # 目录为空，删除它
+                    if self._storagechain.delete_file(current_path = str(Path(current_path).parent)):
                         logger.info(f"删除网盘空目录: [{storage_type}] {current_path}")
                         deleted_count += 1
 
@@ -1603,16 +1591,8 @@ class RemoveLink(_PluginBase):
                                 current_item, recursion=False
                             )
                             if not files:
-                                # 现在目录为空，使用 remove API 删除
-                                dir_name = Path(current_path).name
-                                delete_item = schemas.FileItem(
-                                    storage=storage_type,
-                                    type="dir", 
-                                    path=current_path,
-                                    name=dir_name
-                                )
-                                
-                                if self._storagechain.delete_file(delete_item):
+                                # 现在目录为空，删除它
+                                if self._storagechain.delete_file(current_item):
                                     logger.info(
                                         f"删除网盘空目录: [{storage_type}] {current_path}"
                                     )
