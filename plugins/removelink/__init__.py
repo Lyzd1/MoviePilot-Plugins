@@ -197,7 +197,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.9"
+    plugin_version = "3.0"
     # 插件作者
     plugin_author = "DzAvril"
     # 作者主页
@@ -1539,7 +1539,8 @@ class RemoveLink(_PluginBase):
 
                 if not files:
                     # 目录为空，删除它
-                    if self._storagechain.delete_file(current_path = str(Path(current_path).parent)):
+                    parent_dir_path = str(Path(current_path).parent)
+                    if self._storagechain.delete_file(parent_dir_path):
                         logger.info(f"删除网盘空目录: [{storage_type}] {current_path}")
                         deleted_count += 1
 
