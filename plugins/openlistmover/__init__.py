@@ -948,14 +948,14 @@ class OpenlistMover(_PluginBase):
 
             # === 洗版逻辑：删除旧文件 ===
             if task.get("is_wash", False):
-                logger.info(f"洗版模式：任务 {task['id']} 正在删除旧 STRM 文件于 {copy_dst_dir}...")
+                logger.info(f"洗版：正在删除旧 STRM 文件于 {copy_dst_dir}...")
                 
                 names_to_delete = [strm_file_name, json_file_name]
                 
                 delete_success = self._call_openlist_remove_api(copy_dst_dir, names_to_delete)
                 
                 if delete_success:
-                    logger.info(f"旧 STRM 文件删除成功，等待 {self._wash_delay_seconds} 秒延迟...")
+                    logger.info(f"旧 STRM 文件删除成功，{self._wash_delay_seconds} 秒后成功洗版")
                     time.sleep(self._wash_delay_seconds)
                 else:
                     logger.warning(f"旧 STRM 文件删除失败 (或文件不存在)，将继续尝试生成...")
@@ -1565,4 +1565,5 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist 清空 {task_type} 任务 API 时出错: {e} - {traceback.format_exc()}")
             return False
+
 
