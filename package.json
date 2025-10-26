@@ -79,6 +79,7 @@
         "icon": "brush.jpg",
         "author": "Lyzd1,jxxghp,InfinityPacer",
         "level": 2,
+        "v2": true,
         "history": {
           "v4.3.4": "取消固定10分钟刷流时间",
           "v4.3.2": "增加'删除促销结束的未完成下载'功能",
