@@ -108,11 +108,11 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.5"
+    plugin_version = "3.6" # 版本号更新
     # 插件作者
-    plugin_author = "lyzd1"
+    plugin_author = "Lyzd1"
     # 作者主页
-    author_url = "https://github.com/lyzd1"
+    author_url = "https://github.com/Lyzd1"
     # 插件配置项ID前缀
     plugin_config_prefix = "openlistmover_"
     # 加载顺序
@@ -131,6 +131,11 @@ class OpenlistMover(_PluginBase):
     _observer = []
     _scheduler: Optional[BackgroundScheduler] = None
     
+    # === 新增洗版配置 ===
+    _wash_mode_enabled = False
+    _wash_delay_seconds = 60
+    # ======================
+    
     # {local_prefix: (openlist_src_prefix, openlist_dst_prefix)}
     _parsed_mappings: Dict[str, Tuple[str, str]] = {}
     
@@ -138,7 +143,7 @@ class OpenlistMover(_PluginBase):
     _parsed_strm_mappings: Dict[str, Tuple[str, str]] = {} # 新增 strm 映射解析结果
     
     # Task tracking list
-    # Format: [{"id": str, "file": str, "src_dir": str, "dst_dir": str, "start_time": datetime, "status": int, "error": str, "strm_status": str}]
+    # Format: [{"id": str, "file": str, "src_dir": str, "dst_dir": str, "start_time": datetime, "status": int, "error": str, "strm_status": str, "is_wash": bool}]
     _move_tasks: List[Dict[str, Any]] = []
     _max_task_duration = 60 * 60 # 60 minutes in seconds (最长 60min)
     _task_check_interval = 60 # 1 minute in seconds (每隔 1min)
@@ -181,6 +186,14 @@ class OpenlistMover(_PluginBase):
             self._monitor_paths = config.get("monitor_paths", "")
             self._path_mappings = config.get("path_mappings", "")
             self._strm_path_mappings = config.get("strm_path_mappings", "") # 加载 strm 映射
+            
+            # === 加载洗版配置 ===
+            self._wash_mode_enabled = config.get("wash_mode_enabled", False)
+            try:
+                self._wash_delay_seconds = int(config.get("wash_delay_seconds", 60))
+            except ValueError:
+                self._wash_delay_seconds = 60
+            # =======================
             
             # === 加载新的配置项 ===
             try:
@@ -230,6 +243,8 @@ class OpenlistMover(_PluginBase):
             
             logger.info(f"Openlist Mover 已加载 {len(self._parsed_mappings)} 条移动路径映射")
             logger.info(f"Openlist Mover 已加载 {len(self._parsed_strm_mappings)} 条 STRM 路径映射")
+            logger.info(f"Openlist Mover 洗版模式: {'已启用' if self._wash_mode_enabled else '已禁用'}, 洗版延迟: {self._wash_delay_seconds} 秒")
+
 
             # 读取监控目录配置
             monitor_dirs = [
@@ -428,6 +443,59 @@ class OpenlistMover(_PluginBase):
                             }
                         ]
                     },
+                    # === 新增洗版配置 ===
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "title": "洗版模式配置",
+                                            "text": "当开启后，如果移动时发现目标文件已存在 (403 exists)，将自动使用覆盖模式 (overwrite: true) 重新移动。洗版成功后，会先删除旧的 STRM 文件，等待指定延迟后再重新生成。",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "wash_mode_enabled", "label": "启用洗版模式"},
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "wash_delay_seconds",
+                                            "label": "洗版延迟 (秒)",
+                                            "type": "number",
+                                            "min": 0,
+                                            "placeholder": "默认 60 (删除旧STRM后等待60秒再生效)",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # =================================
                     # === 新增任务清空配置 ===
                     {
                         "component": "VRow",
@@ -523,6 +591,8 @@ class OpenlistMover(_PluginBase):
             "path_mappings": "",
             "strm_path_mappings": "", # 新增默认值
             # === 新增配置默认值 ===
+            "wash_mode_enabled": False,
+            "wash_delay_seconds": 60,
             "clear_api_threshold": 10,
             "clear_panel_threshold": 30,
             "keep_successful_tasks": 3
@@ -572,12 +642,16 @@ class OpenlistMover(_PluginBase):
             strm_status = task.get('strm_status', '未执行')
             strm_color = 'text-warning' if strm_status == '失败' else ('text-success' if strm_status == '成功' else 'text-muted')
             
+            # 检查是否为洗版任务
+            is_wash_task = task.get('is_wash', False)
+            file_display = f"{task.get('file', 'N/A')} {'(洗版)' if is_wash_task else ''}"
+            
             return {
                 'component': 'tr',
                 'props': {'class': 'text-sm'},
                 'content': [
                     # 移除 任务ID 的显示
-                    {'component': 'td', 'text': task.get('file', 'N/A')},
+                    {'component': 'td', 'text': file_display}, # 显示是否为洗版
                     {'component': 'td', 'text': task.get('dst_dir', 'N/A')},
                     {'component': 'td', 'text': task['start_time'].strftime('%Y-%m-%d %H:%M:%S') if 'start_time' in task else 'N/A'},
                     {
@@ -743,19 +817,22 @@ class OpenlistMover(_PluginBase):
                         if new_status == TASK_STATUS_SUCCESS:
                             task['status'] = new_status
                             task['strm_status'] = '开始处理'
-                            self._process_strm_creation(task) # 任务成功后处理 STRM
+                            
+                            # 任务成功后处理 STRM (此方法内部已包含洗版逻辑)
+                            self._process_strm_creation(task) 
                             
                             # 增加成功计数
                             self._successful_moves_count += 1
                             
+                            is_wash_text = "(洗版)" if task.get("is_wash", False) else ""
                             move_success_text = (
-                                f"✅ 文件移动成功\n"
+                                f"✅ 文件移动成功 {is_wash_text}\n"
                                 f"🎬 视频文件：{task['dst_dir']}/{task['file']}\n"
                                 f"🔗 STRM状态：{task.get('strm_status', '未处理')}"
                             )
                             self._send_task_notification(
                                 task,
-                                "Openlist 移动完成",
+                                f"Openlist 移动完成 {is_wash_text}",
                                 move_success_text
                             )
                         elif new_status == TASK_STATUS_FAILED:
@@ -816,14 +893,17 @@ class OpenlistMover(_PluginBase):
 
     def _process_strm_creation(self, task: Dict[str, Any]):
         """
-        处理 STRM 文件生成和复制
+        处理 STRM 文件生成和复制 (包含洗版逻辑)
         """
         # 1. 查找 STRM 路径映射
         dst_dir = task['dst_dir']
         file_name_ext = task['file']
-        # 确保文件名处理正确，只替换最后一个后缀
+        
         file_name_path = Path(file_name_ext)
         strm_file_name = file_name_path.with_suffix('.strm').name
+        # 举例: "致不灭的你 S03E01-mediainfo.json"
+        json_file_name = file_name_path.with_suffix('').name + "-mediainfo.json"
+
 
         # 查找最匹配的（最长的）Openlist目标前缀
         best_match = ""
@@ -844,8 +924,6 @@ class OpenlistMover(_PluginBase):
             strm_src_prefix, strm_dst_prefix = self._parsed_strm_mappings[dst_prefix]
             
             # 计算相对路径
-            # Path(dst_dir).relative_to(Path(dst_prefix)) 可能会在路径不规范时失败，使用 os.path.relpath
-            # 确保路径都是绝对路径或规范化
             relative_dir_str = os.path.relpath(dst_dir, dst_prefix)
             relative_dir = relative_dir_str.replace(os.path.sep, '/')
             
@@ -860,7 +938,22 @@ class OpenlistMover(_PluginBase):
             logger.debug(f"  List 路径: {list_path}")
             logger.debug(f"  Copy 源: {copy_src_dir}")
             logger.debug(f"  Copy 目标: {copy_dst_dir}")
-            logger.debug(f"  文件名: {strm_file_name}")
+            logger.debug(f"  文件名: {strm_file_name}, {json_file_name}")
+
+            # === 洗版逻辑：删除旧文件 ===
+            if task.get("is_wash", False):
+                logger.info(f"洗版模式：任务 {task['id']} 正在删除旧 STRM 文件于 {copy_dst_dir}...")
+                
+                names_to_delete = [strm_file_name, json_file_name]
+                
+                delete_success = self._call_openlist_remove_api(copy_dst_dir, names_to_delete)
+                
+                if delete_success:
+                    logger.info(f"旧 STRM 文件删除成功，等待 {self._wash_delay_seconds} 秒延迟...")
+                    time.sleep(self._wash_delay_seconds)
+                else:
+                    logger.warning(f"旧 STRM 文件删除失败 (或文件不存在)，将继续尝试生成...")
+            # =============================
 
             # 2. 调用 /api/fs/list 强制生成 .strm
             list_success = self._call_openlist_list_api(list_path)
@@ -873,10 +966,12 @@ class OpenlistMover(_PluginBase):
             time.sleep(5)
             
             # 4. 调用 /api/fs/copy 复制 .strm 文件
+            # 注意：我们只复制 .strm 文件。json 文件是由 list 触发自动生成的，我们不需要 copy 它。
+            # 如果 json 文件也需要 copy，则 names 列表应包含两个
             copy_success = self._call_openlist_copy_api(
                 src_dir=copy_src_dir,
                 dst_dir=copy_dst_dir,
-                names=[strm_file_name]
+                names=[strm_file_name] # 仅复制 strm 文件
             )
             
             if copy_success:
@@ -1049,11 +1144,35 @@ class OpenlistMover(_PluginBase):
             
             logger.debug(f"准备调用 Openlist API 移动文件: {payload}")
 
-            # 3. 调用 API
-            task_id = self._call_openlist_move_api(payload)
+            # 3. 调用 API (标准模式)
+            # 返回: (task_id, code, message, is_wash_applied)
+            task_id, err_code, err_msg, is_wash = self._call_openlist_move_api(payload, is_wash=False)
+            
+            task_started = False
+            
             if task_id:
                 logger.info(f"启动移动任务:  {name} 从 {src_dir} 到 {dst_dir}")
+                task_started = True
                 
+            # 4. 检查是否需要洗版
+            elif self._wash_mode_enabled and err_code == 403 and err_msg and "exists" in err_msg:
+                logger.info(f"文件 {name} 已存在，启动洗版模式 (覆盖)...")
+                payload["overwrite"] = True
+                
+                # 再次调用 API (洗版模式)
+                task_id, err_code, err_msg, is_wash = self._call_openlist_move_api(payload, is_wash=True)
+                
+                if task_id:
+                    logger.info(f"启动洗版移动任务: {name} (覆盖) 到 {dst_dir}")
+                    task_started = True
+                else:
+                    logger.error(f"Openlist API 洗版移动失败: {name} (Code: {err_code}, Msg: {err_msg})")
+                    # 记录原始 payload 以供调试
+                    payload.pop("overwrite", None) # 移除 overwrite 字段以便日志清晰
+                    logger.error(f"Openlist API 报告失败: {err_msg} (Payload: {payload})")
+
+            # 5. 处理最终结果
+            if task_started:
                 # Add task to monitor list
                 new_task = {
                     "id": task_id,
@@ -1063,17 +1182,22 @@ class OpenlistMover(_PluginBase):
                     "start_time": datetime.now(),
                     "status": TASK_STATUS_RUNNING,
                     "error": "",
-                    "strm_status": "未执行" # 初始化 STRM 状态
+                    "strm_status": "未执行",
+                    "is_wash": is_wash # 记录这是否是一个洗版任务
                 }
                 with task_lock:
                     self._move_tasks.append(new_task)
             else:
+                # 移到此处，仅在标准和洗版都失败时才记录
+                if err_code != 403 or "exists" not in str(err_msg):
+                     logger.error(f"Openlist API 报告失败: {err_msg} (Payload: {payload})")
+                
                 logger.error(f"Openlist API 移动失败: {name}")
                 if self._notify:
                     self.post_message(
                         mtype=NotificationType.SiteMessage,
                         title="Openlist 移动失败",
-                        text=f"文件：{name}\n源：{src_dir}\n目标：{dst_dir}\n请检查 Openlist 日志。",
+                        text=f"文件：{name}\n源：{src_dir}\n目标：{dst_dir}\n错误：{err_msg}",
                     )
         except Exception as e:
             logger.error(f"处理文件 {file_path} 时发生意外错误: {e} - {traceback.format_exc()}")
@@ -1084,16 +1208,15 @@ class OpenlistMover(_PluginBase):
                     text=f"文件：{file_path}\n错误：{str(e)}",
                 )
 
-    def _call_openlist_move_api(self, payload: dict) -> Optional[str]:
+    def _call_openlist_move_api(self, payload: dict, is_wash: bool = False) -> Tuple[Optional[str], Optional[int], Optional[str], bool]:
         """
         调用 Openlist API /api/fs/move。
         此方法被修改为假设 Openlist/AList API 成功时会返回任务ID。
-        返回任务ID (string) 或 None。
+        返回 (task_id, error_code, error_message, is_wash_applied)
         """
+        api_url = f"{self._openlist_url}/api/fs/move"
         try:
             data = json.dumps(payload).encode("utf-8")
-            api_url = f"{self._openlist_url}/api/fs/move"
-
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": self._openlist_token,
@@ -1102,7 +1225,6 @@ class OpenlistMover(_PluginBase):
 
             req = urllib.request.Request(api_url, data=data, headers=headers, method="POST")
 
-            # 日志级别调整为 DEBUG
             logger.debug(f"调用 Openlist Move API: {api_url}")
             logger.debug(f"API Payload: {payload}")
 
@@ -1116,32 +1238,61 @@ class OpenlistMover(_PluginBase):
                 if response_code == 200:
                     try:
                         response_data = json.loads(response_body)
-                        if response_data.get("code") == 200:
-                            # 假设响应包含任务ID，类似 AList 的 /api/fs/move
+                        response_data_code = response_data.get("code")
+                        response_data_msg = response_data.get('message', '未知错误')
+                        
+                        if response_data_code == 200:
                             tasks = response_data.get('data', {}).get('tasks')
                             if tasks and isinstance(tasks, list) and tasks[0].get('id'):
-                                return str(tasks[0]['id'])
+                                task_id = str(tasks[0]['id'])
                             else:
-                                # 生成一个模拟ID启用追踪
                                 logger.warning("Openlist API 成功但未返回任务ID，生成一个模拟ID启用追踪。")
-                                return f"sim_task_{int(time.time() * 1000)}_{os.getpid()}" 
+                                task_id = f"sim_task_{int(time.time() * 1000)}_{os.getpid()}"
+                            
+                            return task_id, 200, "Success", is_wash
+                        
+                        # 检查 403 exists (即使在 200 响应中)
+                        elif not is_wash and response_data_code == 403 and "exists" in response_data_msg:
+                            logger.debug(f"检测到文件已存在 (Code {response_data_code}): {response_data_msg}")
+                            return None, 403, response_data_msg, False
+                        
                         else:
-                            error_msg = response_data.get('message', '未知错误')
-                            logger.warning(f"Openlist API 报告失败: {error_msg} (Payload: {payload})")
-                            return None
+                            # 其他 API 错误
+                            return None, response_data_code, response_data_msg, is_wash
+
                     except json.JSONDecodeError:
                         logger.error(f"Openlist API 响应JSON解析失败: {response_body}")
-                        return None
+                        return None, response_code, "JSON 解析失败", is_wash
                 else:
                     logger.warning(f"Openlist API 返回非 200 状态码 {response_code}: {response_body}")
-                    return None
+                    return None, response_code, response_body, is_wash
 
+        except urllib.error.HTTPError as e:
+            error_body = ""
+            try:
+                error_body = e.read().decode("utf-8")
+                # 尝试解析 JSON
+                error_data = json.loads(error_body)
+                err_code = error_data.get("code", e.code)
+                err_msg = error_data.get("message", error_body)
+            except Exception:
+                err_code = e.code
+                err_msg = error_body or str(e)
+            
+            # 关键：捕获 403 exists
+            if not is_wash and err_code == 403 and "exists" in err_msg:
+                logger.debug(f"检测到文件已存在 (HTTP {e.code}): {err_msg}")
+                return None, 403, err_msg, False
+                
+            logger.error(f"Openlist API 调用失败 (HTTPError {e.code}): {err_msg}")
+            return None, err_code, err_msg, is_wash
+            
         except urllib.error.URLError as e:
             logger.error(f"Openlist API 调用失败 (URLError): {e}")
-            return None
+            return None, 500, str(e), is_wash
         except Exception as e:
             logger.error(f"调用 Openlist API 时出错: {e} - {traceback.format_exc()}")
-            return None
+            return None, 500, str(e), is_wash
             
     def _call_openlist_task_api(self, task_id: str) -> Dict[str, Any]:
         """
@@ -1291,6 +1442,56 @@ class OpenlistMover(_PluginBase):
             logger.error(f"调用 Openlist Copy API 时出错: {e} - {traceback.format_exc()}")
             return False
 
+    def _call_openlist_remove_api(self, dir_path: str, names: List[str]) -> bool:
+        """
+        (新增) 调用 Openlist API /api/fs/remove 删除 .strm 和 .json 文件
+        """
+        payload = {
+            "dir": dir_path,
+            "names": names
+        }
+        
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            api_url = f"{self._openlist_url}/api/fs/remove"
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": self._openlist_token,
+                "User-Agent": "MoviePilot-OpenlistMover-WashRemove",
+            }
+
+            req = urllib.request.Request(api_url, data=data, headers=headers, method="POST")
+
+            logger.debug(f"调用 Openlist Remove API (Wash): {api_url}")
+            logger.debug(f"Remove API Payload: {payload}")
+
+            with urllib.request.urlopen(req, timeout=30) as response:
+                response_body = response.read().decode("utf-8")
+                response_code = response.getcode()
+
+                if response_code == 200:
+                    response_data = json.loads(response_body)
+                    if response_data.get("code") == 200:
+                        logger.debug(f"Openlist Remove API 成功删除文件：{names} 从 {dir_path}")
+                        return True
+                    else:
+                        error_msg = response_data.get('message', '未知错误')
+                        # 如果文件本身不存在，也算“成功”
+                        if "not exist" in error_msg:
+                             logger.debug(f"Openlist Remove API：文件不存在，视为删除成功。 (Msg: {error_msg})")
+                             return True
+                        
+                        logger.warning(f"Openlist Remove API 报告失败: {error_msg} (Payload: {payload})")
+                        return False
+                else:
+                    logger.warning(f"Openlist Remove API 返回非 200 状态码 {response_code}: {response_body}")
+                    return False
+        except Exception as e:
+            logger.error(f"调用 Openlist Remove API 时出错: {e} - {traceback.format_exc()}")
+            return False
+
+
     def _call_openlist_clear_tasks_api(self, task_type: str) -> bool:
         """
         调用 Openlist API 清空成功任务 (/api/admin/task/{task_type}/clear_succeeded)
@@ -1336,5 +1537,3 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist 清空 {task_type} 任务 API 时出错: {e} - {traceback.format_exc()}")
             return False
-
-
