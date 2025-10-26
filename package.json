@@ -5,7 +5,7 @@
         "labels": "文件整理",
         "version": "2.6",
         "icon": "Ombi_A.png",
-        "author": "lyzd1,DzAvril",
+        "author": "Lyzd1,DzAvril",
         "level": 1,
         "v2": true,
         "history": {
@@ -28,7 +28,7 @@
         "labels": "云盘同步",
         "version": "3.6.9",
         "icon": "Ombi_A.png",
-        "author": "lyzd1",
+        "author": "Lyzd1",
         "level": 1,
         "v2": true,
         "history": {
@@ -50,7 +50,7 @@
         "labels": "订阅",
         "version": "3.0",
         "icon": "teamwork.png",
-        "author": "thsrite",
+        "author": "Lyzd1,thsrite",
         "level": 2,
         "v2": true,
         "history": {
@@ -70,5 +70,24 @@
           "v1.3": "增加质量、分辨率、特效信息填充",
           "v1.2": "修复订阅已存在包含关键词和订阅站点"
         }
-      }
+    },
+    "BrushFlow": {
+        "name": "站点刷流",
+        "description": "自动托管刷流，将会提高对应站点的访问频率。",
+        "labels": "刷流,仪表板",
+        "version": "4.3.4",
+        "icon": "brush.jpg",
+        "author": "Lyzd1,jxxghp,InfinityPacer",
+        "level": 2,
+        "history": {
+          "v4.3.4": "取消固定10分钟刷流时间",
+          "v4.3.2": "增加'删除促销结束的未完成下载'功能",
+          "v4.3.1": "修复了一些细节问题",
+          "v4.3": "支持带宽采样并计算平均值，以优化刷流效率",
+          "v4.2": "优化执行周期输入，需要MoviePilot v2.2.1+",
+          "v4.1": "支持通过CRON表达式配置开启时间，固定10分钟为执行周期",
+          "v4.0": "站点独立配置项支持配置NexusPHP 站点自动跳过下载提示页",
+          "v3.9": "MoviePilot V2 版本站点刷流插件"
+        }
+  }
 }
