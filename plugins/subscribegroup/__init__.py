@@ -20,9 +20,9 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "2.8"
+    plugin_version = "2.9"
     # 插件作者
-    plugin_author = "lyzd1,thsrite"
+    plugin_author = "thsrite"
     # 作者主页
     author_url = "https://github.com/thsrite"
     # 插件配置项ID前缀
@@ -231,15 +231,18 @@ class SubscribeGroup(_PluginBase):
             if not event_data or not event_data.get("hash") or not event_data.get("context"):
                 logger.error(f"下载事件数据不完整 {event_data}")
                 return
+            
             # === 修改开始：添加日志输出，打印获取到的所有信息 ===
             
             logger.info("========================================")
             logger.info("🚀 触发种子下载事件 (EventType.DownloadAdded)")
             
             # 1. 打印完整的事件数据
-            logger.info(f"完整事件数据 (event_data): {json.dumps(event_data, indent=4, ensure_ascii=False)}")
-            
-            download_hash = event_data.get("hash")
+            try:
+                logger.info(f"完整事件数据 (event_data): {json.dumps(event_data, indent=4, ensure_ascii=False)}")
+            except TypeError:
+                logger.info(f"完整事件数据 (event_data): {event_data} (无法序列化为JSON)")
+                
             context = event_data.get("context")
 
             if context:
@@ -248,28 +251,34 @@ class SubscribeGroup(_PluginBase):
                 
                 # 2. 打印 torrent_info（种子基本信息）
                 if _torrent:
-                    # 使用 vars() 尝试获取对象所有属性，或直接打印关键属性
-                    torrent_info_dump = vars(_torrent) if hasattr(_torrent, '__dict__') else {
-                        'id': getattr(_torrent, 'id', 'N/A'),
-                        'site': getattr(_torrent, 'site', 'N/A'),
-                        'title': getattr(_torrent, 'title', 'N/A'),
-                        'size': getattr(_torrent, 'size', 'N/A'),
-                    }
+                    # 尝试获取对象所有属性，或回退到打印关键属性
+                    try:
+                        torrent_info_dump = vars(_torrent)
+                    except TypeError:
+                        torrent_info_dump = {
+                            'id': getattr(_torrent, 'id', 'N/A'),
+                            'site': getattr(_torrent, 'site', 'N/A'),
+                            'title': getattr(_torrent, 'title', 'N/A'),
+                            'size': getattr(_torrent, 'size', 'N/A'),
+                        }
                     logger.info(f"种子信息 (torrent_info): {json.dumps(torrent_info_dump, indent=4, ensure_ascii=False)}")
                 else:
                     logger.warning("未获取到 torrent_info")
                 
                 # 3. 打印 meta_info（资源元数据）
                 if _meta:
-                    # 使用 vars() 尝试获取对象所有属性，或直接打印关键属性
-                    meta_info_dump = vars(_meta) if hasattr(_meta, '__dict__') else {
-                        'title': getattr(_meta, 'title', 'N/A'),
-                        'resource_pix': getattr(_meta, 'resource_pix', 'N/A'),
-                        'resource_type': getattr(_meta, 'resource_type', 'N/A'),
-                        'resource_effect': getattr(_meta, 'resource_effect', 'N/A'),
-                        'resource_team': getattr(_meta, 'resource_team', 'N/A'),
-                        'customization': getattr(_meta, 'customization', 'N/A'),
-                    }
+                    # 尝试获取对象所有属性，或回退到打印关键属性
+                    try:
+                        meta_info_dump = vars(_meta)
+                    except TypeError:
+                        meta_info_dump = {
+                            'title': getattr(_meta, 'title', 'N/A'),
+                            'resource_pix': getattr(_meta, 'resource_pix', 'N/A'),
+                            'resource_type': getattr(_meta, 'resource_type', 'N/A'),
+                            'resource_effect': getattr(_meta, 'resource_effect', 'N/A'),
+                            'resource_team': getattr(_meta, 'resource_team', 'N/A'),
+                            'customization': getattr(_meta, 'customization', 'N/A'),
+                        }
                     logger.info(f"资源元数据 (meta_info): {json.dumps(meta_info_dump, indent=4, ensure_ascii=False)}")
                 else:
                     logger.warning("未获取到 meta_info")
@@ -278,6 +287,9 @@ class SubscribeGroup(_PluginBase):
 
             logger.info("========================================")
             
+            # === 修改结束 ===
+            
+            download_hash = event_data.get("hash")
             # 根据hash查询下载记录
             download_history = self._downloadhistoryoper.get_by_hash(download_hash)
             if not download_history:
