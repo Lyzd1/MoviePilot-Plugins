@@ -1,15 +1,15 @@
 import json
 import re
 import time
-
-from app.db.downloadhistory_oper import DownloadHistoryOper
-from app.db.subscribe_oper import SubscribeOper
-from app.db.site_oper import SiteOper
-from app.plugins import _PluginBase
 from typing import Any, List, Dict, Tuple
-from app.log import logger
+
 from app.core.event import eventmanager, Event
-from app.schemas.types import EventType, SystemConfigKey
+from app.db.downloadhistory_oper import DownloadHistoryOper
+from app.db.site_oper import SiteOper
+from app.db.subscribe_oper import SubscribeOper
+from app.log import logger
+from app.plugins import _PluginBase
+from app.schemas.types import EventType, SystemConfigKey, MediaType
 
 
 class SubscribeGroup(_PluginBase):
@@ -20,11 +20,11 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "2.9"
+    plugin_version = "3.0"
     # 插件作者
-    plugin_author = "thsrite"
+    plugin_author = "Lyzd1,thsrite"
     # 作者主页
-    author_url = "https://github.com/thsrite"
+    author_url = "https://github.com/Lyzd1"
     # 插件配置项ID前缀
     plugin_config_prefix = "subscribegroup_"
     # 加载顺序
@@ -39,7 +39,9 @@ class SubscribeGroup(_PluginBase):
     _clear_handle = False
     _update_details = []
     _update_confs = None
+    _web_source_confs = None  # 新增配置项
     _subscribe_confs = {}
+    _download_web_source_rules = {}  # 存储解析后的 web_source 规则
     _subscribeoper = None
     _downloadhistoryoper = None
     _siteoper = None
@@ -56,7 +58,21 @@ class SubscribeGroup(_PluginBase):
             self._clear_handle = config.get("clear_handle")
             self._update_details = config.get("update_details") or []
             self._update_confs = config.get("update_confs")
+            self._web_source_confs = config.get("web_source_confs")  # 加载新配置项
 
+            # 解析 web_source_confs
+            if self._web_source_confs:
+                self._download_web_source_rules = {}
+                for confs in str(self._web_source_confs).split("\n"):
+                    if ":" in confs:
+                        k = confs.split(":")[0].strip()
+                        v = ":".join(confs.split(":")[1:]).strip()
+                        if k and v:
+                            self._download_web_source_rules[k] = v
+                logger.info(f"获取到Web源自定义配置 {len(self._download_web_source_rules.keys())} 个")
+            else:
+                self._download_web_source_rules = {}
+            
             if self._update_confs:
                 active_sites = self._siteoper.list_active()
                 for confs in str(self._update_confs).split("\n"):
@@ -68,6 +84,7 @@ class SubscribeGroup(_PluginBase):
                     exclude = None
                     savepath = None
                     sites = []
+                    filter_groups = []
                     for conf in str(confs).split("#"):
                         if ":" in conf:
                             k = conf.split(":")[0]
@@ -92,6 +109,9 @@ class SubscribeGroup(_PluginBase):
                                         if str(site_name) == str(active_site.name):
                                             sites.append(active_site.id)
                                             break
+                            if k == "filter_groups":
+                                filter_groups = [filter_group for filter_group in str(v).split(",")]
+
                     if category:
                         for c in str(category).split(","):
                             self._subscribe_confs[c] = {
@@ -101,7 +121,8 @@ class SubscribeGroup(_PluginBase):
                                 'include': include,
                                 'exclude': exclude,
                                 'savepath': savepath,
-                                'sites': sites
+                                'sites': sites,
+                                'filter_groups': filter_groups
                             }
                 logger.info(f"获取到二级分类自定义配置 {len(self._subscribe_confs.keys())} 个")
             else:
@@ -131,6 +152,7 @@ class SubscribeGroup(_PluginBase):
             "clear_handle": self._clear_handle,
             "update_details": self._update_details,
             "update_confs": self._update_confs,
+            "web_source_confs": self._web_source_confs,  # 保存新配置项
         })
 
     @eventmanager.register(EventType.SubscribeAdded)
@@ -159,8 +181,15 @@ class SubscribeGroup(_PluginBase):
             sid = event_data.get("subscribe_id")
             category = event_data.get("mediainfo").get("category")
             if not category:
-                logger.error(f"订阅ID:{sid} 未获取到二级分类")
-                return
+                media_info = self.chain.recognize_media(mtype=MediaType(event_data.get("mediainfo").get("type")),
+                                                        tmdbid=event_data.get("mediainfo").get("tmdb_id"))
+                logger.error(f"订阅ID:{sid} 未获取到二级分类，尝试通过媒体信息识别 {media_info}")
+                if media_info and media_info.category:
+                    category = media_info.category
+                    logger.info(f"订阅ID:{sid} 二级分类:{category} 已通过媒体信息识别")
+                else:
+                    logger.error(f"订阅ID:{sid} 未获取到二级分类")
+                    return
 
             if category not in self._subscribe_confs.keys():
                 logger.error(f"订阅ID:{sid} 二级分类:{category} 未配置自定义规则")
@@ -172,13 +201,18 @@ class SubscribeGroup(_PluginBase):
             # 二级分类自定义配置
             category_conf = self._subscribe_confs.get(category)
 
+            logger.error(
+                f"订阅记录:{subscribe.name} 二级分类:{category} 自定义配置:{category_conf}")
+
             update_dict = {}
             if category_conf.get('include'):
                 update_dict['include'] = category_conf.get('include')
             if category_conf.get('exclude'):
                 update_dict['exclude'] = category_conf.get('exclude')
             if category_conf.get('sites'):
-                update_dict['sites'] = json.dumps(category_conf.get('sites'))
+                update_dict['sites'] = category_conf.get('sites')
+            if category_conf.get('filter_groups'):
+                update_dict['filter_groups'] = category_conf.get('filter_groups')
             if category_conf.get('resolution'):
                 update_dict['resolution'] = self.__parse_pix(category_conf.get('resolution'))
             if category_conf.get('quality'):
@@ -231,64 +265,6 @@ class SubscribeGroup(_PluginBase):
             if not event_data or not event_data.get("hash") or not event_data.get("context"):
                 logger.error(f"下载事件数据不完整 {event_data}")
                 return
-            
-            # === 修改开始：添加日志输出，打印获取到的所有信息 ===
-            
-            logger.info("========================================")
-            logger.info("🚀 触发种子下载事件 (EventType.DownloadAdded)")
-            
-            # 1. 打印完整的事件数据
-            try:
-                logger.info(f"完整事件数据 (event_data): {json.dumps(event_data, indent=4, ensure_ascii=False)}")
-            except TypeError:
-                logger.info(f"完整事件数据 (event_data): {event_data} (无法序列化为JSON)")
-                
-            context = event_data.get("context")
-
-            if context:
-                _torrent = context.torrent_info
-                _meta = context.meta_info
-                
-                # 2. 打印 torrent_info（种子基本信息）
-                if _torrent:
-                    # 尝试获取对象所有属性，或回退到打印关键属性
-                    try:
-                        torrent_info_dump = vars(_torrent)
-                    except TypeError:
-                        torrent_info_dump = {
-                            'id': getattr(_torrent, 'id', 'N/A'),
-                            'site': getattr(_torrent, 'site', 'N/A'),
-                            'title': getattr(_torrent, 'title', 'N/A'),
-                            'size': getattr(_torrent, 'size', 'N/A'),
-                        }
-                    logger.info(f"种子信息 (torrent_info): {json.dumps(torrent_info_dump, indent=4, ensure_ascii=False)}")
-                else:
-                    logger.warning("未获取到 torrent_info")
-                
-                # 3. 打印 meta_info（资源元数据）
-                if _meta:
-                    # 尝试获取对象所有属性，或回退到打印关键属性
-                    try:
-                        meta_info_dump = vars(_meta)
-                    except TypeError:
-                        meta_info_dump = {
-                            'title': getattr(_meta, 'title', 'N/A'),
-                            'resource_pix': getattr(_meta, 'resource_pix', 'N/A'),
-                            'resource_type': getattr(_meta, 'resource_type', 'N/A'),
-                            'resource_effect': getattr(_meta, 'resource_effect', 'N/A'),
-                            'resource_team': getattr(_meta, 'resource_team', 'N/A'),
-                            'customization': getattr(_meta, 'customization', 'N/A'),
-                        }
-                    logger.info(f"资源元数据 (meta_info): {json.dumps(meta_info_dump, indent=4, ensure_ascii=False)}")
-                else:
-                    logger.warning("未获取到 meta_info")
-            else:
-                logger.error("未获取到 context 信息")
-
-            logger.info("========================================")
-            
-            # === 修改结束 ===
-            
             download_hash = event_data.get("hash")
             # 根据hash查询下载记录
             download_history = self._downloadhistoryoper.get_by_hash(download_hash)
@@ -362,20 +338,40 @@ class SubscribeGroup(_PluginBase):
                     # 官组
                     resource_team = _meta.resource_team if _meta else None
                     customization = _meta.customization if _meta else None
-                    if resource_team and customization:
-                        resource_team = f"{customization}.+{resource_team}"
-                    if not resource_team and customization:
-                        resource_team = customization
-                    if resource_team:
-                        update_dict['include'] = resource_team
+                    web_source = _meta.web_source if _meta else None
+                    
+                    include_value = None
+                    
+                    if web_source and web_source in self._download_web_source_rules:
+                        # 匹配到 web_source 规则
+                        web_source_rule = self._download_web_source_rules.get(web_source)
+                        if resource_team:
+                            # 规则 + resource_team
+                            include_value = f"{web_source_rule}{resource_team}"
+                            logger.info(f"订阅记录:{subscribe.name} 匹配到Web源规则:{web_source}，填充 include:{include_value}")
+                        else:
+                            # 仅规则 (如果制作组为空)
+                            include_value = web_source_rule
+                            logger.info(f"订阅记录:{subscribe.name} 匹配到Web源规则:{web_source}，制作组为空，填充 include:{include_value}")
+                    else:
+                        # 未匹配到 web_source 规则，走原有逻辑
+                        if resource_team and customization:
+                            include_value = f"{customization}.+{resource_team}"
+                        elif customization:
+                            include_value = customization
+                        elif resource_team:
+                            include_value = resource_team
+
+                    if include_value:
+                        update_dict['include'] = include_value
+                        
                 # 站点
                 if "站点" in self._update_details and (
-                        not subscribe.sites or (subscribe.sites and len(json.loads(subscribe.sites)) == 0)):
+                        not subscribe.sites or (subscribe.sites and len(subscribe.sites) == 0)):
                     # 站点 判断是否在订阅站点范围内
                     rss_sites = self.systemconfig.get(SystemConfigKey.RssSites) or []
                     if _torrent and _torrent.site and int(_torrent.site) in rss_sites:
-                        sites = json.dumps([_torrent.site])
-                        update_dict['sites'] = sites
+                        update_dict['sites'] = [_torrent.site]
 
                 if len(update_dict.keys()) == 0:
                     logger.info(f"订阅记录:{subscribe.name} 无需填充")
@@ -402,41 +398,44 @@ class SubscribeGroup(_PluginBase):
 
     def __parse_pix(self, resource_pix):
         # 识别1080或者4k或720
-        if re.match(r"1080[pi]|x1080", resource_pix):
+        if re.match(r"1080[pi]|x1080", resource_pix, re.IGNORECASE):
             resource_pix = "1080[pi]|x1080"
-        if re.match(r"4K|2160p|x2160", resource_pix):
+            return resource_pix
+        if re.match(r"4K|2160p|x2160", resource_pix, re.IGNORECASE):
             resource_pix = "4K|2160p|x2160"
-        if re.match(r"720[pi]|x720", resource_pix):
+            return resource_pix
+        if re.match(r"720[pi]|x720", resource_pix, re.IGNORECASE):
             resource_pix = "720[pi]|x720"
+            return resource_pix
         return resource_pix
 
     def __parse_type(self, resource_type):
-        if re.match(r"Blu-?Ray.+VC-?1|Blu-?Ray.+AVC|UHD.+blu-?ray.+HEVC|MiniBD", resource_type):
+        if re.match(r"Blu-?Ray.+VC-?1|Blu-?Ray.+AVC|UHD.+blu-?ray.+HEVC|MiniBD", resource_type, re.IGNORECASE):
             resource_type = "Blu-?Ray.+VC-?1|Blu-?Ray.+AVC|UHD.+blu-?ray.+HEVC|MiniBD"
-        if re.match(r"Remux", resource_type):
+        if re.match(r"Remux", resource_type, re.IGNORECASE):
             resource_type = "Remux"
-        if re.match(r"Blu-?Ray", resource_type):
+        if re.match(r"Blu-?Ray", resource_type, re.IGNORECASE):
             resource_type = "Blu-?Ray"
-        if re.match(r"UHD|UltraHD", resource_type):
+        if re.match(r"UHD|UltraHD", resource_type, re.IGNORECASE):
             resource_type = "UHD|UltraHD"
-        if re.match(r"WEB-?DL|WEB-?RIP", resource_type):
+        if re.match(r"WEB-?DL|WEB-?RIP", resource_type, re.IGNORECASE):
             resource_type = "WEB-?DL|WEB-?RIP"
-        if re.match(r"HDTV", resource_type):
+        if re.match(r"HDTV", resource_type, re.IGNORECASE):
             resource_type = "HDTV"
-        if re.match(r"[Hx].?265|HEVC", resource_type):
+        if re.match(r"[Hx].?265|HEVC", resource_type, re.IGNORECASE):
             resource_type = "[Hx].?265|HEVC"
-        if re.match(r"[Hx].?264|AVC", resource_type):
+        if re.match(r"[Hx].?264|AVC", resource_type, re.IGNORECASE):
             resource_type = "[Hx].?264|AVC"
         return resource_type
 
     def __parse_effect(self, resource_effect):
-        if re.match(r"Dolby[\\s.]+Vision|DOVI|[\\s.]+DV[\\s.]+", resource_effect):
+        if re.match(r"Dolby[\\s.]+Vision|DOVI|[\\s.]+DV[\\s.]+", resource_effect, re.IGNORECASE):
             resource_effect = "Dolby[\\s.]+Vision|DOVI|[\\s.]+DV[\\s.]+"
-        if re.match(r"Dolby[\\s.]*\\+?Atmos|Atmos", resource_effect):
+        if re.match(r"Dolby[\\s.]*\\+?Atmos|Atmos", resource_effect, re.IGNORECASE):
             resource_effect = "Dolby[\\s.]*\\+?Atmos|Atmos"
-        if re.match(r"[\\s.]+HDR[\\s.]+|HDR10|HDR10\\+", resource_effect):
+        if re.match(r"[\\s.]+HDR[\\s.]+|HDR10|HDR10\\+", resource_effect, re.IGNORECASE):
             resource_effect = "[\\s.]+HDR[\\s.]+|HDR10|HDR10\\+"
-        if re.match(r"[\\s.]+SDR[\\s.]+", resource_effect):
+        if re.match(r"[\\s.]+SDR[\\s.]+", resource_effect, re.IGNORECASE):
             resource_effect = "[\\s.]+SDR[\\s.]+"
         return resource_effect
 
@@ -583,6 +582,29 @@ class SubscribeGroup(_PluginBase):
                                     {
                                         'component': 'VTextarea',
                                         'props': {
+                                            'model': 'web_source_confs',  # 新增配置项
+                                            'label': '种子下载Web源规则',
+                                            'rows': 3,
+                                            'placeholder': 'Netflix:.*NF.*\n'
+                                                           'KKTV:.*KKTV.*'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextarea',
+                                        'props': {
                                             'model': 'update_confs',
                                             'label': '二级分类自定义填充',
                                             'rows': 3,
@@ -674,9 +696,32 @@ class SubscribeGroup(_PluginBase):
                                             'type': 'info',
                                             'variant': 'tonal',
                                             'text': 'category:二级分类名称（多个分类名称逗号拼接）,resolution:分辨率,quality:质量,effect:特效,include:包含关键词,'
-                                                    'exclude:排除关键词,sites:站点名称（多个站点用逗号拼接）,savepath:保存路径/{name}（{name}为当前订阅的名称和年份）。'
+                                                    'exclude:排除关键词,sites:站点名称（多个站点用逗号拼接）,filter_groups:优先级规则组（多个规则组名称用逗号拼接）,savepath:保存路径/{name}（{name}为当前订阅的名称和年份）。'
                                                     'category必填，多组属性用#分割。例如category:动漫#resolution:1080p'
                                                     '（添加的动漫订阅，指定分辨率为1080p）。'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'text': 'Web源规则：格式为 Web源名称:正则表达式。Web源名称需与种子识别结果中的Web源名称（如Netflix、KKTV等）一致。'
+                                                    '如果下载种子匹配到Web源规则，则include值为：正则表达式 + 制作组。例如：Netflix:.*NF.* 将填充 include 为：.*NF.*MWeb（如果制作组为MWeb）。'
+                                                    '如果没有匹配到Web源或Web源规则，则include填充逻辑不变。'
                                         }
                                     }
                                 ]
@@ -692,6 +737,7 @@ class SubscribeGroup(_PluginBase):
             "clear_handle": False,
             "update_details": [],
             "update_confs": "",
+            "web_source_confs": "" # 新增配置项的默认值
         }
 
     def get_page(self) -> List[dict]:
