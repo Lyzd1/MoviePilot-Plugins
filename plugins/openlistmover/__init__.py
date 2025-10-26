@@ -109,11 +109,11 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.6.7" # 版本号更新
+    plugin_version = "3.6.8" # 版本号更新
     # 插件作者
-    plugin_author = "Lyzd1"
+    plugin_author = "lyzd1"
     # 作者主页
-    author_url = "https://github.com/Lyzd1"
+    author_url = "https://github.com/lyzd1"
     # 插件配置项ID前缀
     plugin_config_prefix = "openlistmover_"
     # 加载顺序
@@ -610,7 +610,6 @@ class OpenlistMover(_PluginBase):
         拼装插件详情页面，显示任务列表 (UI设计)
         """
         
-        # UI 访问时，只在内存中操作 self._move_tasks，避免阻塞
         with task_lock:
             # 活跃任务（等待中或进行中）
             active_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
@@ -647,7 +646,7 @@ class OpenlistMover(_PluginBase):
 
         def task_to_tr(task: Dict[str, Any]) -> dict:
             strm_status = task.get('strm_status', '未执行')
-            strm_color = 'text-warning' if strm_status == '失败' else ('text-success' if strm_status == '成功' else 'text-muted')
+            strm_color = 'text-warning' if strm_status.startswith('失败') else ('text-success' if strm_status == '成功' else 'text-muted')
             
             # 检查是否为洗版任务
             is_wash_task = task.get('is_wash', False)
@@ -770,13 +769,7 @@ class OpenlistMover(_PluginBase):
         启动任务监控定时器
         """
         try:
-            # 简化时区设置
-            try:
-                import tzlocal
-                timezone = tzlocal.get_localzone().zone
-            except Exception:
-                timezone = 'Asia/Shanghai' # Fallback
-                
+            timezone = 'Asia/Shanghai' # Fallback for snippet
             self._scheduler = BackgroundScheduler(timezone=timezone)
             self._scheduler.add_job(
                 self._check_move_tasks, 
@@ -791,7 +784,7 @@ class OpenlistMover(_PluginBase):
             
     def _send_task_notification(self, task: Dict[str, Any], title: str, text: str):
         """
-        发送通知消息 (修复: 重新添加此方法)
+        发送通知消息
         """
         if self._notify:
             self.post_message(
@@ -802,157 +795,142 @@ class OpenlistMover(_PluginBase):
 
     def _check_move_tasks(self):
         """
-        定期检查 Openlist 移动任务的状态，并将耗时操作移出 task_lock 保护范围。
+        定期检查 Openlist 移动任务的状态，并处理清空逻辑
         """
         logger.debug("开始检查 Openlist 移动任务状态...")
         
-        # {task_id: task_object_copy} 存储需要 API 查询的任务副本
-        tasks_for_api = {}
-        # {task_id: {'state': int, 'error': str, 'strm_status': str, 'strm_executed': bool}} 存储 API 结果
-        api_results = {} 
+        # 临时列表，用于存储在当前检查周期需要更新状态的任务
+        tasks_to_update = []
         
-        tasks_to_clear_api = False
-
-        # --- Phase 1: Quick Lock (识别需要查询的任务，处理本地超时) ---
         with task_lock:
-            temp_move_tasks = []
-            
+            # 遍历所有任务，找出需要处理的活跃任务
             for task in self._move_tasks:
                 if task['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]:
-                    # 检查本地超时
-                    if (datetime.now() - task['start_time']).total_seconds() > self._max_task_duration:
-                        task['status'] = TASK_STATUS_FAILED
-                        task['error'] = f"任务超时 ({int(self._max_task_duration / 60)} 分钟)"
-                        # 通知将在 Phase 3 中，锁释放后发送
-                        logger.error(f"Openlist 移动任务 {task['id']} 超时")
-                        # 保持在列表中，以便在 Phase 3 中处理通知和清空逻辑
-                    else:
-                        # 任务未超时，需要 API 查询
-                        tasks_for_api[task['id']] = task.copy()
-                
-                temp_move_tasks.append(task)
-            
-            # self._move_tasks 已经包含了本地超时的更新，但尚未包含 API 更新。
-            self._move_tasks = temp_move_tasks
-            
-        # --- Phase 2: Lock Out (执行 API 查询 和 STRM 阻塞操作) ---
+                    tasks_to_update.append(task)
         
-        for task_id, task_copy in tasks_for_api.items():
+        # 在锁外执行网络请求和耗时操作
+        for task in tasks_to_update:
+            # 检查超时 (需要在锁内更新状态，但我们现在只是检查时间)
+            if (datetime.now() - task['start_time']).total_seconds() > self._max_task_duration:
+                # 再次获取锁并更新状态
+                with task_lock:
+                    task['status'] = TASK_STATUS_FAILED
+                    task['error'] = f"任务超时 ({int(self._max_task_duration / 60)} 分钟)"
+                    logger.error(f"Openlist 移动任务 {task['id']} 超时")
+                self._send_task_notification(task, "Openlist 移动超时", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：任务超时")
+                continue
+
+            # 查询状态 (网络请求，在锁外)
             try:
-                # 1. 查询状态 (耗时网络调用，不在锁内)
-                task_info = self._call_openlist_task_api(task_id)
+                task_info = self._call_openlist_task_api(task['id'])
                 
-                new_status = task_info.get('state')
+                new_status = task_info.get('state') # state: 0-等待中, 1-进行中, 2-成功, 3-失败
                 error_msg = task_info.get('error')
-                strm_status = '未执行'
-
-                if new_status == TASK_STATUS_SUCCESS:
-                    # 2. 任务成功后处理 STRM (包含 time.sleep 等阻塞，不在锁内)
-                    task_copy['strm_status'] = '开始处理'
-                    self._process_strm_creation(task_copy) # _process_strm_creation 会更新 task_copy['strm_status']
-                    strm_status = task_copy.get('strm_status')
-                elif new_status == TASK_STATUS_FAILED:
-                    strm_status = '跳过'
                 
-                api_results[task_id] = {
-                    'state': new_status, 
-                    'error': error_msg, 
-                    'strm_status': strm_status,
-                }
-
-            except Exception as e:
-                logger.error(f"查询 Openlist 任务 {task_id} 状态失败: {e}")
-                # 即使查询失败，仍视为 RUNNING，等待下一次查询
-                api_results[task_id] = {'state': TASK_STATUS_RUNNING, 'error': f"查询失败: {str(e)}", 'strm_status': '未执行'}
-
-
-        # --- Phase 3: Quick Lock (提交结果，执行清空逻辑) ---
-        
-        final_tasks_to_keep = []
-        
-        with task_lock:
-            # 1. 提交 API 查询结果到 self._move_tasks
-            for task in self._move_tasks:
-                task_id = task.get('id')
-                
-                if task_id in api_results:
-                    result = api_results[task_id]
-                    
-                    # 仅更新最终状态（SUCCESS/FAILED）或将状态从 WAITING 更新到 RUNNING
-                    if result['state'] in [TASK_STATUS_SUCCESS, TASK_STATUS_FAILED, TASK_STATUS_RUNNING]:
-                        # 只有当状态有变化时才执行后续操作
-                        if task['status'] != result['state']:
-                            task['status'] = result['state']
+                # 在锁内更新状态
+                with task_lock:
+                    if new_status == TASK_STATUS_SUCCESS and task['status'] != TASK_STATUS_SUCCESS:
+                        task['status'] = new_status
+                        task['strm_status'] = '开始处理' # 标记开始 STRM 流程
                         
-                        if result['state'] == TASK_STATUS_SUCCESS:
-                            # 增加成功计数和通知
-                            self._successful_moves_count += 1
-                            task['strm_status'] = result['strm_status'] # 从 Phase 2 结果中获取 STRM 状态
-                            
-                            is_wash_text = "(洗版)" if task.get("is_wash", False) else ""
-                            move_success_text = (
-                                f"✅ 文件移动成功 {is_wash_text}\n"
-                                f"🎬 视频文件：{task['dst_dir']}/{task['file']}\n"
-                                f"🔗 STRM状态：{task.get('strm_status', '未处理')}"
-                            )
-                            # 发送通知 (快速操作)
-                            self._send_task_notification(
-                                task,
-                                f"Openlist 移动完成 {is_wash_text}",
-                                move_success_text
-                            )
-                        elif result['state'] == TASK_STATUS_FAILED:
-                            # 失败和通知
-                            task['error'] = result['error'] if result['error'] else "Openlist 报告失败"
-                            # 发送通知 (快速操作)
-                            self._send_task_notification(task, "Openlist 移动失败", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：{task['error']}")
-                    
-                final_tasks_to_keep.append(task)
-            
-            self._move_tasks = final_tasks_to_keep
-            
-            # 2. 检查 API 任务清空阈值 (设置标志)
+                        # 增加成功计数
+                        self._successful_moves_count += 1
+                        
+                        # 任务成功后，启动一个新的线程来处理 STRM
+                        threading.Thread(
+                            target=self._process_strm_creation, 
+                            args=(task,)
+                        ).start()
+                        
+                    elif new_status == TASK_STATUS_FAILED and task['status'] != TASK_STATUS_FAILED:
+                        task['status'] = new_status
+                        task['error'] = error_msg if error_msg else "Openlist 报告失败"
+                        self._send_task_notification(task, "Openlist 移动失败", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：{task['error']}")
+                    elif new_status == TASK_STATUS_RUNNING:
+                        task['status'] = new_status
+                        
+            except Exception as e:
+                logger.error(f"查询 Openlist 任务 {task['id']} 状态失败: {e}")
+        
+        
+        # 任务清空逻辑 (在锁内执行)
+        with task_lock:
+            # 1. 检查 API 任务清空阈值
             if self._successful_moves_count >= self._clear_api_threshold:
-                tasks_to_clear_api = True # 设置标志
-            
-            # 3. 检查 插件面板 清空阈值 (内存操作，仍在锁内)
+                logger.info(f"成功移动任务达到 {self._clear_api_threshold} 次，准备清空 Openlist 任务 API 记录。")
+                
+                # 调用清空 Openlist API (网络请求，在锁内执行但通常很快)
+                self._call_openlist_clear_tasks_api("copy") 
+                self._call_openlist_clear_tasks_api("move") 
+                
+                logger.info(f"Openlist API 任务记录清空完毕。")
+
+
+            # 2. 检查 插件面板 清空阈值
             if self._successful_moves_count >= self._clear_panel_threshold:
                 logger.info(f"成功移动任务达到 {self._clear_panel_threshold} 次，准备清空插件面板成功记录，保留最新 {self._keep_successful_tasks} 条。")
                 
-                active_tasks_panel = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
-                failed_tasks_panel = [t for t in self._move_tasks if t['status'] == TASK_STATUS_FAILED]
+                tasks_to_keep = []
+                # 提取活跃任务和失败任务
+                tasks_to_keep.extend([t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]])
+                tasks_to_keep.extend([t for t in self._move_tasks if t['status'] == TASK_STATUS_FAILED])
 
+                # 提取所有成功任务并排序
                 successful_tasks = sorted(
                     [t for t in self._move_tasks if t['status'] == TASK_STATUS_SUCCESS],
                     key=lambda x: x['start_time'], reverse=True
                 )
                 
-                tasks_to_keep_panel = successful_tasks[:self._keep_successful_tasks]
-                self._move_tasks = active_tasks_panel + failed_tasks_panel + tasks_to_keep_panel
+                # 保留最新的成功任务
+                tasks_to_keep.extend(successful_tasks[:self._keep_successful_tasks])
                 
-                logger.info(f"插件面板成功记录清空完毕，保留 {len(tasks_to_keep_panel)} 条最新成功记录。")
+                self._move_tasks = tasks_to_keep
+                
+                logger.info(f"插件面板成功记录清空完毕，保留 {self._keep_successful_tasks} 条最新成功记录。")
 
-            # 4. 如果任一清空操作被触发，则重置计数器 (内存操作，仍在锁内)
+            # 3. 如果任一清空操作被触发，则重置计数器
             if self._successful_moves_count >= min(self._clear_api_threshold, self._clear_panel_threshold):
                  self._successful_moves_count = 0
                  logger.info("成功计数器已重置。")
 
+            
             logger.debug(f"Openlist Mover 任务检查完成，当前活跃任务数: {len([t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]])}")
+
+    def _update_task_strm_status(self, task_id: str, new_status: str, is_final: bool = False):
+        """
+        安全地更新任务列表中的 STRM 状态和发送通知。
+        """
+        with task_lock:
+            found_task = None
+            for task in self._move_tasks:
+                if task['id'] == task_id:
+                    task['strm_status'] = new_status
+                    found_task = task
+                    break
         
-        # --- Phase 4: Lock Out (执行 API 清空) ---
-        if tasks_to_clear_api:
-            logger.info(f"成功移动任务达到 {self._clear_api_threshold} 次，准备清空 Openlist 任务 API 记录。")
-            # 调用清空 Openlist API 中的成功任务 (耗时网络调用，不在锁内)
-            self._call_openlist_clear_tasks_api("copy") # 清空复制成功的任务 (Strm 任务)
-            self._call_openlist_clear_tasks_api("move") # 清空移动成功的任务
-            logger.info(f"Openlist API 任务记录清空完毕。")
+        # 仅在 STRM 流程最终完成后发送通知
+        if is_final and found_task:
+            is_wash_text = "(洗版)" if found_task.get("is_wash", False) else ""
+            move_success_text = (
+                f"✅ 文件移动成功 {is_wash_text}\n"
+                f"🎬 视频文件：{found_task['dst_dir']}/{found_task['file']}\n"
+                f"🔗 STRM状态：{new_status}"
+            )
+            self._send_task_notification(
+                found_task,
+                f"Openlist 移动完成 {is_wash_text}",
+                move_success_text
+            )
 
 
     def _process_strm_creation(self, task: Dict[str, Any]):
         """
         处理 STRM 文件生成和复制 (包含洗版逻辑)
-        此方法在 Openlist Mover 的调度线程中运行，不持有 task_lock，可以包含 time.sleep。
+        注意：此方法在独立线程中运行，不需要获取 task_lock，但需要通过 _update_task_strm_status 来更新状态。
         """
+        task_id = task['id']
+        self._update_task_strm_status(task_id, '开始执行 STRM 流程')
+        
         # 1. 查找 STRM 路径映射
         dst_dir = task['dst_dir']
         file_name_ext = task['file']
@@ -973,8 +951,8 @@ class OpenlistMover(_PluginBase):
                     best_match = dst_prefix
         
         if not best_match:
-            task['strm_status'] = '跳过 (无映射规则)'
-            logger.debug(f"任务 {task['id']} 移动成功，但未找到匹配的 STRM 映射规则，跳过 STRM 复制。")
+            self._update_task_strm_status(task_id, '跳过 (无映射规则)', is_final=True)
+            logger.debug(f"任务 {task_id} 移动成功，但未找到匹配的 STRM 映射规则，跳过 STRM 复制。")
             return
             
         try:
@@ -992,41 +970,48 @@ class OpenlistMover(_PluginBase):
             copy_src_dir = list_path
             copy_dst_dir = f"{strm_dst_prefix.rstrip('/')}/{relative_dir}"
             
-            logger.debug(f"任务 {task['id']} 成功，开始 STRM 处理:")
+            logger.debug(f"任务 {task_id} 成功，开始 STRM 处理:")
             logger.debug(f"  List 路径: {list_path}")
             logger.debug(f"  Copy 源: {copy_src_dir}")
             logger.debug(f"  Copy 目标: {copy_dst_dir}")
             logger.debug(f"  文件名: {strm_file_name}, {json_file_name}")
+            
+            self._update_task_strm_status(task_id, '删除旧 STRM 文件')
 
             # === 洗版逻辑：删除旧文件 ===
             if task.get("is_wash", False):
-                logger.debug(f"洗版：正在删除旧 STRM 文件于 {copy_dst_dir}...")
+                logger.info(f"洗版模式：任务 {task_id} 正在删除旧 STRM 文件于 {copy_dst_dir}...")
                 
                 names_to_delete = [strm_file_name, json_file_name]
                 
                 delete_success = self._call_openlist_remove_api(copy_dst_dir, names_to_delete)
                 
                 if delete_success:
-                    # 阻塞性等待 (不在 task_lock 内)
-                    logger.debug(f"旧 STRM 文件删除成功，{self._wash_delay_seconds} 秒后成功洗版")
-                    time.sleep(self._wash_delay_seconds)
+                    self._update_task_strm_status(task_id, f'删除成功，等待 {self._wash_delay_seconds} 秒')
+                    logger.info(f"旧 STRM 文件删除成功，等待 {self._wash_delay_seconds} 秒延迟...")
+                    # 关键：time.sleep 在锁外，不会阻塞 get_page()
+                    time.sleep(self._wash_delay_seconds) 
                 else:
                     logger.warning(f"旧 STRM 文件删除失败 (或文件不存在)，将继续尝试生成...")
             # =============================
 
+            self._update_task_strm_status(task_id, '调用 List API 生成 STRM')
+
             # 2. 调用 /api/fs/list 强制生成 .strm
             list_success = self._call_openlist_list_api(list_path)
             if not list_success:
-                task['strm_status'] = '失败 (List API 失败)'
-                logger.error(f"任务 {task['id']} STRM List API 失败，无法生成 .strm 文件。")
+                self._update_task_strm_status(task_id, '失败 (List API 失败)', is_final=True)
+                logger.error(f"任务 {task_id} STRM List API 失败，无法生成 .strm 文件。")
                 return
 
-            # 3. 稍作等待，确保 .strm 文件生成 (阻塞性等待，不在 task_lock 内)
+            self._update_task_strm_status(task_id, '等待 STRM 文件生成')
+
+            # 3. 稍作等待，确保 .strm 文件生成
             time.sleep(5)
             
+            self._update_task_strm_status(task_id, '调用 Copy API 复制 STRM')
+
             # 4. 调用 /api/fs/copy 复制 .strm 文件
-            # 注意：我们只复制 .strm 文件。json 文件是由 list 触发自动生成的，我们不需要 copy 它。
-            # 如果 json 文件也需要 copy，则 names 列表应包含两个
             copy_success = self._call_openlist_copy_api(
                 src_dir=copy_src_dir,
                 dst_dir=copy_dst_dir,
@@ -1034,15 +1019,15 @@ class OpenlistMover(_PluginBase):
             )
             
             if copy_success:
-                task['strm_status'] = '成功'
-                logger.debug(f"任务 {task['id']} STRM 文件复制成功：{strm_file_name} -> {copy_dst_dir}")
+                self._update_task_strm_status(task_id, '成功', is_final=True)
+                logger.debug(f"任务 {task_id} STRM 文件复制成功：{strm_file_name} -> {copy_dst_dir}")
             else:
-                task['strm_status'] = '失败 (Copy API 失败)'
-                logger.error(f"任务 {task['id']} STRM 文件复制失败。")
+                self._update_task_strm_status(task_id, '失败 (Copy API 失败)', is_final=True)
+                logger.error(f"任务 {task_id} STRM 文件复制失败。")
                 
         except Exception as e:
-            task['strm_status'] = f'失败 (异常: {str(e)})'
-            logger.error(f"任务 {task['id']} STRM 处理时发生异常: {e} - {traceback.format_exc()}")
+            self._update_task_strm_status(task_id, f'失败 (异常: {str(e)})', is_final=True)
+            logger.error(f"任务 {task_id} STRM 处理时发生异常: {e} - {traceback.format_exc()}")
 
 
     def _parse_path_mappings(self) -> Dict[str, Tuple[str, str]]:
@@ -1384,7 +1369,7 @@ class OpenlistMover(_PluginBase):
         # 针对模拟的任务ID进行特殊处理，以避免频繁失败
         if task_id.startswith('sim_task_'):
              # 模拟任务运行一段时间后成功
-             with task_lock: # 这里必须加锁，因为要访问 self._move_tasks，但 sim_task 很快就会成功，问题不大
+             with task_lock:
                 for task in self._move_tasks:
                     if task['id'] == task_id:
                         if (datetime.now() - task['start_time']).total_seconds() > 120:
@@ -1577,7 +1562,6 @@ class OpenlistMover(_PluginBase):
         """
         调用 Openlist API 清空成功任务 (/api/admin/task/{task_type}/clear_succeeded)
         task_type 应该是 'copy' 或 'move'
-        此方法在 Openlist Mover 的调度线程中运行，不持有 task_lock。
         """
         if task_type not in ["copy", "move"]:
             logger.error(f"无效的 Openlist 任务类型: {task_type}")
