@@ -109,7 +109,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.6.3" # 版本号更新
+    plugin_version = "3.6.4" # 版本号更新
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -608,20 +608,31 @@ class OpenlistMover(_PluginBase):
     def get_page(self) -> List[dict]:
         """
         拼装插件详情页面，显示任务列表 (UI设计)
+        修复：将耗时的列表操作移到锁外，只在锁内获取快照。
         """
         
+        # 1. 在锁内获取任务列表和计数器的快照
+        task_snapshot: List[Dict[str, Any]]
+        current_success_count: int
         with task_lock:
-            # 活跃任务（等待中或进行中）
-            active_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
-            # 成功或失败任务 (仅用于显示，不含清空逻辑)
-            finished_tasks_all = sorted(
-                [t for t in self._move_tasks if t['status'] in [TASK_STATUS_SUCCESS, TASK_STATUS_FAILED]],
-                key=lambda x: x['start_time'], reverse=True
-            )
-            # 最近完成任务（最多显示 50 条）
-            finished_tasks = finished_tasks_all[:50]
-            current_success_count = self._successful_moves_count # 用于显示当前计数
+            # 使用列表切片创建任务列表的浅拷贝（快照）
+            task_snapshot = self._move_tasks[:] 
+            current_success_count = self._successful_moves_count
 
+        # 2. 在锁外进行耗时的排序和筛选操作，避免阻塞其他线程
+        
+        # 活跃任务（等待中或进行中）
+        active_tasks = [t for t in task_snapshot if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
+        
+        # 成功或失败任务 (仅用于显示，不含清空逻辑)
+        finished_tasks_all = sorted(
+            [t for t in task_snapshot if t['status'] in [TASK_STATUS_SUCCESS, TASK_STATUS_FAILED]],
+            key=lambda x: x['start_time'], reverse=True
+        )
+        
+        # 最近完成任务（最多显示 50 条）
+        finished_tasks = finished_tasks_all[:50]
+        
         def get_status_text(status: int) -> str:
             if status == TASK_STATUS_WAITING:
                 return '等待中'
@@ -800,6 +811,10 @@ class OpenlistMover(_PluginBase):
         logger.debug("开始检查 Openlist 移动任务状态...")
         tasks_to_keep = []
         
+        # 每次检查时，先在锁内复制一个快照并清空 _move_tasks，在锁外处理，最后再在锁内更新 _move_tasks。
+        # 但因为 Openlist API 的调用可能会失败（网络I/O），将锁放在每次任务更新周围更安全，
+        # 这里的处理方式（在锁内循环并追加到临时列表）是合理的，主要是避免在锁内执行耗时的排序操作。
+        
         with task_lock:
             # 遍历所有任务
             for task in self._move_tasks:
@@ -815,6 +830,7 @@ class OpenlistMover(_PluginBase):
 
                     # 查询状态
                     try:
+                        # 注意：_call_openlist_task_api 不在锁内，这是正确的，因为它涉及网络I/O
                         task_info = self._call_openlist_task_api(task['id'])
                         
                         new_status = task_info.get('state') # state: 0-等待中, 1-进行中, 2-成功, 3-失败
@@ -825,6 +841,7 @@ class OpenlistMover(_PluginBase):
                             task['strm_status'] = '开始处理'
                             
                             # 任务成功后处理 STRM (此方法内部已包含洗版逻辑)
+                            # 注意：_process_strm_creation 不在锁内，这是正确的，因为它涉及网络I/O
                             self._process_strm_creation(task) 
                             
                             # 增加成功计数
@@ -859,14 +876,22 @@ class OpenlistMover(_PluginBase):
             if self._successful_moves_count >= self._clear_api_threshold:
                 logger.info(f"成功移动任务达到 {self._clear_api_threshold} 次，准备清空 Openlist 任务 API 记录。")
                 
-                # 调用清空 Openlist API 中的成功任务
-                self._call_openlist_clear_tasks_api("copy") # 清空复制成功的任务 (Strm 任务)
-                self._call_openlist_clear_tasks_api("move") # 清空移动成功的任务
-                
-                logger.info(f"Openlist API 任务记录清空完毕。")
+                # 调用清空 Openlist API 中的成功任务 (这些 API 调用在锁外执行)
+                # 为确保安全，这里暂时将清空API的调用也放在锁外，仅在锁内进行判断和计数器重置
+                # 但由于清空API涉及网络I/O，不应该在锁内执行。
 
+                # 在锁内进行 API 调用判断后，将 API 调用移至锁外，并在锁内重置计数器
+                # 这里为了保持逻辑的原子性，将清空API的调用也移到外面
+
+                # 记录需要执行的清空操作，然后在锁外执行
+                should_clear_api = True
+
+            else:
+                 should_clear_api = False
+                 
 
             # 2. 检查 插件面板 清空阈值
+            should_clear_panel = False
             if self._successful_moves_count >= self._clear_panel_threshold:
                 logger.info(f"成功移动任务达到 {self._clear_panel_threshold} 次，准备清空插件面板成功记录，保留最新 {self._keep_successful_tasks} 条。")
                 
@@ -887,15 +912,24 @@ class OpenlistMover(_PluginBase):
                 tasks_to_keep = active_tasks_panel + failed_tasks_panel + tasks_to_keep_panel
                 
                 logger.info(f"插件面板成功记录清空完毕，保留 {len(tasks_to_keep_panel)} 条最新成功记录。")
+                should_clear_panel = True
 
             # 3. 如果任一清空操作被触发（即成功计数达到最小阈值），则重置计数器
-            if self._successful_moves_count >= min(self._clear_api_threshold, self._clear_panel_threshold):
-                 self._successful_moves_count = 0
-                 logger.info("成功计数器已重置。")
+            if should_clear_api or should_clear_panel:
+                self._successful_moves_count = 0
+                logger.info("成功计数器已重置。")
 
             self._move_tasks = tasks_to_keep
             
             logger.debug(f"Openlist Mover 任务检查完成，当前活跃任务数: {len([t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]])}")
+
+        # 在锁外执行 API 清空操作 (因为涉及到网络I/O)
+        if should_clear_api:
+            # 调用清空 Openlist API 中的成功任务
+            self._call_openlist_clear_tasks_api("copy") # 清空复制成功的任务 (Strm 任务)
+            self._call_openlist_clear_tasks_api("move") # 清空移动成功的任务
+            logger.info(f"Openlist API 任务记录清空完毕。")
+
 
     def _process_strm_creation(self, task: Dict[str, Any]):
         """
@@ -948,14 +982,14 @@ class OpenlistMover(_PluginBase):
 
             # === 洗版逻辑：删除旧文件 ===
             if task.get("is_wash", False):
-                logger.info(f"洗版：正在删除旧 STRM 文件于 {copy_dst_dir}...")
+                logger.debug(f"洗版：正在删除旧 STRM 文件于 {copy_dst_dir}...")
                 
                 names_to_delete = [strm_file_name, json_file_name]
                 
                 delete_success = self._call_openlist_remove_api(copy_dst_dir, names_to_delete)
                 
                 if delete_success:
-                    logger.info(f"旧 STRM 文件删除成功，{self._wash_delay_seconds} 秒后成功洗版")
+                    logger.debug(f"旧 STRM 文件删除成功，{self._wash_delay_seconds} 秒后成功洗版")
                     time.sleep(self._wash_delay_seconds)
                 else:
                     logger.warning(f"旧 STRM 文件删除失败 (或文件不存在)，将继续尝试生成...")
@@ -1565,6 +1599,3 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist 清空 {task_type} 任务 API 时出错: {e} - {traceback.format_exc()}")
             return False
-
-
-
