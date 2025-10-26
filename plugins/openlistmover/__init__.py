@@ -115,7 +115,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.6.5" # 版本号更新
+    plugin_version = "3.6.6" # 版本号更新
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -135,8 +135,6 @@ class OpenlistMover(_PluginBase):
     _monitor_paths = ""
     _path_mappings = ""
     _strm_path_mappings = "" # 新增 strm 映射配置
-    _observer = []
-    _scheduler: Optional[BackgroundScheduler] = None
     
     # === 新增洗版配置 ===
     _wash_mode_enabled = False
@@ -827,6 +825,7 @@ class OpenlistMover(_PluginBase):
         定期检查 Openlist 移动任务的状态，并处理清空逻辑
         
         修复卡顿：将 STRM 处理（包含长阻塞 time.sleep）和 API 调用全部移出 task_lock 保护范围。
+        修复任务消失：在移动成功后，将任务立即添加到 tasks_to_keep 列表中。
         """
         logger.debug("开始检查 Openlist 移动任务状态...")
         
@@ -863,7 +862,6 @@ class OpenlistMover(_PluginBase):
                         task['status'] = TASK_STATUS_FAILED
                         task['error'] = f"任务超时 ({int(self._max_task_duration / 60)} 分钟)"
                         self._send_task_notification(task, "Openlist 移动超时", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：任务超时")
-                        logger.error(f"Openlist 移动任务 {task['id']} 超时")
                         tasks_to_keep.append(task)
                         continue
 
@@ -880,6 +878,7 @@ class OpenlistMover(_PluginBase):
                             task['status'] = new_status
                             task['strm_status'] = STRM_STATUS_PROCESSING # 立即更新状态，显示为处理中
                             current_successful_count += 1
+                            tasks_to_keep.append(task) # <<< 修复：将任务加入保留列表，防止 UI 消失
                         
                         newly_succeeded_tasks.append(task)
                         
