@@ -111,9 +111,9 @@ class OpenlistMover(_PluginBase):
     # 插件版本
     plugin_version = "3.6.8" # 版本号更新
     # 插件作者
-    plugin_author = "lyzd1"
+    plugin_author = "Lyzd1"
     # 作者主页
-    author_url = "https://github.com/lyzd1"
+    author_url = "https://github.com/Lyzd1"
     # 插件配置项ID前缀
     plugin_config_prefix = "openlistmover_"
     # 加载顺序
@@ -980,7 +980,7 @@ class OpenlistMover(_PluginBase):
 
             # === 洗版逻辑：删除旧文件 ===
             if task.get("is_wash", False):
-                logger.info(f"洗版模式：任务 {task_id} 正在删除旧 STRM 文件于 {copy_dst_dir}...")
+                logger.debug(f"洗版模式：任务 {task_id} 正在删除旧 STRM 文件于 {copy_dst_dir}...")
                 
                 names_to_delete = [strm_file_name, json_file_name]
                 
@@ -988,7 +988,7 @@ class OpenlistMover(_PluginBase):
                 
                 if delete_success:
                     self._update_task_strm_status(task_id, f'删除成功，等待 {self._wash_delay_seconds} 秒')
-                    logger.info(f"旧 STRM 文件删除成功，等待 {self._wash_delay_seconds} 秒延迟...")
+                    logger.debug(f"旧 STRM 文件删除成功，等待 {self._wash_delay_seconds} 秒延迟...")
                     # 关键：time.sleep 在锁外，不会阻塞 get_page()
                     time.sleep(self._wash_delay_seconds) 
                 else:
