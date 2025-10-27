@@ -109,7 +109,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.7.1" # 版本号更新
+    plugin_version = "3.7.2" # 版本号更新
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -861,7 +861,7 @@ class OpenlistMover(_PluginBase):
             # 1. 检查 API 任务清空阈值 (倍数触发)
             if self._successful_moves_count > 0 and self._clear_api_threshold > 0 and \
                self._successful_moves_count % self._clear_api_threshold == 0:
-                logger.info(f"成功移动任务达到 {self._successful_moves_count} 次，满足 Openlist API 任务清空阈值 ({self._clear_api_threshold} 的倍数)，准备清空 Openlist 任务 API 记录。")
+                logger.debug(f"成功移动任务达到 {self._successful_moves_count} 次，满足 Openlist API 任务清空阈值 ({self._clear_api_threshold} 的倍数)，准备清空 Openlist 任务 API 记录。")
                 
                 # 调用清空 Openlist API (网络请求，在锁内执行但通常很快)
                 self._call_openlist_clear_tasks_api("copy") 
@@ -873,7 +873,7 @@ class OpenlistMover(_PluginBase):
 
             # 2. 检查 插件面板 清空阈值 (达到设定值触发)
             if self._successful_moves_count >= self._clear_panel_threshold and self._clear_panel_threshold > 0:
-                logger.info(f"成功移动任务达到 {self._successful_moves_count} 次，满足插件面板清空阈值 ({self._clear_panel_threshold})，准备清空插件面板成功记录，保留最新 {self._keep_successful_tasks} 条。")
+                logger.debug(f"成功移动任务达到 {self._successful_moves_count} 次，满足插件面板清空阈值 ({self._clear_panel_threshold})，准备清空插件面板成功记录，保留最新 {self._keep_successful_tasks} 条。")
                 
                 tasks_to_keep = []
                 # 提取活跃任务和失败任务
@@ -1178,7 +1178,7 @@ class OpenlistMover(_PluginBase):
                     
                     # 文件大小稳定且大于0，认为文件就绪
                     if file_size == new_size and file_size > 0:
-                        logger.info(f"文件 {file_path} 已稳定，大小: {file_size} 字节")
+                        logger.debug(f"文件 {file_path} 已稳定，大小: {file_size} 字节")
                         file_ready = True
                         break
                     else:
@@ -1583,8 +1583,8 @@ class OpenlistMover(_PluginBase):
         try:
             req = urllib.request.Request(api_url, headers=headers, method="POST")
 
-            # 日志级别调整为 INFO
-            logger.info(f"调用 Openlist 清空 {task_type} 任务 API: {api_url}")
+            # 日志级别调整为 debug
+            logger.debug(f"调用 Openlist 清空 {task_type} 任务 API: {api_url}")
 
             with urllib.request.urlopen(req, timeout=30) as response:
                 response_body = response.read().decode("utf-8")
@@ -1593,7 +1593,7 @@ class OpenlistMover(_PluginBase):
                 if response_code == 200:
                     response_data = json.loads(response_body)
                     if response_data.get("code") == 200:
-                        logger.info(f"Openlist {task_type.capitalize()} 成功任务记录清空成功。")
+                        logger.debug(f"Openlist {task_type.capitalize()} 成功任务记录清空成功。")
                         return True
                     else:
                         error_msg = response_data.get('message', '未知错误')
@@ -1609,3 +1609,4 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist 清空 {task_type} 任务 API 时出错: {e} - {traceback.format_exc()}")
             return False
+
