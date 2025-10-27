@@ -78,7 +78,7 @@ class NewFileMonitorHandler(FileSystemEventHandler):
     def _process_event(self, file_path: Path):
         """处理文件事件"""
         if self._is_target_file(file_path):
-            logger.info(f"监测到新视频文件：{file_path}")
+            logger.debug(f"监测到新视频文件：{file_path}")
             # 使用线程处理，避免阻塞监控
             # 重复检查的逻辑移至 process_new_file 中，因为它在线程内
             threading.Thread(
@@ -1217,7 +1217,7 @@ class OpenlistMover(_PluginBase):
             task_started = False
             
             if task_id:
-                logger.info(f"启动移动任务:  {name} 从 {src_dir} 到 {dst_dir}")
+                logger.info(f"移动任务:  {name} 移动到 {dst_dir}")
                 task_started = True
                 
             # 4. 检查是否需要洗版
@@ -1229,7 +1229,7 @@ class OpenlistMover(_PluginBase):
                 task_id, err_code, err_msg, is_wash = self._call_openlist_move_api(payload, is_wash=True)
                 
                 if task_id:
-                    logger.info(f"启动洗版移动任务: {name} (覆盖) 到 {dst_dir}")
+                    logger.info(f"洗版移动任务: {name} (覆盖) 到 {dst_dir}")
                     task_started = True
                 else:
                     logger.error(f"Openlist API 洗版移动失败: {name} (Code: {err_code}, Msg: {err_msg})")
@@ -1609,4 +1609,5 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist 清空 {task_type} 任务 API 时出错: {e} - {traceback.format_exc()}")
             return False
+
 
