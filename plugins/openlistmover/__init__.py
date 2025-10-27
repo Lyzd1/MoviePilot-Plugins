@@ -109,7 +109,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.6.9" # 版本号更新
+    plugin_version = "3.7.0" # 版本号更新
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -605,6 +605,336 @@ class OpenlistMover(_PluginBase):
             # ======================
         }
 
+    def get_state(self) -> bool:
+        return self._enabled
+
+    @staticmethod
+    def get_command() -> List[Dict[str, Any]]:
+        pass
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        pass
+
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        return [
+            {
+                "component": "VForm",
+                "content": [
+                    {
+                        "component": "VAlert",
+                        "props": {
+                            "type": "info",
+                            "variant": "tonal",
+                            "title": "Openlist 视频文件移动",
+                            "text": "本插件监控本地目录。当有新视频文件生成时，它会自动通过 Openlist API 将其移动到指定的云盘目录。这要求 Openlist 已经挂载了该本地目录作为存储。",
+                        },
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "enabled", "label": "启用插件"},
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "notify", "label": "发送通知"},
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    # Openlist API 配置
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "warning",
+                                            "variant": "tonal",
+                                            "title": "Openlist API 配置",
+                                            "text": "用于调用 Openlist 移动文件 API。URL 必须包含 http/https 协议头。",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "openlist_url",
+                                            "label": "Openlist URL",
+                                            "placeholder": "例如: http://127.0.0.1:5244",
+                                        },
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "openlist_token",
+                                            "label": "Openlist Token",
+                                            "type": "password",
+                                            "placeholder": "Openlist 管理员 Token",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # 监控和映射配置
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "monitor_paths",
+                                            "label": "本地监控目录",
+                                            "rows": 4,
+                                            "placeholder": "填写 MoviePilot 可以访问到的绝对路径，每行一个\n例如：/downloads/watch",
+                                        },
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "path_mappings",
+                                            "label": "文件移动路径映射 (本地:Openlist源:Openlist目标)",
+                                            "rows": 6,
+                                            "placeholder": "格式：本地监控目录:Openlist源目录:Openlist目标目录\n每行一条规则\n\n例如：\n/downloads/watch:/Local/watch:/YP/Video\n\n说明：\n当本地监控到 /downloads/watch/电影/S01/E01.mkv\nOpenlist 将会执行移动：\n源：/Local/watch/电影/S01/E01.mkv\n目标：/YP/Video/电影/S01/E01.mkv",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # STRM 复制配置 (新增)
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "strm_path_mappings",
+                                            "label": "STRM 复制路径映射 (Openlist目标:Strm源:Strm本地目标)",
+                                            "rows": 4,
+                                            "placeholder": "格式：Openlist目标目录前缀:Strm驱动源目录前缀:Strm本地目标目录前缀\n每行一条规则\n\n例如：\n/YP/Video:/strm139:/strm\n\n说明：\n当文件成功移动到 /YP/Video/... 后，\n1. 插件将 list /strm139/... 触发 .strm 文件生成。\n2. 插件将 .strm 文件从 /strm139/... 复制到 /strm/...",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # === 新增洗版配置 ===
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "title": "洗版模式配置",
+                                            "text": "当开启后，如果移动时发现目标文件已存在 (403 exists)，将自动使用覆盖模式 (overwrite: true) 重新移动。洗版成功后，会先删除旧的 STRM 文件，等待指定延迟后再重新生成。",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "wash_mode_enabled", "label": "启用洗版模式"},
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "wash_delay_seconds",
+                                            "label": "洗版延迟 (秒)",
+                                            "type": "number",
+                                            "min": 0,
+                                            "placeholder": "默认 60 (删除旧STRM后等待60秒再生效)",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # =================================
+                    # === 新增任务清空配置 ===
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "title": "任务记录自动清空配置",
+                                            "text": "成功完成的移动任务达到设定次数后，将自动清空 Openlist 任务队列记录或插件面板记录。清空后，计数器将重置。",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "clear_api_threshold",
+                                            "label": "清空Openlist任务API阈值 (次)",
+                                            "type": "number",
+                                            "min": 1,
+                                            "placeholder": "默认 10 (成功 10 次清空 Openlist 任务队列)",
+                                        },
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "clear_panel_threshold",
+                                            "label": "清空面板成功记录阈值 (次)",
+                                            "type": "number",
+                                            "min": 1,
+                                            "placeholder": "默认 30 (成功 30 次清空面板成功记录)",
+                                        },
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "keep_successful_tasks",
+                                            "label": "清空面板时保留数量",
+                                            "type": "number",
+                                            "min": 0,
+                                            "placeholder": "默认 3 (清空时保留最新的 3 条成功记录)",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # =================================
+                    {
+                        "component": "VAlert",
+                        "props": {
+                            "type": "info",
+                            "variant": "tonal",
+                            "title": "工作流程说明",
+                            "text": "1. 插件监控 '本地监控目录'。\n2. 成功移动到 'Openlist目标目录' 后，插件将根据 STRM 映射进行后续操作。\n3. STRM 映射旨在将云盘目标路径 (e.g., /YP/Video) 转换为 Strm 驱动路径 (e.g., /strm139) 用于 list/copy，并将 Strm 驱动路径复制到本地 Strm 目录 (e.g., /strm)。",
+                        },
+                    },
+                ],
+            }
+        ], {
+            "enabled": False,
+            "notify": False,
+            "openlist_url": "",
+            "openlist_token": "",
+            "monitor_paths": "",
+            "path_mappings": "",
+            "strm_path_mappings": "", # 新增默认值
+            # === 新增配置默认值 ===
+            "wash_mode_enabled": False,
+            "wash_delay_seconds": 60,
+            "clear_api_threshold": 10,
+            "clear_panel_threshold": 30,
+            "keep_successful_tasks": 3
+            # ======================
+        }
+
+    def get_state(self) -> bool:
+        return self._enabled
+
+    @staticmethod
+    def get_command() -> List[Dict[str, Any]]:
+        pass
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        pass
+
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        pass
+
     def get_page(self) -> List[dict]:
         """
         拼装插件详情页面，显示任务列表 (UI设计)
@@ -855,9 +1185,13 @@ class OpenlistMover(_PluginBase):
         
         # 任务清空逻辑 (在锁内执行)
         with task_lock:
-            # 1. 检查 API 任务清空阈值
-            if self._successful_moves_count >= self._clear_api_threshold:
-                logger.info(f"成功移动任务达到 {self._clear_api_threshold} 次，准备清空 Openlist 任务 API 记录。")
+            # 1. 检查 API 任务清空阈值 - 只有在达到阈值的倍数时才触发
+            # 确保阈值 > 0，且当前计数 > 0，且是阈值的倍数
+            if self._clear_api_threshold > 0 and \
+               self._successful_moves_count > 0 and \
+               self._successful_moves_count % self._clear_api_threshold == 0:
+                
+                logger.info(f"成功移动任务达到 {self._successful_moves_count} 次 ({self._clear_api_threshold} 的倍数)，准备清空 Openlist 任务 API 记录。")
                 
                 # 调用清空 Openlist API (网络请求，在锁内执行但通常很快)
                 self._call_openlist_clear_tasks_api("copy") 
@@ -866,7 +1200,7 @@ class OpenlistMover(_PluginBase):
                 logger.info(f"Openlist API 任务记录清空完毕。")
 
 
-            # 2. 检查 插件面板 清空阈值
+            # 2. 检查 插件面板 清空阈值 (并在此处重置计数器)
             if self._successful_moves_count >= self._clear_panel_threshold:
                 logger.info(f"成功移动任务达到 {self._clear_panel_threshold} 次，准备清空插件面板成功记录，保留最新 {self._keep_successful_tasks} 条。")
                 
@@ -887,11 +1221,10 @@ class OpenlistMover(_PluginBase):
                 self._move_tasks = tasks_to_keep
                 
                 logger.info(f"插件面板成功记录清空完毕，保留 {self._keep_successful_tasks} 条最新成功记录。")
-
-            # 3. 如果任一清空操作被触发，则重置计数器
-            if self._successful_moves_count >= min(self._clear_api_threshold, self._clear_panel_threshold):
-                 self._successful_moves_count = 0
-                 logger.info("成功计数器已重置。")
+                
+                # 3. 只有达到面板阈值时才重置计数器
+                self._successful_moves_count = 0
+                logger.info("成功计数器已重置。")
 
             
             logger.debug(f"Openlist Mover 任务检查完成，当前活跃任务数: {len([t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]])}")
@@ -1603,4 +1936,3 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist 清空 {task_type} 任务 API 时出错: {e} - {traceback.format_exc()}")
             return False
-
