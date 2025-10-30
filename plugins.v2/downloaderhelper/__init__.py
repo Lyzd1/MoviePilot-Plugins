@@ -36,11 +36,11 @@ class DownloaderHelper(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/hotlcc/MoviePilot-Plugins-Third/main/icons/DownloaderHelper.png"
     # 插件版本
-    plugin_version = "4.0.4"
+    plugin_version = "5.0"
     # 插件作者
-    plugin_author = "hotlcc"
+    plugin_author = "Lyzd1,hotlcc"
     # 作者主页
-    author_url = "https://github.com/hotlcc"
+    author_url = "https://github.com/Lyzd1"
     # 插件配置项ID前缀
     plugin_config_prefix = "com.hotlcc.downloaderhelper."
     # 加载顺序
