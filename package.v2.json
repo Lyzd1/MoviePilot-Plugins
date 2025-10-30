@@ -1,22 +1,4 @@
 {
-    "DownloaderHelper": {
-        "name": "下载器助手",
-        "description": "自动标签、自动做种、自动删种。",
-        "labels": "下载管理,仪表板",
-        "version": "5.0",
-        "release": true,
-        "icon": "https://raw.githubusercontent.com/hotlcc/MoviePilot-Plugins-Third/main/icons/DownloaderHelper.png",
-        "author": "hotlcc",
-        "level": 1,
-        "history": {
-            "v5.0": "修正多Tracker域名解析，取消PT BT标签",
-            "v4.0.4": "修正Tracker域名解析缺陷。",
-            "v4.0.3": "修复活动种子仪表板报错的问题。",
-            "v4.0.2": "修正活动种子仪表板状态显示。",
-            "v4.0.1": "支持配置【事件删种策略】。更新后可能需要重启MP！",
-            "v4.0": "适配 MoviePilot V2。"
-        }
-    },
     "DownloadSiteTag": {
         "name": "下载任务分类与标签",
         "description": "自动给下载任务分类与打站点标签、剧集名称标签",
