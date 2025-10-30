@@ -1,22 +1,21 @@
 import datetime
+import pytz
 import threading
 from typing import List, Tuple, Dict, Any, Optional
 
-import pytz
-from app.helper.sites import SitesHelper
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
-
-from app.core.config import settings
 from app.core.context import Context
 from app.core.event import eventmanager, Event
-from app.db.downloadhistory_oper import DownloadHistoryOper
-from app.db.models.downloadhistory import DownloadHistory
-from app.helper.downloader import DownloaderHelper
+from app.schemas.types import EventType, MediaType
+from app.core.config import settings
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas import ServiceInfo
-from app.schemas.types import EventType, MediaType
+from app.modules.qbittorrent import Qbittorrent
+from app.modules.transmission import Transmission
+from app.db.downloadhistory_oper import DownloadHistoryOper
+from app.db.models.downloadhistory import DownloadHistory
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+from app.helper.sites import SitesHelper
 from app.utils.string import StringUtils
 
 
@@ -32,7 +31,7 @@ class DownloadSiteTag(_PluginBase):
     # 插件作者
     plugin_author = "Lyzd1,叮叮当"
     # 作者主页
-    author_url = "https://github.com/Lyzd1"
+    author_url = "https://github.com/cikezhu"
     # 插件配置项ID前缀
     plugin_config_prefix = "DownloadSiteTag_"
     # 加载顺序
@@ -45,9 +44,10 @@ class DownloadSiteTag(_PluginBase):
     # 退出事件
     _event = threading.Event()
     # 私有属性
+    downloader_qb = None
+    downloader_tr = None
     downloadhistory_oper = None
     sites_helper = None
-    downloader_helper = None
     _scheduler = None
     _enabled = False
     _onlyonce = False
@@ -61,11 +61,11 @@ class DownloadSiteTag(_PluginBase):
     _category_movie = None
     _category_tv = None
     _category_anime = None
-    _downloaders = None
 
     def init_plugin(self, config: dict = None):
+        self.downloader_qb = Qbittorrent()
+        self.downloader_tr = Transmission()
         self.downloadhistory_oper = DownloadHistoryOper()
-        self.downloader_helper = DownloaderHelper()
         self.sites_helper = SitesHelper()
         # 读取配置
         if config:
@@ -81,7 +81,14 @@ class DownloadSiteTag(_PluginBase):
             self._category_movie = config.get("category_movie") or "电影"
             self._category_tv = config.get("category_tv") or "电视"
             self._category_anime = config.get("category_anime") or "动漫"
-            self._downloaders = config.get("downloaders")
+            if not ("interval_cron" in config):
+                # 新版本v1.6更新插件配置默认配置
+                config["interval"] = self._interval
+                config["interval_cron"] = self._interval_cron
+                config["interval_time"] = self._interval_time
+                config["interval_unit"] = self._interval_unit
+                self.update_config(config)
+                logger.warn(f"{self.LOG_TAG}新版本v{self.plugin_version} 配置修正 ...")
 
         # 停止现有任务
         self.stop_service()
@@ -103,33 +110,6 @@ class DownloadSiteTag(_PluginBase):
                 # 启动服务
                 self._scheduler.print_jobs()
                 self._scheduler.start()
-
-    @property
-    def service_infos(self) -> Optional[Dict[str, ServiceInfo]]:
-        """
-        服务信息
-        """
-        if not self._downloaders:
-            logger.warning("尚未配置下载器，请检查配置")
-            return None
-
-        services = self.downloader_helper.get_services(name_filters=self._downloaders)
-        if not services:
-            logger.warning("获取下载器实例失败，请检查配置")
-            return None
-
-        active_services = {}
-        for service_name, service_info in services.items():
-            if service_info.instance.is_inactive():
-                logger.warning(f"下载器 {service_name} 未连接，请检查配置")
-            else:
-                active_services[service_name] = service_info
-
-        if not active_services:
-            logger.warning("没有已连接的下载器，请检查配置")
-            return None
-
-        return active_services
 
     def get_state(self) -> bool:
         return self._enabled
@@ -199,8 +179,6 @@ class DownloadSiteTag(_PluginBase):
         """
         补全下载历史的标签与分类
         """
-        if not self.service_infos:
-            return
         logger.info(f"{self.LOG_TAG}开始执行 ...")
         # 记录处理的种子, 供辅种(无下载历史)使用
         dispose_history = {}
@@ -214,26 +192,21 @@ class DownloadSiteTag(_PluginBase):
             "agsvpt.trackers.work": "agsvpt.com",
             "tracker.cinefiles.info": "audiences.me",
         }
-        for service in self.service_infos.values():
-            downloader = service.name
-            downloader_obj = service.instance
-            logger.info(f"{self.LOG_TAG}开始扫描下载器 {downloader} ...")
-            if not downloader_obj:
-                logger.error(f"{self.LOG_TAG} 获取下载器失败 {downloader}")
-                continue
+        for DOWNLOADER in ["qbittorrent", "transmission"]:
+            logger.info(f"{self.LOG_TAG}开始扫描下载器 {DOWNLOADER} ...")
             # 获取下载器中的种子
+            downloader_obj = self._get_downloader(DOWNLOADER)
+            if not downloader_obj:
+                logger.error(f"{self.LOG_TAG} 获取下载器失败 {DOWNLOADER}")
+                continue
             torrents, error = downloader_obj.get_torrents()
             # 如果下载器获取种子发生错误 或 没有种子 则跳过
             if error or not torrents:
                 continue
-            
-            # --- DEBUG LOGGING ---
-            logger.debug(f"{self.LOG_TAG}按时间重新排序 {downloader} 种子数：{len(torrents)}")
+            logger.info(f"{self.LOG_TAG}按时间重新排序 {DOWNLOADER} 种子数：{len(torrents)}")
             # 按添加时间进行排序, 时间靠前的按大小和名称加入处理历史, 判定为原始种子, 其他为辅种
-            torrents = self._torrents_sort(torrents=torrents, dl_type=service.type)
-            logger.debug(f"{self.LOG_TAG}下载器 {downloader} 分析种子信息中 ...")
-            # --- DEBUG LOGGING END ---
-
+            torrents = self._torrents_sort(torrents=torrents, dl_type=DOWNLOADER)
+            logger.info(f"{self.LOG_TAG}下载器 {DOWNLOADER} 分析种子信息中 ...")
             for torrent in torrents:
                 try:
                     if self._event.is_set():
@@ -241,16 +214,14 @@ class DownloadSiteTag(_PluginBase):
                             f"{self.LOG_TAG}停止服务")
                         return
                     # 获取已处理种子的key (size, name)
-                    _key = self._torrent_key(torrent=torrent, dl_type=service.type)
+                    _key = self._torrent_key(torrent=torrent, dl_type=DOWNLOADER)
                     # 获取种子hash
-                    _hash = self._get_hash(torrent=torrent, dl_type=service.type)
+                    _hash = self._get_hash(torrent=torrent, dl_type=DOWNLOADER)
                     if not _hash:
-                        logger.debug(f"{self.LOG_TAG}跳过种子：无法获取Hash或Key。")
                         continue
-                        
                     # 获取种子当前标签
-                    torrent_tags = self._get_label(torrent=torrent, dl_type=service.type)
-                    torrent_cat = self._get_category(torrent=torrent, dl_type=service.type)
+                    torrent_tags = self._get_label(torrent=torrent, dl_type=DOWNLOADER)
+                    torrent_cat = self._get_category(torrent=torrent, dl_type=DOWNLOADER)
                     # 提取种子hash对应的下载历史
                     history: DownloadHistory = self.downloadhistory_oper.get_by_hash(_hash)
                     if not history:
@@ -265,21 +236,12 @@ class DownloadSiteTag(_PluginBase):
                         # 加入历史记录
                         if _key:
                             dispose_history[_key] = history
-                    
-                    # --- DEBUG LOGGING ---
-                    logger.debug(f"{self.LOG_TAG}种子Hash: {_hash} | 种子名称: {self._get_name(torrent, service.type)} | 当前标签: {torrent_tags} | 历史站点: {history.torrent_site}")
-                    # --- DEBUG LOGGING END ---
-
                     # 如果标签已经存在任意站点, 则不再添加站点标签
-                    intersection_tags = indexers.intersection(set(torrent_tags))
-                    if intersection_tags:
-                        # --- DEBUG LOGGING ---
-                        logger.debug(f"{self.LOG_TAG}种子Hash: {_hash} | 跳过识别：已包含站点标签 {intersection_tags}。")
-                        # --- DEBUG LOGGING END ---
+                    if indexers.intersection(set(torrent_tags)):
                         history.torrent_site = None
                     # 如果站点名称为空, 尝试通过trackers识别
                     elif not history.torrent_site:
-                        trackers = self._get_trackers(torrent=torrent, dl_type=service.type)
+                        trackers = self._get_trackers(torrent=torrent, dl_type=DOWNLOADER)
                         for tracker in trackers:
                             # 检查tracker是否包含特定的关键字，并进行相应的映射
                             for key, mapped_domain in tracker_mappings.items():
@@ -291,17 +253,10 @@ class DownloadSiteTag(_PluginBase):
                             site_info = self.sites_helper.get_indexer(domain)
                             if site_info:
                                 history.torrent_site = site_info.get("name")
-                                # --- DEBUG LOGGING ---
-                                logger.debug(f"{self.LOG_TAG}种子Hash: {_hash} | Tracker识别成功：站点 {history.torrent_site}。")
-                                # --- DEBUG LOGGING END ---
                                 break
                         # 如果通过tracker还是无法获取站点名称, 且tmdbid, type, title都是空的, 那么跳过当前种子
                         if not history.torrent_site and not history.tmdbid and not history.type and not history.title:
-                            # --- DEBUG LOGGING ---
-                            logger.debug(f"{self.LOG_TAG}种子Hash: {_hash} | 跳过识别：Tracker识别失败，且历史中无媒体信息可补全。")
-                            # --- DEBUG LOGGING END ---
                             continue
-                        
                     # 按设置生成需要写入的标签与分类
                     _tags = []
                     _cat = None
@@ -312,7 +267,7 @@ class DownloadSiteTag(_PluginBase):
                     if self._enabled_media_tag and history.title:
                         _tags.append(history.title)
                     # 分类, 如果勾选开关的话 <tr暂不支持> 因允许mtype为空时运行到此, 因此需要判断mtype不为空。为防止不必要的识别, 种子已经存在分类torrent_cat时 也不执行
-                    if service.type == "qbittorrent" and self._enabled_category and not torrent_cat and history.type:
+                    if DOWNLOADER == "qbittorrent" and self._enabled_category and not torrent_cat and history.type:
                         # 如果是电视剧 需要区分是否动漫
                         genre_ids = None
                         # 因允许tmdbid为空时运行到此, 因此需要判断tmdbid不为空
@@ -330,16 +285,11 @@ class DownloadSiteTag(_PluginBase):
                     # 如果分类一样, 那么不需要修改
                     if _cat == torrent_cat:
                         _cat = None
-                        
                     # 判断当前种子是否不需要修改
                     if not _cat and not _tags:
-                        # --- DEBUG LOGGING ---
-                        logger.debug(f"{self.LOG_TAG}种子Hash: {_hash} | 跳过：标签与分类无需更新。")
-                        # --- DEBUG LOGGING END ---
                         continue
-                        
                     # 执行通用方法, 设置种子标签与分类
-                    self._set_torrent_info(service=service, _hash=_hash, _torrent=torrent, _tags=_tags, _cat=_cat,
+                    self._set_torrent_info(DOWNLOADER=DOWNLOADER, _hash=_hash, _torrent=torrent, _tags=_tags, _cat=_cat,
                                            _original_tags=torrent_tags)
                 except Exception as e:
                     logger.error(
@@ -365,6 +315,17 @@ class DownloadSiteTag(_PluginBase):
                 # 电视剧
                 _cat = self._category_tv
         return _cat
+
+    def _get_downloader(self, dtype: str):
+        """
+        根据类型返回下载器实例
+        """
+        if dtype == "qbittorrent":
+            return self.downloader_qb
+        elif dtype == "transmission":
+            return self.downloader_tr
+        else:
+            return None
 
     @staticmethod
     def _torrent_key(torrent: Any, dl_type: str) -> Optional[Tuple[int, str]]:
@@ -400,17 +361,6 @@ class DownloadSiteTag(_PluginBase):
         """
         try:
             return torrent.get("hash") if dl_type == "qbittorrent" else torrent.hashString
-        except Exception as e:
-            print(str(e))
-            return ""
-
-    @staticmethod
-    def _get_name(torrent: Any, dl_type: str):
-        """
-        获取种子name
-        """
-        try:
-            return torrent.get("name") if dl_type == "qbittorrent" else torrent.name
         except Exception as e:
             print(str(e))
             return ""
@@ -482,16 +432,15 @@ class DownloadSiteTag(_PluginBase):
             print(str(e))
             return None
 
-    def _set_torrent_info(self, service: ServiceInfo, _hash: str, _torrent: Any = None, _tags=None, _cat: str = None,
+    def _set_torrent_info(self, DOWNLOADER: str, _hash: str, _torrent: Any = None, _tags=None, _cat: str = None,
                           _original_tags: list = None):
         """
         设置种子标签与分类
         """
-        if not service or not service.instance:
-            return
+        # 当前下载器
         if _tags is None:
             _tags = []
-        downloader_obj = service.instance
+        downloader_obj = self._get_downloader(DOWNLOADER)
         if not _torrent:
             _torrent, error = downloader_obj.get_torrents(ids=_hash)
             if not _torrent or error:
@@ -502,12 +451,9 @@ class DownloadSiteTag(_PluginBase):
                 f"{self.LOG_TAG}设置种子标签与分类: {_hash} 查询到 {len(_torrent)} 个种子")
             _torrent = _torrent[0]
         # 判断是否可执行
-        if _hash and _torrent:
-            # --- DEBUG LOGGING ---
-            logger.debug(f"{self.LOG_TAG}种子Hash: {_hash} | 准备设置标签: {_tags} | 分类: {_cat} | 原始标签: {_original_tags}")
-            # --- DEBUG LOGGING END ---
+        if DOWNLOADER and downloader_obj and _hash and _torrent:
             # 下载器api不通用, 因此需分开处理
-            if service.type == "qbittorrent":
+            if DOWNLOADER == "qbittorrent":
                 # 设置标签
                 if _tags:
                     downloader_obj.set_torrents_tag(ids=_hash, tags=_tags)
@@ -517,7 +463,7 @@ class DownloadSiteTag(_PluginBase):
                     try:
                         _torrent.setCategory(category=_cat)
                     except Exception as e:
-                        logger.warn(f"下载器 {service.name} 种子id: {_hash} 设置分类 {_cat} 失败：{str(e)}, "
+                        logger.warn(f"下载器 {DOWNLOADER} 种子id: {_hash} 设置分类 {_cat} 失败：{str(e)}, "
                                     f"尝试创建分类再设置 ...")
                         downloader_obj.qbc.torrents_createCategory(name=_cat)
                         _torrent.setCategory(category=_cat)
@@ -526,16 +472,16 @@ class DownloadSiteTag(_PluginBase):
                 if _tags:
                     # _original_tags = None表示未指定, 因此需要获取原始标签
                     if _original_tags is None:
-                        _original_tags = self._get_label(torrent=_torrent, dl_type=service.type)
+                        _original_tags = self._get_label(torrent=_torrent, dl_type=DOWNLOADER)
                     # 如果原始标签不是空的, 那么合并原始标签
                     if _original_tags:
                         _tags = list(set(_original_tags).union(set(_tags)))
                     downloader_obj.set_torrent_tag(ids=_hash, tags=_tags)
             logger.warn(
-                f"{self.LOG_TAG}下载器: {service.name} 种子id: {_hash} {('  标签: ' + ','.join(_tags)) if _tags else ''} {('  分类: ' + _cat) if _cat else ''}")
+                f"{self.LOG_TAG}下载器: {DOWNLOADER} 种子id: {_hash} {('  标签: ' + ','.join(_tags)) if _tags else ''} {('  分类: ' + _cat) if _cat else ''}")
 
     @eventmanager.register(EventType.DownloadAdded)
-    def download_added(self, event: Event):
+    def DownloadAdded(self, event: Event):
         """
         添加下载事件
         """
@@ -546,16 +492,6 @@ class DownloadSiteTag(_PluginBase):
             return
 
         try:
-            downloader = event.event_data.get("downloader")
-            if not downloader:
-                logger.info("触发添加下载事件，但没有获取到下载器信息，跳过后续处理")
-                return
-
-            service = self.service_infos.get(downloader)
-            if not service:
-                logger.info(f"触发添加下载事件，但没有监听下载器 {downloader}，跳过后续处理")
-                return
-
             context: Context = event.event_data.get("context")
             _hash = event.event_data.get("hash")
             _torrent = context.torrent_info
@@ -573,7 +509,7 @@ class DownloadSiteTag(_PluginBase):
                 _cat = self._genre_ids_get_cat(_media.type, _media.genre_ids)
             if _hash and (_tags or _cat):
                 # 执行通用方法, 设置种子标签与分类
-                self._set_torrent_info(service=service, _hash=_hash, _tags=_tags, _cat=_cat)
+                self._set_torrent_info(DOWNLOADER=settings.DEFAULT_DOWNLOADER, _hash=_hash, _tags=_tags, _cat=_cat)
         except Exception as e:
             logger.error(
                 f"{self.LOG_TAG}分析下载事件时发生了错误: {str(e)}")
@@ -661,7 +597,8 @@ class DownloadSiteTag(_PluginBase):
                             {
                                 'component': 'VCol',
                                 'props': {
-                                    'cols': 12
+                                    'cols': 12,
+                                    'md': 12
                                 },
                                 'content': [
                                     {
@@ -669,31 +606,6 @@ class DownloadSiteTag(_PluginBase):
                                         'props': {
                                             'model': 'onlyonce',
                                             'label': '补全下载历史的标签与分类(一次性任务)'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'multiple': True,
-                                            'chips': True,
-                                            'clearable': True,
-                                            'model': 'downloaders',
-                                            'label': '下载器',
-                                            'items': [{"title": config.name, "value": config.name}
-                                                      for config in self.downloader_helper.get_configs().values()]
                                         }
                                     }
                                 ]
