@@ -50,7 +50,7 @@
         "name": "订阅规则自动填充",
         "description": "电视剧下载后自动添加官组等信息到订阅；添加订阅后根据二级分类名称自定义订阅规则。",
         "labels": "订阅",
-        "version": "3.1.1",
+        "version": "3.1",
         "icon": "teamwork.png",
         "author": "Lyzd1,thsrite",
         "level": 2,
