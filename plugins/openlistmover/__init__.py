@@ -109,7 +109,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.7.2" # 版本号更新
+    plugin_version = "3.8" # 版本号更新
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -146,6 +146,7 @@ class OpenlistMover(_PluginBase):
     # === 新增：用于防止重复处理 ===
     _processing_files: set = set()
     _processing_lock = Lock()
+    _api_clear_pending = False # 新增：API 清空任务挂起标志
     # ==========================
     
     # Task tracking list
@@ -855,20 +856,18 @@ class OpenlistMover(_PluginBase):
         
         # 任务清空逻辑 (在锁内执行)
         with task_lock:
-            clear_api_triggered = False
             clear_panel_triggered = False
 
             # 1. 检查 API 任务清空阈值 (倍数触发)
             if self._successful_moves_count > 0 and self._clear_api_threshold > 0 and \
                self._successful_moves_count % self._clear_api_threshold == 0:
-                logger.debug(f"成功移动任务达到 {self._successful_moves_count} 次，满足 Openlist API 任务清空阈值 ({self._clear_api_threshold} 的倍数)，准备清空 Openlist 任务 API 记录。")
                 
-                # 调用清空 Openlist API (网络请求，在锁内执行但通常很快)
-                self._call_openlist_clear_tasks_api("copy") 
-                self._call_openlist_clear_tasks_api("move") 
+                if not self._api_clear_pending: # 仅在首次触发时记录
+                    logger.debug(f"成功移动任务达到 {self._successful_moves_count} 次，满足 Openlist API 任务清空阈值。")
+                    logger.debug("已标记 API 任务清空为“待处理”，将在所有活跃任务完成后执行。")
+                    self._api_clear_pending = True # 设置挂起标志
                 
-                logger.info(f"Openlist API 任务记录清空完毕。")
-                clear_api_triggered = True
+                # [!!] 移除立即执行
 
 
             # 2. 检查 插件面板 清空阈值 (达到设定值触发)
@@ -899,9 +898,33 @@ class OpenlistMover(_PluginBase):
                  self._successful_moves_count = 0
                  logger.info("成功计数器已重置。")
 
+            # --- 新增逻辑：处理挂起的 API 清空 ---
             
-            logger.debug(f"Openlist Mover 任务检查完成，当前活跃任务数: {len([t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]])}")
+            # 首先，获取当前活跃任务
+            active_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
 
+            # 4. 检查并执行挂起的 API 任务清空
+            if self._api_clear_pending:
+                if not active_tasks:
+                    # 只有在 挂起标志为 True 且 没有任何活跃任务时 才执行
+                    logger.info("所有活跃任务已完成，开始执行挂起的 Openlist API 任务清空操作...")
+                    
+                    try:
+                        self._call_openlist_clear_tasks_api("copy") 
+                        self._call_openlist_clear_tasks_api("move") 
+                        logger.info("Openlist API 任务记录清空完毕。")
+                    except Exception as e:
+                        logger.error(f"执行挂起的 Openlist API 任务清空时发生错误: {e}")
+                    finally:
+                        self._api_clear_pending = False # 无论成功与否，都重置标志，避免卡死
+                else:
+                    # 标志为 True，但仍有活跃任务
+                    logger.debug(f"API 任务清空操作待处理，仍在等待 {len(active_tasks)} 个活跃任务完成...")
+            
+            # --- 结束新增逻辑 ---
+            
+            logger.debug(f"Openlist Mover 任务检查完成，当前活跃任务数: {len(active_tasks)}")
+            
     def _update_task_strm_status(self, task_id: str, new_status: str, is_final: bool = False):
         """
         安全地更新任务列表中的 STRM 状态和发送通知。
@@ -1609,5 +1632,6 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist 清空 {task_type} 任务 API 时出错: {e} - {traceback.format_exc()}")
             return False
+
 
 
