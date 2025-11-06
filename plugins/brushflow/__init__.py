@@ -259,7 +259,7 @@ class BrushFlow(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.4"
+    plugin_version = "4.3.5"
     # 插件作者
     plugin_author = "Lyzd1,jxxghp,InfinityPacer"
     # 作者主页
@@ -3206,7 +3206,7 @@ class BrushFlow(_PluginBase):
                                                download_dir=download_dir,
                                                cookie=cookies,
                                                category=brush_config.qb_category,
-                                               tag=["已整理", brush_config.brush_tag, tag],
+                                               tag=[brush_config.brush_tag, tag],
                                                upload_limit=up_speed,
                                                download_limit=down_speed)
                 if not state:
@@ -3234,7 +3234,7 @@ class BrushFlow(_PluginBase):
                 torrent = downloader.add_torrent(content=torrent_content,
                                                  download_dir=download_dir,
                                                  cookie=cookies,
-                                                 labels=["已整理", brush_config.brush_tag])
+                                                 labels=[brush_config.brush_tag])
                 if not torrent:
                     return None
                 else:
@@ -3982,4 +3982,5 @@ class BrushFlow(_PluginBase):
                 return site_info.get("id"), site_info.get("name")
 
         # 当找不到对应的站点信息时，返回一个默认值
+
         return 0, domain
