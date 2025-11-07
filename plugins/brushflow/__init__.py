@@ -4,6 +4,8 @@ import random
 import re
 import threading
 import time
+import logging
+logging.getLogger("brushflow").setLevel(logging.DEBUG)
 from datetime import datetime, timedelta
 from typing import Any, List, Dict, Tuple, Optional, Union, Set
 from urllib.parse import urlparse, parse_qs, unquote, parse_qsl, urlencode, urlunparse
@@ -265,7 +267,7 @@ class BrushFlow(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.7"
+    plugin_version = "4.3.8"
     # 插件作者
     plugin_author = "Lyzd1,jxxghp,InfinityPacer"
     # 作者主页
@@ -4018,6 +4020,5 @@ class BrushFlow(_PluginBase):
         # 当找不到对应的站点信息时，返回一个默认值
 
         return 0, domain
-
 
 
