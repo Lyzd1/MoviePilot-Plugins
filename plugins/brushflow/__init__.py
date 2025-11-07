@@ -3303,6 +3303,24 @@ class BrushFlow(_PluginBase):
                     
                     return torrent.hashString
         return None
+        
+    def __get_downloader_base_url(self) -> Optional[str]:
+        """
+        获取下载器的基础URL
+        """
+        try:
+            brush_config = self.__get_brush_config()
+            downloader_config = DownloaderHelper().get_downloader_config(brush_config.downloader)
+            if downloader_config:
+                # 根据你的下载器配置结构获取URL
+                # 这里需要根据实际情况调整
+                host = getattr(downloader_config, 'host', '')
+                port = getattr(downloader_config, 'port', '')
+                if host and port:
+                    return f"http://{host}:{port}"
+        except Exception as e:
+            logger.error(f"获取下载器URL失败: {e}")
+        return None
 
     def __qb_torrents_reannounce(self, torrent_hashes: List[str]):
         """强制重新汇报"""
