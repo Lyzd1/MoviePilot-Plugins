@@ -265,7 +265,7 @@ class BrushFlow(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.4"
+    plugin_version = "4.4.1"
     # 插件作者
     plugin_author = "Lyzd1,jxxghp,InfinityPacer"
     # 作者主页
@@ -2107,32 +2107,32 @@ class BrushFlow(_PluginBase):
             
             # --- V V V V V V 在这里添加执行代码 V V V V V V ---
             
-            # 检查 Reannounce 模块是否成功导入并且下载器已连接
-            # (trigger_reannounce_task 是您在文件顶部导入的)
-            if trigger_reannounce_task and self.downloader and self.downloader.is_connected:
-                
-                # 从插件配置中读取自定义的间隔和次数（如果配置了）
-                # 否则使用 Reannounce 模块中的默认值
-                reannounce_interval = self._brush_config.config.get("reannounce_interval", DEFAULT_INTERVAL)
-                reannounce_times = self._brush_config.config.get("reannounce_times", DEFAULT_ANNOUNCE_TIMES)
-
-                logger.info(f"种子 {hash_string}: 刷流任务已添加，准备启动 Reannounce 汇报线程。")
-
-                # 必须在新线程中运行，否则会阻塞插件主进程！
-                threading.Thread(
-                    target=trigger_reannounce_task, # 目标函数
-                    args=(
-                        self.downloader,    # 传入下载器对象
-                        hash_string,        # 传入种子 HASH
-                        "",                 # 传入标签 (刷流插件在添加时无法获知"辅种"标签, 传空)
-                        reannounce_interval,# 传入间隔时间
-                        reannounce_times    # 传入汇报次数
-                    ),
-                    daemon=True # 设置为守护线程
-                ).start() # 启动线程
-            
-            elif not trigger_reannounce_task:
-                logger.warn(f"种子 {hash_string}: Reannounce 模块未成功加载，跳过汇报任务。")
+            # --- 新增：触发Reannounce汇报 ---
+            if trigger_reannounce_task and self.downloader:
+                # 获取下载器的基础URL
+                downloader_config = self.service_info.config if self.service_info else None
+                if downloader_config:
+                    host = downloader_config.get('host')
+                    port = downloader_config.get('port')
+                    ssl = downloader_config.get('ssl', False)
+                    
+                    if host and port:
+                        base_url = f"{'https' if ssl else 'http'}://{host}:{port}"
+                        
+                        logger.info(f"种子 {hash_string}: 刷流任务已添加，准备启动Reannounce汇报")
+                        
+                        # 在新线程中运行Reannounce汇报
+                        threading.Thread(
+                            target=trigger_reannounce_task,
+                            args=(
+                                base_url,           # 下载器基础URL
+                                hash_string,        # 种子hash
+                                "",                 # 标签（刷流任务通常没有"辅种"标签）
+                                self._brush_config.config.get("reannounce_interval", 330),    # 间隔时间
+                                self._brush_config.config.get("reannounce_times", 15)         # 汇报次数
+                            ),
+                            daemon=True
+                        ).start()
 
             # --- ^ ^ ^ ^ ^ ^ 添加结束 ^ ^ ^ ^ ^ ^ ---
             
