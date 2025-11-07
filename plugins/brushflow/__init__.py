@@ -3227,7 +3227,7 @@ class BrushFlow(_PluginBase):
                     # === 新增：启动汇报任务线程 ===
                     if trigger_reannounce_task:
                         try:
-                            base_url = http://127.0.0.1:8080
+                            base_url = "http://127.0.0.1:8080"
                             if base_url:
                                 # 在新线程中执行汇报任务
                                 reannounce_thread = threading.Thread(
@@ -4018,5 +4018,6 @@ class BrushFlow(_PluginBase):
         # 当找不到对应的站点信息时，返回一个默认值
 
         return 0, domain
+
 
 
