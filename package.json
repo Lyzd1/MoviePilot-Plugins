@@ -96,18 +96,5 @@
           "v4.0": "站点独立配置项支持配置NexusPHP 站点自动跳过下载提示页",
           "v3.9": "MoviePilot V2 版本站点刷流插件"
          }
-    },
-    "Reannounce": {
-        "name": "种子自动汇报",
-        "description": "新种子添加后，自动执行多次强制汇报（仅支持qBittorrent）",
-        "labels": "刷流",
-        "version": "1.0",
-        "icon": "brush.jpg",
-        "author": "Lyzd1",
-        "level": 2,
-        "v2": true,
-        "history": {
-          "v1.0": "监听下载事件，重新宣告"
-        }
-     }
+    }
 }
