@@ -265,7 +265,7 @@ class BrushFlow(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.6"
+    plugin_version = "4.3.5"
     # 插件作者
     plugin_author = "Lyzd1,jxxghp,InfinityPacer"
     # 作者主页
@@ -3271,56 +3271,56 @@ class BrushFlow(_PluginBase):
                     return torrent_hash
             return None
 
-    elif downloader_helper.is_downloader("transmission", service=self.service_info):
-        # 如果开启代理下载以及种子地址不是磁力地址，则请求种子到内存再传入下载器
-        if not torrent_content.startswith("magnet"):
-            response = RequestUtils(cookies=cookies,
-                                    proxies=proxies,
-                                    ua=torrent.site_ua).get_res(url=torrent_content)
-            if response and response.ok:
-                torrent_content = response.content
-            else:
-                logger.error("尝试通过MP下载种子失败，继续尝试传递种子地址到下载器进行下载")
-        if torrent_content:
-            torrent = downloader.add_torrent(content=torrent_content,
-                                             download_dir=download_dir,
-                                             cookie=cookies,
-                                             labels=[brush_config.brush_tag])
-            if not torrent:
-                return None
-            else:
-                if brush_config.up_speed or brush_config.dl_speed:
-                    downloader.change_torrent(hash_string=torrent.hashString,
-                                              upload_limit=up_speed,
-                                              download_limit=down_speed)
-                
-                # === 新增：启动汇报任务线程（Transmission）===
-                if trigger_reannounce_task:
-                    try:
-                        base_url = self.__get_downloader_base_url()
-                        if base_url:
-                            reannounce_thread = threading.Thread(
-                                target=trigger_reannounce_task,
-                                args=(base_url, torrent.hashString),
-                                kwargs={
-                                    'tags': brush_config.brush_tag,
-                                    'interval': DEFAULT_INTERVAL,
-                                    'announce_times': DEFAULT_ANNOUNCE_TIMES
-                                },
-                                daemon=True
-                            )
-                            reannounce_thread.start()
-                            logger.info(f"已启动汇报任务线程，种子Hash: {torrent.hashString}")
+            elif downloader_helper.is_downloader("transmission", service=self.service_info):
+                # 如果开启代理下载以及种子地址不是磁力地址，则请求种子到内存再传入下载器
+                if not torrent_content.startswith("magnet"):
+                    response = RequestUtils(cookies=cookies,
+                                            proxies=proxies,
+                                            ua=torrent.site_ua).get_res(url=torrent_content)
+                    if response and response.ok:
+                        torrent_content = response.content
+                    else:
+                        logger.error("尝试通过MP下载种子失败，继续尝试传递种子地址到下载器进行下载")
+                if torrent_content:
+                    torrent = downloader.add_torrent(content=torrent_content,
+                                                     download_dir=download_dir,
+                                                     cookie=cookies,
+                                                     labels=[brush_config.brush_tag])
+                    if not torrent:
+                        return None
+                    else:
+                        if brush_config.up_speed or brush_config.dl_speed:
+                            downloader.change_torrent(hash_string=torrent.hashString,
+                                                      upload_limit=up_speed,
+                                                      download_limit=down_speed)
+                        
+                        # === 新增：启动汇报任务线程（Transmission）===
+                        if trigger_reannounce_task:
+                            try:
+                                base_url = self.__get_downloader_base_url()
+                                if base_url:
+                                    reannounce_thread = threading.Thread(
+                                        target=trigger_reannounce_task,
+                                        args=(base_url, torrent.hashString),
+                                        kwargs={
+                                            'tags': brush_config.brush_tag,
+                                            'interval': DEFAULT_INTERVAL,
+                                            'announce_times': DEFAULT_ANNOUNCE_TIMES
+                                        },
+                                        daemon=True
+                                    )
+                                    reannounce_thread.start()
+                                    logger.info(f"已启动汇报任务线程，种子Hash: {torrent.hashString}")
+                                else:
+                                    logger.warning("无法获取下载器URL，跳过汇报任务")
+                            except Exception as e:
+                                logger.error(f"启动汇报任务失败: {e}")
                         else:
-                            logger.warning("无法获取下载器URL，跳过汇报任务")
-                    except Exception as e:
-                        logger.error(f"启动汇报任务失败: {e}")
-                else:
-                    logger.warning("Reannounce模块未正确导入，汇报功能不可用")
-                # === 新增结束 ===
-                
-                return torrent.hashString
-    return None
+                            logger.warning("Reannounce模块未正确导入，汇报功能不可用")
+                        # === 新增结束 ===
+                        
+                        return torrent.hashString
+            return None
    
     def __qb_torrents_reannounce(self, torrent_hashes: List[str]):
         """强制重新汇报"""
