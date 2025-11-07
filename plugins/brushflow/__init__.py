@@ -265,7 +265,7 @@ class BrushFlow(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.6"
+    plugin_version = "4.3.7"
     # 插件作者
     plugin_author = "Lyzd1,jxxghp,InfinityPacer"
     # 作者主页
@@ -3227,7 +3227,7 @@ class BrushFlow(_PluginBase):
                     # === 新增：启动汇报任务线程 ===
                     if trigger_reannounce_task:
                         try:
-                            base_url = self.__get_downloader_base_url()
+                            base_url = http://127.0.0.1:8080
                             if base_url:
                                 # 在新线程中执行汇报任务
                                 reannounce_thread = threading.Thread(
@@ -3276,78 +3276,9 @@ class BrushFlow(_PluginBase):
                                                   upload_limit=up_speed,
                                                   download_limit=down_speed)
                     
-                    # === 新增：启动汇报任务线程（Transmission）===
-                    if trigger_reannounce_task:
-                        try:
-                            base_url = self.__get_downloader_base_url()
-                            if base_url:
-                                reannounce_thread = threading.Thread(
-                                    target=trigger_reannounce_task,
-                                    args=(base_url, torrent.hashString),
-                                    kwargs={
-                                        'tags': brush_config.brush_tag,
-                                        'interval': DEFAULT_INTERVAL,
-                                        'announce_times': DEFAULT_ANNOUNCE_TIMES
-                                    },
-                                    daemon=True
-                                )
-                                reannounce_thread.start()
-                                logger.info(f"已启动汇报任务线程，种子Hash: {torrent.hashString}")
-                            else:
-                                logger.warning("无法获取下载器URL，跳过汇报任务")
-                        except Exception as e:
-                            logger.error(f"启动汇报任务失败: {e}")
-                    else:
-                        logger.warning("Reannounce模块未正确导入，汇报功能不可用")
-                    # === 新增结束 ===
-                    
                     return torrent.hashString
         return None
         
-    def __get_downloader_base_url(self) -> Optional[str]:
-        """
-        获取下载器的基础URL
-        """
-        try:
-            brush_config = self.__get_brush_config()
-            downloader = self.downloader
-            
-            if not downloader:
-                return None
-                
-            # 对于 qBittorrent
-            if DownloaderHelper().is_downloader("qbittorrent", service=self.service_info):
-                # 从下载器实例中获取主机和端口信息
-                if hasattr(downloader, 'host') and hasattr(downloader, 'port'):
-                    return f"http://{downloader.host}:{downloader.port}"
-                # 或者从配置中获取
-                elif hasattr(downloader, '_qb') and hasattr(downloader._qb, 'host'):
-                    return f"http://{downloader._qb.host}:{downloader._qb.port}"
-            
-            # 对于 Transmission
-            elif DownloaderHelper().is_downloader("transmission", service=self.service_info):
-                if hasattr(downloader, 'host') and hasattr(downloader, 'port'):
-                    return f"http://{downloader.host}:{downloader.port}"
-                # 或者从配置中获取
-                elif hasattr(downloader, 'client') and hasattr(downloader.client, 'url'):
-                    # 从Transmission的URL中提取基础URL
-                    url = downloader.client.url
-                    # 移除路径部分，只保留协议+主机+端口
-                    parsed = urlparse(url)
-                    return f"{parsed.scheme}://{parsed.netloc}"
-            
-            # 如果以上方法都不行，尝试从settings中获取
-            downloader_configs = DownloaderHelper().get_configs()
-            if brush_config.downloader in downloader_configs:
-                config = downloader_configs[brush_config.downloader]
-                if hasattr(config, 'host') and hasattr(config, 'port'):
-                    return f"http://{config.host}:{config.port}"
-                    
-        except Exception as e:
-            logger.error(f"获取下载器URL失败: {e}")
-        
-        return None
-
     def __qb_torrents_reannounce(self, torrent_hashes: List[str]):
         """强制重新汇报"""
         downloader = self.downloader
@@ -4087,4 +4018,5 @@ class BrushFlow(_PluginBase):
         # 当找不到对应的站点信息时，返回一个默认值
 
         return 0, domain
+
 
