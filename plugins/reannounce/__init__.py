@@ -1,7 +1,8 @@
 import time
 import sys
 import logging
-from typing import List, Dict, Any, Optional
+import threading # 修正：将 threading 移到顶部
+from typing import List, Dict, Any, Optional, Tuple # 修正：添加 Tuple
 
 import requests
 
@@ -13,10 +14,6 @@ from app.schemas.types import EventType
 from app.schemas import ServiceInfo
 
 # 配置
-# 注意：BASE_URL 将不再需要，因为我们将使用 DownloaderHelper 实例的方法
-# DEFAULT_ANNOUNCE_TIMES, DEFAULT_INTERVAL, FIRST_ANNOUNCE_DELAY 将作为插件配置项
-
-# 设置日志前缀
 LOG_TAG = "[ReannouncePlugin] "
 
 class ReannouncePlugin(_PluginBase):
@@ -31,7 +28,7 @@ class ReannouncePlugin(_PluginBase):
     plugin_order = 10  # 靠后执行
     auth_level = 1
 
-    # 私有属性 - 对应原脚本中的配置和辅助类
+    # 私有属性
     downloader_helper: Optional[DownloaderHelper] = None
     _enabled: bool = False
     _announce_times: int = 15
@@ -49,14 +46,12 @@ class ReannouncePlugin(_PluginBase):
         # 读取配置
         if config:
             self._enabled = config.get("enabled", False)
-            # 使用 str_to_number 转换配置值，确保是整数
             self._announce_times = self.str_to_number(config.get("announce_times"), 15)
             self._interval = self.str_to_number(config.get("interval"), 330)
             self._first_delay = self.str_to_number(config.get("first_delay"), 180)
             self._skip_tag = config.get("skip_tag") or "辅种"
             self._downloaders = config.get("downloaders")
 
-        # 打印初始化信息
         logger.info(f"{LOG_TAG}插件初始化完成. "
                     f"启用: {self._enabled}, 汇报次数: {self._announce_times}, "
                     f"间隔: {self._interval}s, 首次延迟: {self._first_delay}s")
@@ -70,13 +65,11 @@ class ReannouncePlugin(_PluginBase):
             logger.warning(f"{LOG_TAG}尚未配置下载器，请检查配置")
             return None
 
-        # 获取所有配置的下载器服务信息
         services = self.downloader_helper.get_services(name_filters=self._downloaders)
         if not services:
             logger.warning(f"{LOG_TAG}获取下载器实例失败，请检查配置")
             return None
 
-        # 过滤出活动的下载器
         active_services = {}
         for service_name, service_info in services.items():
             if service_info.instance.is_inactive():
@@ -107,7 +100,6 @@ class ReannouncePlugin(_PluginBase):
         """
         在单独的线程中执行多次强制汇报，以防止阻塞主线程。
         """
-        # 检查标签是否包含跳过关键字，如果包含则跳过
         if self._skip_tag in tags:
             logger.info(f"{LOG_TAG}种子 {torrent_hash} 标签包含“{self._skip_tag}”，跳过强制汇报流程。")
             return
@@ -122,7 +114,6 @@ class ReannouncePlugin(_PluginBase):
         for current_time in range(self._announce_times):
             logger.info(f"{LOG_TAG}=== 种子 {torrent_hash} 第 {current_time + 1} 轮汇报 (共 {self._announce_times} 轮) ===")
             
-            # 使用下载器实例的 reannounce_torrent 方法
             success, msg = self._reannounce(downloader_obj, torrent_hash)
             
             if success:
@@ -137,39 +128,18 @@ class ReannouncePlugin(_PluginBase):
             
         logger.info(f"{LOG_TAG}种子 {torrent_hash} 汇报流程完成。")
         
-    def _reannounce(self, downloader_obj: Any, torrent_hash: str) -> (bool, str):
+    def _reannounce(self, downloader_obj: Any, torrent_hash: str) -> Tuple[bool, str]: # 修正返回值类型提示
         """
         执行单个种子的强制汇报操作。
         """
         try:
-            # MoviePilot 下载器实例通常提供 reannounce_torrent 方法
-            # qBittorrent 客户端：downloader_obj.qbc.torrents_reannounce(hashes=torrent_hash)
-            # Transmission 客户端：downloader_obj.tc.reannounce_torrent(ids=torrent_hash)
-            # 这里统一调用 MoviePilot 提供的封装方法 (如果有的话)
-            # 由于没有完整的 MoviePilot DownloaderBase 代码，我们模拟调用：
-            # 注意：在实际 MP 插件中，需要根据 `service.type` 调用不同的 API 或统一封装。
-            
-            # 由于原脚本是直接 POST 到 API，我们模拟一个 API 调用或使用 MP 封装：
-            
-            # 假设 MP 的 downloader 实例有统一的 reannounce 方法
-            # if hasattr(downloader_obj, "reannounce_torrent"):
-            #     # 某些下载器可能要求ids是列表
-            #     downloader_obj.reannounce_torrent(ids=torrent_hash) 
-            #     return True, "OK"
-            
-            # 模拟原脚本的 HTTP API 调用 (仅适用于原脚本的目标 qBittorrent API)
-            # **警告：直接调用 API 不符合 MP 插件最佳实践，应使用 downloader_obj 的方法**
-            base_url = "http://192.168.10.6:8080/api/v2" # 注意：这需要是配置中的下载器地址
-            reannounce_url = f"{base_url}/torrents/reannounce"
-            payload = {"hashes": torrent_hash}
-            
-            # 实际 MP 插件不应该硬编码或绕过认证，我们保留这个结构以作演示
-            # **在实际部署中，需要确保使用 downloader_obj 实例**
-            # **假设我们使用的是一个 qBittorrent API 的 Downloader 实例，它的 reannounce 方法可能如下：**
+            # 根据下载器类型调用对应的客户端 API 接口
             if downloader_obj.type == "qbittorrent":
+                 # qBittorrent 客户端 API 调用
                  downloader_obj.qbc.torrents_reannounce(hashes=torrent_hash)
                  return True, "Success via qBittorrent client API"
             elif downloader_obj.type == "transmission":
+                 # Transmission 客户端 API 调用
                  downloader_obj.tc.reannounce_torrent(ids=torrent_hash)
                  return True, "Success via Transmission client API"
             else:
@@ -206,19 +176,14 @@ class ReannouncePlugin(_PluginBase):
                 logger.info(f"{LOG_TAG}触发下载事件，但未监听下载器 {downloader_name}，跳过。")
                 return
             
-            # 从 Context 中获取标签信息（如果有的话，取决于事件触发时的完整性）
-            # 默认情况下，事件触发时可能没有完整的标签，但我们可以尝试从 torrent_info 获取 site_name 作为标签判断依据
             torrent_info = context.torrent_info
             
-            # 在添加事件时，标签信息可能不是一个干净的字符串，我们尝试使用 site_name/label
-            # 这里简单使用 site_name 作为标签判断
+            # 使用 site_name 作为标签判断依据
             tags = torrent_info.site_name or "" 
-            # 如果是 qBittorrent，也可以尝试获取 context 中原始的 label 或 tags 字段
             
             logger.info(f"{LOG_TAG}捕获到下载任务添加事件: 下载器={downloader_name}, Hash={_hash}, 标签={tags}")
 
             # 在单独的线程中运行长时间的汇报过程，避免阻塞事件管理器
-            import threading
             threading.Thread(
                 target=self._force_reannounce_in_thread,
                 args=(service.instance, _hash, tags),
@@ -393,7 +358,7 @@ class ReannouncePlugin(_PluginBase):
             "skip_tag": "辅种"
         }
 
-    # 其他方法 (get_command, get_api, get_service, get_page, stop_service) 保持为空或不实现，因为此插件仅依赖事件
+    # 其他方法
     def get_command(self) -> List[Dict[str, Any]]:
         pass
 
@@ -407,8 +372,5 @@ class ReannouncePlugin(_PluginBase):
         pass
 
     def stop_service(self):
-        """
-        此插件没有长时间运行的 BackgroundScheduler，所以 stop_service 保持简单
-        """
         logger.info(f"{LOG_TAG}服务停止。")
         pass
