@@ -32,6 +32,11 @@ from app.utils.string import StringUtils
 
 lock = threading.Lock()
 
+try:
+    from .Reannounce import trigger_reannounce_task, DEFAULT_INTERVAL, DEFAULT_ANNOUNCE_TIMES
+except ImportError as e:
+    logger.error(f"[Brush] 无法导入 Reannounce 模块: {e}，汇报功能将不可用。", exc_info=True)
+    trigger_reannounce_task = None # 设置为 None，以便后续检查  
 
 
 class BrushConfig:
@@ -260,7 +265,7 @@ class BrushFlow(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.9"
+    plugin_version = "4.4.2"
     # 插件作者
     plugin_author = "Lyzd1,jxxghp,InfinityPacer"
     # 作者主页
@@ -3145,78 +3150,6 @@ class BrushFlow(_PluginBase):
             logger.error(f"Error while resetting downloader URL for torrent: {torrent_url}. Error: {str(e)}")
             return torrent_url
 
-    # 修改部分 增加qbit汇报功能
-    def __reannounce_torrent(self, base_url: str, torrent_hash: str, tags: str = "", 
-                        interval: int = 330, announce_times: int = 15):
-        """
-        汇报任务函数 - 直接集成到主类中
-        """
-        try:
-            # 检查是否跳过（辅种）
-            if "辅种" in tags:
-                logger.info(f"种子 {torrent_hash} 标签包含'辅种'，跳过汇报处理")
-                return
-
-            logger.info(f"开始为种子 {torrent_hash} 执行汇报任务...")
-            logger.debug(f"下载器URL: {base_url}")
-            logger.debug(f"汇报间隔: {interval}秒, 总次数: {announce_times}")
-
-            # 延迟第一次汇报
-            logger.debug(f"种子 {torrent_hash}: 第一次汇报延迟 180 秒...")
-            time.sleep(180)
-
-            success = True
-            # 循环汇报
-            for i in range(announce_times):
-                current_success = self.__simple_http_reannounce(base_url, torrent_hash)
-                
-                if current_success:
-                    logger.debug(f"种子 {torrent_hash}: 第 {i + 1}/{announce_times} 次汇报成功")
-                else:
-                    logger.error(f"种子 {torrent_hash}: 第 {i + 1}/{announce_times} 次汇报失败")
-                    success = False
-                    break  # 如果失败就停止
-
-                # 等待间隔（最后一次不需要等待）
-                if i < announce_times - 1 and current_success:
-                    logger.debug(f"种子 {torrent_hash}: 等待 {interval} 秒进行下一次汇报...")
-                    time.sleep(interval)
-
-            if success:
-                logger.info(f"种子 {torrent_hash}: 汇报任务完成")
-            else:
-                logger.error(f"种子 {torrent_hash}: 汇报任务中止")
-                
-        except Exception as e:
-            logger.error(f"种子 {torrent_hash}: 汇报任务发生意外错误: {e}")
-
-    def __simple_http_reannounce(self, base_url: str, torrent_hash: str) -> bool:
-        """
-        简化的HTTP汇报函数 - 直接调用API，无需认证
-        """
-        api_url = f"{base_url}/api/v2/torrents/reannounce"
-        
-        try:
-            payload = {"hashes": torrent_hash}
-            
-            logger.debug(f"发送汇报请求到: {api_url}")
-            response = requests.post(api_url, data=payload, timeout=10)
-            
-            # qBittorrent成功返回200且body为空
-            if response.status_code == 200 and not response.text:
-                logger.debug(f"汇报成功 - Hash: {torrent_hash}")
-                return True
-            else:
-                logger.error(f"汇报失败 - 状态码: {response.status_code}, 响应: {response.text[:100]}")
-                return False
-                
-        except requests.exceptions.RequestException as e:
-            logger.error(f"HTTP请求异常: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"汇报过程中发生未知错误: {e}")
-            return False
-
     def __download(self, torrent: TorrentInfo) -> Optional[str]:
         """
         添加下载任务
@@ -3292,26 +3225,30 @@ class BrushFlow(_PluginBase):
                         return None
                     
                     # === 新增：启动汇报任务线程 ===
+                    if trigger_reannounce_task:
                         try:
-                            # 直接使用固定的下载器地址
                             base_url = "http://127.0.0.1:8080"
-                            
-                            # 在新线程中执行汇报任务
-                            reannounce_thread = threading.Thread(
-                                target=self.__reannounce_torrent,
-                                args=(base_url, torrent_hash),
-                                kwargs={
-                                    'tags': brush_config.brush_tag,
-                                    'interval': 330,
-                                    'announce_times': 15
-                                },
-                                daemon=True
-                            )
-                            reannounce_thread.start()
-                            logger.info(f"已启动汇报任务线程，种子Hash: {torrent_hash}，下载器地址: {base_url}")
+                            if base_url:
+                                # 在新线程中执行汇报任务
+                                reannounce_thread = threading.Thread(
+                                    target=trigger_reannounce_task,
+                                    args=(base_url, torrent_hash),
+                                    kwargs={
+                                        'tags': brush_config.brush_tag,
+                                        'interval': DEFAULT_INTERVAL,
+                                        'announce_times': DEFAULT_ANNOUNCE_TIMES
+                                    },
+                                    daemon=True
+                                )
+                                reannounce_thread.start()
+                                logger.info(f"已启动汇报任务线程，种子Hash: {torrent_hash}")
+                            else:
+                                logger.warning("无法获取下载器URL，跳过汇报任务")
                         except Exception as e:
                             logger.error(f"启动汇报任务失败: {e}")
-                        # === 新增结束 ===
+                    else:
+                        logger.warning("Reannounce模块未正确导入，汇报功能不可用")
+                    # === 新增结束 ===
                     
                     return torrent_hash
             return None
@@ -4081,5 +4018,4 @@ class BrushFlow(_PluginBase):
         # 当找不到对应的站点信息时，返回一个默认值
 
         return 0, domain
-
 
