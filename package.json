@@ -98,8 +98,8 @@
          }
     },
     "Reannounce": {
-        "name": "qbit强制汇报(Reannounce)",
-        "description": "监听下载事件，定时汇报最新种子",
+        "name": "种子自动汇报",
+        "description": "新种子添加后，自动执行多次强制汇报（仅支持qBittorrent）",
         "labels": "刷流",
         "version": "1.0",
         "icon": "brush.jpg",
