@@ -265,7 +265,7 @@ class BrushFlow(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.5"
+    plugin_version = "4.3.6"
     # 插件作者
     plugin_author = "Lyzd1,jxxghp,InfinityPacer"
     # 作者主页
@@ -3310,16 +3310,42 @@ class BrushFlow(_PluginBase):
         """
         try:
             brush_config = self.__get_brush_config()
-            downloader_config = DownloaderHelper().get_downloader_config(brush_config.downloader)
-            if downloader_config:
-                # 根据你的下载器配置结构获取URL
-                # 这里需要根据实际情况调整
-                host = getattr(downloader_config, 'host', '')
-                port = getattr(downloader_config, 'port', '')
-                if host and port:
-                    return f"http://{host}:{port}"
+            downloader = self.downloader
+            
+            if not downloader:
+                return None
+                
+            # 对于 qBittorrent
+            if DownloaderHelper().is_downloader("qbittorrent", service=self.service_info):
+                # 从下载器实例中获取主机和端口信息
+                if hasattr(downloader, 'host') and hasattr(downloader, 'port'):
+                    return f"http://{downloader.host}:{downloader.port}"
+                # 或者从配置中获取
+                elif hasattr(downloader, '_qb') and hasattr(downloader._qb, 'host'):
+                    return f"http://{downloader._qb.host}:{downloader._qb.port}"
+            
+            # 对于 Transmission
+            elif DownloaderHelper().is_downloader("transmission", service=self.service_info):
+                if hasattr(downloader, 'host') and hasattr(downloader, 'port'):
+                    return f"http://{downloader.host}:{downloader.port}"
+                # 或者从配置中获取
+                elif hasattr(downloader, 'client') and hasattr(downloader.client, 'url'):
+                    # 从Transmission的URL中提取基础URL
+                    url = downloader.client.url
+                    # 移除路径部分，只保留协议+主机+端口
+                    parsed = urlparse(url)
+                    return f"{parsed.scheme}://{parsed.netloc}"
+            
+            # 如果以上方法都不行，尝试从settings中获取
+            downloader_configs = DownloaderHelper().get_configs()
+            if brush_config.downloader in downloader_configs:
+                config = downloader_configs[brush_config.downloader]
+                if hasattr(config, 'host') and hasattr(config, 'port'):
+                    return f"http://{config.host}:{config.port}"
+                    
         except Exception as e:
             logger.error(f"获取下载器URL失败: {e}")
+        
         return None
 
     def __qb_torrents_reannounce(self, torrent_hashes: List[str]):
@@ -4061,3 +4087,4 @@ class BrushFlow(_PluginBase):
         # 当找不到对应的站点信息时，返回一个默认值
 
         return 0, domain
+
