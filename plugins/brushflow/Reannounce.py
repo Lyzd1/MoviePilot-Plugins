@@ -3,12 +3,8 @@ import logging
 import requests
 from typing import Optional
 
-# 配置日志
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - [%(levelname)s] - (Reannounce) - %(message)s",
-    handlers=[logging.StreamHandler()]
-)
+# 使用 MoviePilot 的日志系统
+logger = logging.getLogger(__name__)
 
 # 默认参数
 DEFAULT_ANNOUNCE_TIMES = 15
@@ -18,13 +14,13 @@ FIRST_ANNOUNCE_DELAY = 180
 def log_and_print(message, level="debug"):
     """统一日志记录和打印的函数"""
     if level == "info":
-        logging.info(message)
+        logger.info(message)
     elif level == "error":
-        logging.error(message)
+        logger.error(message)
     elif level == "warning":
-        logging.warning(message)
+        logger.warning(message)
     elif level == "debug":
-        logging.debug(message)
+        logger.debug(message)
 
 def __simple_http_reannounce(base_url: str, torrent_hash: str) -> bool:
     """
