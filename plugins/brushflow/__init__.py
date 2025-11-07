@@ -16,8 +16,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app import schemas
 from app.chain.torrents import TorrentsChain
 from app.core.config import settings
-from app.core.context import Context, MediaInfo
-from app.core.event import eventmanager, Event
+from app.core.context import MediaInfo
 from app.core.metainfo import MetaInfo
 from app.db.site_oper import SiteOper
 from app.db.subscribe_oper import SubscribeOper
@@ -260,7 +259,7 @@ class BrushFlow(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.4"
+    plugin_version = "4.3.5"
     # 插件作者
     plugin_author = "Lyzd1,jxxghp,InfinityPacer"
     # 作者主页
@@ -3218,30 +3217,6 @@ class BrushFlow(_PluginBase):
                     if not torrent_hash:
                         logger.error(f"{brush_config.downloader} 获取种子Hash失败，详细信息请查看 README")
                         return None
-                    # --------------------------- 【在此处插入以下代码块】 ---------------------------
-                    # 1. 构造 Context 对象，这是事件监听器（如标签插件）所依赖的核心信息
-                    context = Context()
-                    # brush_config.media_info 包含了媒体信息
-                    context.media_info = brush_config.media_info
-                    # torrent 参数是 TorrentInfo 模式，包含了种子和站点信息
-                    context.torrent_info = torrent
-        
-                    # 2. 构造事件数据 (必须包含下载器名称)
-                    event_data = {
-                        "downloader": brush_config.downloader,
-                        "hash": torrent_hash,
-                        "context": context,
-                    }
-        
-                    # 3. 发送 DownloadAdded 事件
-                    eventmanager.send_event(
-                        Event(
-                            EventType.DownloadAdded,
-                            event_data
-                        )
-                    )
-                    logger.info(f"[BrushFlow] 已为种子 {torrent.title} 发送 DownloadAdded 事件 ({torrent_hash})。")
-                    # --------------------------- 【插入代码块结束】 ---------------------------
                     return torrent_hash
             return None
 
@@ -4009,4 +3984,3 @@ class BrushFlow(_PluginBase):
         # 当找不到对应的站点信息时，返回一个默认值
 
         return 0, domain
-
