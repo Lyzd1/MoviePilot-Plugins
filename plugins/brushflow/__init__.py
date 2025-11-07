@@ -30,12 +30,6 @@ from app.schemas.types import EventType
 from app.utils.http import RequestUtils
 from app.utils.string import StringUtils
 
-try:
-    from .Reannounce import trigger_reannounce_task, DEFAULT_INTERVAL, DEFAULT_ANNOUNCE_TIMES
-except ImportError as e:
-    logger.error(f"[Brush] 无法导入 Reannounce 模块: {e}，汇报功能将不可用。", exc_info=True)
-    trigger_reannounce_task = None # 设置为 None，以便后续检查    
-
 lock = threading.Lock()
 
 
@@ -265,7 +259,7 @@ class BrushFlow(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.4.1"
+    plugin_version = "4.3.5"
     # 插件作者
     plugin_author = "Lyzd1,jxxghp,InfinityPacer"
     # 作者主页
@@ -2104,38 +2098,7 @@ class BrushFlow(_PluginBase):
                 "downloader": self.service_info.name
             })
             torrent_tasks[hash_string] = torrent_task
-            
-            # --- V V V V V V 在这里添加执行代码 V V V V V V ---
-            
-            # --- 新增：触发Reannounce汇报 ---
-            if trigger_reannounce_task and self.downloader:
-                # 获取下载器的基础URL
-                downloader_config = self.service_info.config if self.service_info else None
-                if downloader_config:
-                    host = downloader_config.get('host')
-                    port = downloader_config.get('port')
-                    ssl = downloader_config.get('ssl', False)
-                    
-                    if host and port:
-                        base_url = f"{'https' if ssl else 'http'}://{host}:{port}"
-                        
-                        logger.info(f"种子 {hash_string}: 刷流任务已添加，准备启动Reannounce汇报")
-                        
-                        # 在新线程中运行Reannounce汇报
-                        threading.Thread(
-                            target=trigger_reannounce_task,
-                            args=(
-                                base_url,           # 下载器基础URL
-                                hash_string,        # 种子hash
-                                "",                 # 标签（刷流任务通常没有"辅种"标签）
-                                self._brush_config.config.get("reannounce_interval", 330),    # 间隔时间
-                                self._brush_config.config.get("reannounce_times", 15)         # 汇报次数
-                            ),
-                            daemon=True
-                        ).start()
 
-            # --- ^ ^ ^ ^ ^ ^ 添加结束 ^ ^ ^ ^ ^ ^ ---
-            
             # 统计数据
             torrents_size += torrent.size
             statistic_info["count"] += 1
