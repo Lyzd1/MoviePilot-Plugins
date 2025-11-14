@@ -20,7 +20,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.2.1"  # 版本号更新
+    plugin_version = "3.2.2"  # 版本号更新
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -236,7 +236,7 @@ class SubscribeGroup(_PluginBase):
             if category_conf.get('resolution'):
                 update_dict['resolution'] = self.__parse_pix(category_conf.get('resolution'))
             if category_conf.get('quality'):
-                update_dict['quality'] = self.__parse_type(category_conf.get('quality'))
+                update_dict['quality'] = self.__parse_type(category_conf.get('quality'), None) # 保持兼容性
             if category_conf.get('effect'):
                 update_dict['effect'] = self.__parse_effect(category_conf.get('effect'))
             if category_conf.get('savepath'):
@@ -337,15 +337,22 @@ class SubscribeGroup(_PluginBase):
                             update_dict['resolution'] = resource_pix
                         else:
                             logger.warning(f"订阅记录:{subscribe.name} 未获取到分辨率信息")
+                
+                # ----- 代码修改开始 (L363) -----
                 # 资源质量
                 if "资源质量" in self._update_details and not subscribe.quality:
                     resource_type = _meta.resource_type if _meta else None
-                    if resource_type:
-                        resource_type = self.__parse_type(resource_type)
-                        if resource_type:
-                            update_dict['quality'] = resource_type
-                        else:
-                            logger.warning(f"订阅记录:{subscribe.name} 未获取到资源质量信息")
+                    video_encode = _meta.video_encode if _meta else None  # 获取 video_encode
+                    
+                    # 同时传入 resource_type 和 video_encode
+                    parsed_quality = self.__parse_type(resource_type, video_encode)
+                    
+                    if parsed_quality:
+                        update_dict['quality'] = parsed_quality
+                    else:
+                        logger.warning(f"订阅记录:{subscribe.name} 未获取到资源质量信息 (type: {resource_type}, encode: {video_encode})")
+                # ----- 代码修改结束 -----
+
                 # 特效
                 if "特效" in self._update_details and not subscribe.effect:
                     resource_effect = _meta.resource_effect if _meta else None
@@ -454,32 +461,47 @@ class SubscribeGroup(_PluginBase):
             return resource_pix
         return resource_pix
 
-    def __parse_type(self, resource_type):
-        if re.match(r"Blu-?Ray.+VC-?1|Blu-?Ray.+AVC|UHD.+blu-?ray.+HEVC|MiniBD", resource_type, re.IGNORECASE):
-            resource_type = "Blu-?Ray.+VC-?1|Blu-?Ray.+AVC|UHD.+blu-?ray.+HEVC|MiniBD"
-        if re.match(r"Remux", resource_type, re.IGNORECASE):
-            resource_type = "Remux"
-        if re.match(r"Blu-?Ray", resource_type, re.IGNORECASE):
-            resource_type = "Blu-?Ray"
-        if re.match(r"UHD|UltraHD", resource_type, re.IGNORECASE):
-            resource_type = "UHD|UltraHD"
-        
-        # ----- 代码修改开始 -----
-        # 按照您的要求，将 H.264/AVC 的匹配移到了 WEB-DL 之前
-        if re.match(r"[Hx].?265|HEVC", resource_type, re.IGNORECASE):
-            resource_type = "[Hx].?265|HEVC"
-        if re.match(r"[Hx].?264|AVC", resource_type, re.IGNORECASE):
-            resource_type = "[Hx].?264|AVC"
-        # ----- 代码修改结束 -----
+    # ----- 代码修改开始 (L495) -----
+    def __parse_type(self, resource_type, video_encode):
+        """
+        根据 resource_type (源) 和 video_encode (编码) 
+        按照 "高级源 > 编码 > 低级源" 的优先级返回标准化的质量字符串
+        """
+        # 1. 优先匹配高级源 (来自 resource_type)
+        if resource_type:
+            if re.match(r"Blu-?Ray.+VC-?1|Blu-?Ray.+AVC|UHD.+blu-?ray.+HEVC|MiniBD", resource_type, re.IGNORECASE):
+                return "Blu-?Ray.+VC-?1|Blu-?Ray.+AVC|UHD.+blu-?ray.+HEVC|MiniBD"
+            if re.match(r"Remux", resource_type, re.IGNORECASE):
+                return "Remux"
+            if re.match(r"Blu-?Ray", resource_type, re.IGNORECASE):
+                return "Blu-?Ray"
+            if re.match(r"UHD|UltraHD", resource_type, re.IGNORECASE):
+                return "UHD|UltraHD"
 
-        if re.match(r"WEB-?DL|WEB-?RIP", resource_type, re.IGNORECASE):
-            resource_type = "WEB-?DL|WEB-?RIP"
-        if re.match(r"HDTV", resource_type, re.IGNORECASE):
-            resource_type = "HDTV"
-        
-        # 原 H.264/AVC 位置的匹配已移除
+        # 2. 其次匹配编码 (来自 video_encode)
+        if video_encode:
+            if re.match(r"[Hx].?265|HEVC", video_encode, re.IGNORECASE):
+                return "[Hx].?265|HEVC"
+            if re.match(r"[Hx].?264|AVC", video_encode, re.IGNORECASE):
+                return "[Hx].?264|AVC"
 
-        return resource_type
+        # 3. 最后匹配低级源 (来自 resource_type)
+        if resource_type:
+            if re.match(r"WEB-?DL|WEB-?RIP", resource_type, re.IGNORECASE):
+                return "WEB-?DL|WEB-?RIP"
+            if re.match(r"HDTV", resource_type, re.IGNORECASE):
+                return "HDTV"
+        
+        # 4. 降级检查：如果 video_encode 为空，但编码信息在 resource_type 中
+        if resource_type:
+            if re.match(r"[Hx].?265|HEVC", resource_type, re.IGNORECASE):
+                return "[Hx].?265|HEVC"
+            if re.match(r"[Hx].?264|AVC", resource_type, re.IGNORECASE):
+                return "[Hx].?264|AVC"
+
+        # 均未匹配
+        return None
+    # ----- 代码修改结束 -----
 
     def __parse_effect(self, resource_effect):
         if re.match(r"Dolby[\\s.]+Vision|DOVI|[\\s.]+DV[\\s.]+", resource_effect, re.IGNORECASE):
@@ -972,4 +994,3 @@ class SubscribeGroup(_PluginBase):
         """
         退出插件
         """
-
