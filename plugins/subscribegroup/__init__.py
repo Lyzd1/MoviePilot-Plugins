@@ -20,7 +20,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.2"  # 版本号更新
+    plugin_version = "3.2.1"  # 版本号更新
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -466,6 +466,8 @@ class SubscribeGroup(_PluginBase):
         
         # ----- 代码修改开始 -----
         # 按照您的要求，将 H.264/AVC 的匹配移到了 WEB-DL 之前
+        if re.match(r"[Hx].?265|HEVC", resource_type, re.IGNORECASE):
+            resource_type = "[Hx].?265|HEVC"
         if re.match(r"[Hx].?264|AVC", resource_type, re.IGNORECASE):
             resource_type = "[Hx].?264|AVC"
         # ----- 代码修改结束 -----
@@ -474,8 +476,6 @@ class SubscribeGroup(_PluginBase):
             resource_type = "WEB-?DL|WEB-?RIP"
         if re.match(r"HDTV", resource_type, re.IGNORECASE):
             resource_type = "HDTV"
-        if re.match(r"[Hx].?265|HEVC", resource_type, re.IGNORECASE):
-            resource_type = "[Hx].?265|HEVC"
         
         # 原 H.264/AVC 位置的匹配已移除
 
@@ -972,3 +972,4 @@ class SubscribeGroup(_PluginBase):
         """
         退出插件
         """
+
