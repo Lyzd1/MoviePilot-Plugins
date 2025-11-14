@@ -200,11 +200,11 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.6"
+    plugin_version = "2.7"
     # 插件作者
-    plugin_author = "lyzd1,DzAvril"
+    plugin_author = "Lyzd1,DzAvril"
     # 作者主页
-    author_url = "https://github.com/DzAvril"
+    author_url = "https://github.com/Lyzd1"
     # 插件配置项ID前缀
     plugin_config_prefix = "linkdeleted_"
     # 加载顺序
@@ -808,7 +808,7 @@ class RemoveLink(_PluginBase):
                                             "model": "strm_path_mappings",
                                             "label": "STRM路径映射",
                                             "rows": 4,
-                                            "placeholder": "STRM目录:存储类型:网盘目录，每行一个映射关系\n例如：/ssd/strm:u115:/media\n例如：/nas/strm:alipan:/阿里云盘/媒体",
+                                            "placeholder": "STRM目录:存储类型:网盘目录[:local:本地目录]，每行一个映射关系\n例如：/ssd/strm:u115:/media\n例如：/nas/strm:alipan:/阿里云盘/媒体:local:/mnt/local_media",
                                         },
                                     }
                                 ],
@@ -896,7 +896,7 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "STRM文件监控：启用后会自动监控映射中的STRM目录，当STRM文件删除时会查找并删除网盘上对应的视频文件。路径映射格式：STRM目录:存储类型:网盘目录，例如 /ssd/strm:u115:/media 表示 /ssd/strm/test.strm 对应115网盘中以 /media/test 为前缀的视频文件。",
+                                            "text": "STRM文件监控：启用后会自动监控映射中的STRM目录，当STRM文件删除时会查找并删除网盘上对应的视频文件。路径映射格式：STRM目录:存储类型:网盘目录[:本地存储类型:本地目录]，例如 /strm:alist:/remote:local:/local/media 表示 /strm/test.strm 对应 alist 上的 /remote/test 和本地的 /local/media/test。本地目录为可选配置，用于联动删除本地空目录。",
                                         },
                                     }
                                 ],
@@ -1456,10 +1456,10 @@ class RemoveLink(_PluginBase):
                         % (str(e), traceback.format_exc())
                     )
 
-    def _parse_strm_path_mappings(self) -> Dict[str, Tuple[str, str]]:
+    def _parse_strm_path_mappings(self) -> Dict[str, Tuple[str, str, Optional[str], Optional[str]]]:
         """
         解析 strm 路径映射配置
-        返回格式: {strm_path: (storage_type, storage_path)}
+        返回格式: {strm_path: (storage_type, storage_path, local_storage_type, local_storage_path)}
         """
         mappings = {}
         if not self.strm_path_mappings:
@@ -1470,8 +1470,14 @@ class RemoveLink(_PluginBase):
             if not line or ":" not in line:
                 continue
             try:
-                # 支持格式: strm_path:storage_type:storage_path 或 strm_path:storage_path (默认local)
-                parts = line.split(":", 2)
+                # 支持格式: 
+                # strm_path:storage_path (默认local)
+                # strm_path:storage_type:storage_path
+                # strm_path:storage_type:storage_path:local_storage_type:local_storage_path
+                parts = line.split(":", 4)
+                local_storage_type = None
+                local_storage_path = None
+
                 if len(parts) == 2:
                     # 默认使用 local 存储
                     strm_path, storage_path = parts
@@ -1479,39 +1485,64 @@ class RemoveLink(_PluginBase):
                 elif len(parts) == 3:
                     # 指定存储类型
                     strm_path, storage_type, storage_path = parts
+                elif len(parts) == 5:
+                    # 指定存储类型 和 本地映射
+                    strm_path, storage_type, storage_path, local_storage_type, local_storage_path = parts
+                    local_storage_type = local_storage_type.strip()
+                    local_storage_path = local_storage_path.strip()
                 else:
-                    logger.warning(f"无效的 strm 路径映射配置: {line}")
+                    logger.warning(f"无效的 strm 路径映射配置 (部件数量错误): {line}")
                     continue
 
                 mappings[strm_path.strip()] = (
                     storage_type.strip(),
                     storage_path.strip(),
+                    local_storage_type,
+                    local_storage_path
                 )
             except ValueError:
                 logger.warning(f"无效的 strm 路径映射配置: {line}")
 
         return mappings
 
-    def _get_storage_path_from_strm(self, strm_file_path: Path) -> Tuple[str, str]:
+    def _get_storage_path_from_strm(
+        self, strm_file_path: Path
+    ) -> Tuple[str, str, Optional[str], Optional[str]]:
         """
-        根据 strm 文件路径获取对应的网盘存储路径
-        返回 (storage_type, storage_path) 或 (None, None)
+        根据 strm 文件路径获取对应的网盘存储路径和本地存储路径
+        返回 (storage_type, storage_path, local_storage_type, local_storage_path) 或 (None, None, None, None)
         """
         mappings = self._parse_strm_path_mappings()
         strm_path_str = str(strm_file_path)
 
-        for strm_prefix, (storage_type, storage_prefix) in mappings.items():
+        for strm_prefix, (
+            storage_type,
+            storage_prefix,
+            local_storage_type,
+            local_storage_prefix,
+        ) in mappings.items():
             if strm_path_str.startswith(strm_prefix):
                 # 计算相对路径
-                relative_path = strm_path_str[len(strm_prefix) :].lstrip("/")
-                # 构建网盘路径，去掉 .strm 后缀
-                storage_file_path = storage_prefix.rstrip("/") + "/" + relative_path
-                if storage_file_path.endswith(".strm"):
-                    storage_file_path = storage_file_path[:-5]  # 去掉 .strm 后缀
+                relative_path_strm = strm_path_str[len(strm_prefix) :].lstrip("/")
+                
+                # 去掉 .strm 后缀
+                relative_path_no_ext = relative_path_strm
+                if relative_path_no_ext.lower().endswith(".strm"):
+                    relative_path_no_ext = relative_path_no_ext[:-5]
 
-                return storage_type, storage_file_path
+                # 构建网盘路径
+                storage_file_path = storage_prefix.rstrip("/") + "/" + relative_path_no_ext
 
-        return None, None
+                # 构建本地路径
+                local_file_path = None
+                if local_storage_type and local_storage_prefix:
+                    local_file_path = (
+                        local_storage_prefix.rstrip("/") + "/" + relative_path_no_ext
+                    )
+
+                return storage_type, storage_file_path, local_storage_type, local_file_path
+
+        return None, None, None, None
 
     def _find_storage_media_file(
         self, storage_type: str, base_path: str
@@ -1825,6 +1856,62 @@ class RemoveLink(_PluginBase):
 
         return deleted_count
 
+    def _delete_local_empty_folders(self, media_file_path: str) -> int:
+        """
+        从指定本地路径开始，逐级向上层目录检测并删除空目录
+        返回删除的目录数量
+        """
+        if not media_file_path:
+            return 0
+        
+        deleted_count = 0
+        try:
+            path = Path(media_file_path)
+            # 文件可能不存在（例如只是为了路径），我们从父目录开始检查
+            parent_path = path.parent
+            
+            # 逐级向上检查
+            while True:
+                if not os.path.exists(parent_path):
+                    logger.debug(f"本地空目录检查：路径 {parent_path} 不存在，停止")
+                    break
+                
+                # 如果当前路径是某个映射的根路径，停止
+                # 简单起见：如果父路径是 / 或根驱动器，停止
+                if parent_path == parent_path.parent:
+                    break
+
+                # 检查是否只剩刮削文件 (logic from `delete_empty_folders`)
+                try:
+                    if self._delete_scrap_infos and self.scrape_files_left(parent_path):
+                        logger.info(f"本地目录 {parent_path} 只剩刮削文件，清理...")
+                        for file in parent_path.iterdir():
+                            file.unlink()
+                            logger.info(f"删除本地刮削文件：{file}")
+                except Exception as e:
+                    logger.error(f"清理本地刮削文件时发生错误：{str(e)}")
+
+                # 检查目录是否为空
+                try:
+                    if not os.listdir(parent_path):
+                        os.rmdir(parent_path)
+                        logger.info(f"清理本地空目录：{parent_path}")
+                        deleted_count += 1
+                        # 更新路径为父目录，准备下一轮检查
+                        parent_path = parent_path.parent
+                    else:
+                        # 目录不为空，停止
+                        logger.debug(f"本地目录 {parent_path} 不为空，停止清理")
+                        break
+                except Exception as e:
+                    logger.error(f"清理本地空目录 {parent_path} 发生错误：{str(e)}")
+                    break # 发生错误，停止
+                        
+        except Exception as e:
+            logger.error(f"清理本地空目录时发生错误：{str(e)} - {traceback.format_exc()}")
+        
+        return deleted_count
+
     def _get_storage_dir_item(
         self, storage_type: str, dir_path: str
     ) -> schemas.FileItem:
@@ -1872,10 +1959,13 @@ class RemoveLink(_PluginBase):
         执行 strm 文件的实际删除逻辑（用于立即删除或延迟删除）
         """
         try:
-            # 获取对应的网盘文件路径
-            storage_type, storage_path = self._get_storage_path_from_strm(
-                strm_file_path
-            )
+            # 获取对应的网盘文件路径和本地文件路径
+            (
+                storage_type,
+                storage_path,
+                local_storage_type,
+                local_storage_path,
+            ) = self._get_storage_path_from_strm(strm_file_path)
 
             if not storage_type or not storage_path:
                 logger.warning(
@@ -1920,6 +2010,20 @@ class RemoveLink(_PluginBase):
                         storage_type, storage_file_item
                     )
 
+                # 清理本地空目录 (if mapped)
+                local_dirs_deleted = 0
+                if local_storage_type == "local" and local_storage_path:
+                    # local_storage_path 是文件前缀，我们需要附加找到的视频文件扩展名
+                    local_media_file_full_path = (
+                        f"{local_storage_path}{storage_file_item.extension_with_dot}"
+                    )
+                    logger.info(
+                        f"开始清理 {local_media_file_full_path} 对应的本地空目录"
+                    )
+                    local_dirs_deleted = self._delete_local_empty_folders(
+                        local_media_file_full_path
+                    )
+
                 # 删除转移记录（通过网盘文件路径查询）
                 history_deleted = False
                 if self._delete_history:
@@ -1934,10 +2038,12 @@ class RemoveLink(_PluginBase):
                     notification_parts.append(
                         f"🗑️ 已删除网盘文件：[{storage_type}] {storage_file_item.path}"
                     )
-                    
+
                     # 检查是否为延迟删除
                     is_delayed = self._delayed_deletion
-                    title_prefix = "⏰ 延迟删除完成 (STRM)" if is_delayed else "⚡ 立即删除完成 (STRM)"
+                    title_prefix = (
+                        "⏰ 延迟删除完成 (STRM)" if is_delayed else "⚡ 立即删除完成 (STRM)"
+                    )
 
                     # 添加其他操作记录
                     if self._delete_history:
@@ -1958,9 +2064,17 @@ class RemoveLink(_PluginBase):
                             scrap_msg = "🖼️ 无刮削文件需要清理"
 
                         # 添加空目录清理信息
-                        if storage_dirs_deleted > 0:
-                            scrap_msg += f"，清理空目录 {storage_dirs_deleted} 个"
-                        
+                        if storage_dirs_deleted > 0 and local_dirs_deleted > 0:
+                            scrap_msg += f"，清理空目录 (网盘 {storage_dirs_deleted} 个，本地 {local_dirs_deleted} 个)"
+                        elif storage_dirs_deleted > 0:
+                            scrap_msg += (
+                                f"，清理网盘空目录 {storage_dirs_deleted} 个"
+                            )
+                        elif local_dirs_deleted > 0:
+                            scrap_msg += (
+                                f"，清理本地空目录 {local_dirs_deleted} 个"
+                            )
+
                         if use_api_delete := (
                             self._api_delete_empty_dirs
                             and self._api_delete_url
