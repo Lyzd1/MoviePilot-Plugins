@@ -200,7 +200,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.7"
+    plugin_version = "2.7.1"
     # 插件作者
     plugin_author = "Lyzd1,DzAvril"
     # 作者主页
@@ -2014,9 +2014,14 @@ class RemoveLink(_PluginBase):
                 local_dirs_deleted = 0
                 if local_storage_type == "local" and local_storage_path:
                     # local_storage_path 是文件前缀，我们需要附加找到的视频文件扩展名
+                    
+                    # --- 
+                    # 修正：使用 f".{storage_file_item.extension}" 替代 "storage_file_item.extension_with_dot"
+                    # ---
                     local_media_file_full_path = (
-                        f"{local_storage_path}{storage_file_item.extension_with_dot}"
+                        f"{local_storage_path}.{storage_file_item.extension}"
                     )
+                    
                     logger.info(
                         f"开始清理 {local_media_file_full_path} 对应的本地空目录"
                     )
