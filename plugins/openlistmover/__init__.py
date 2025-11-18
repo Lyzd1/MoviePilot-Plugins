@@ -18,9 +18,6 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
 from apscheduler.schedulers.background import BackgroundScheduler
-# Assuming settings and StringUtils are available from the broader MoviePilot context
-# from app.core.config import settings
-# from app.utils.string import StringUtils
 
 # --- 视频文件扩展名 ---
 VIDEO_EXTENSIONS = [
@@ -109,7 +106,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.8" # 版本号更新
+    plugin_version = "3.9" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -286,8 +283,9 @@ class OpenlistMover(_PluginBase):
                         title="Openlist 视频文件移动",
                     )
             
-            self._start_task_monitor()
-            logger.info("Openlist 视频文件移动插件已启动")
+            # 移除初始化时的自动启动，改为按需启动
+            # self._start_task_monitor() 
+            logger.info("Openlist 视频文件移动插件已启动 (待机模式)")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -747,13 +745,7 @@ class OpenlistMover(_PluginBase):
         """
         logger.debug("开始停止 Openlist Mover 服务")
         
-        if self._scheduler:
-            try:
-                self._scheduler.shutdown(wait=False)
-                logger.debug("Openlist Mover 任务监控服务已停止")
-            except Exception as e:
-                logger.error(f"停止任务监控失败：{str(e)}")
-            self._scheduler = None
+        self._stop_task_monitor()
 
         if self._observer:
             for observer in self._observer:
@@ -767,8 +759,12 @@ class OpenlistMover(_PluginBase):
 
     def _start_task_monitor(self):
         """
-        启动任务监控定时器
+        启动任务监控定时器 (按需启动)
         """
+        # 如果调度器已存在且正在运行，则不需要重新启动
+        if self._scheduler and self._scheduler.running:
+            return
+
         try:
             timezone = 'Asia/Shanghai' # Fallback for snippet
             self._scheduler = BackgroundScheduler(timezone=timezone)
@@ -779,9 +775,21 @@ class OpenlistMover(_PluginBase):
                 name="Openlist 移动任务监控"
             )
             self._scheduler.start()
-            logger.info("Openlist Mover 任务监控服务已启动")
+            logger.info("Openlist Mover 任务监控服务已启动 (有活跃任务)")
         except Exception as e:
             logger.error(f"启动 Openlist Mover 任务监控服务失败: {e}")
+
+    def _stop_task_monitor(self):
+        """
+        停止任务监控定时器 (空闲时关闭)
+        """
+        if self._scheduler:
+            try:
+                self._scheduler.shutdown(wait=False)
+                self._scheduler = None
+                logger.info("Openlist Mover 任务监控服务已暂停 (无活跃任务)")
+            except Exception as e:
+                logger.error(f"停止任务监控失败：{str(e)}")
             
     def _send_task_notification(self, task: Dict[str, Any], title: str, text: str):
         """
@@ -924,6 +932,10 @@ class OpenlistMover(_PluginBase):
             # --- 结束新增逻辑 ---
             
             logger.debug(f"Openlist Mover 任务检查完成，当前活跃任务数: {len(active_tasks)}")
+
+            # === 自动休眠：如果没有活跃任务且没有待处理的清空操作，则停止监控 ===
+            if not active_tasks and not self._api_clear_pending:
+                self._stop_task_monitor()
             
     def _update_task_strm_status(self, task_id: str, new_status: str, is_final: bool = False):
         """
@@ -1276,6 +1288,9 @@ class OpenlistMover(_PluginBase):
                 }
                 with task_lock:
                     self._move_tasks.append(new_task)
+                
+                # === 关键修改：添加任务后，确保监控服务已启动 ===
+                self._start_task_monitor()
             else:
                 # 移到此处，仅在标准和洗版都失败时才记录
                 if err_code != 403 or "exists" not in str(err_msg):
@@ -1632,6 +1647,3 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist 清空 {task_type} 任务 API 时出错: {e} - {traceback.format_exc()}")
             return False
-
-
-
