@@ -106,7 +106,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.9" 
+    plugin_version = "3.9.1" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -775,7 +775,7 @@ class OpenlistMover(_PluginBase):
                 name="Openlist 移动任务监控"
             )
             self._scheduler.start()
-            logger.info("Openlist Mover 任务监控服务已启动 (有活跃任务)")
+            logger.debug("Openlist Mover 任务监控服务已启动 (有活跃任务)")
         except Exception as e:
             logger.error(f"启动 Openlist Mover 任务监控服务失败: {e}")
 
@@ -787,7 +787,7 @@ class OpenlistMover(_PluginBase):
             try:
                 self._scheduler.shutdown(wait=False)
                 self._scheduler = None
-                logger.info("Openlist Mover 任务监控服务已暂停 (无活跃任务)")
+                logger.debug("Openlist Mover 任务监控服务已暂停 (无活跃任务)")
             except Exception as e:
                 logger.error(f"停止任务监控失败：{str(e)}")
             
