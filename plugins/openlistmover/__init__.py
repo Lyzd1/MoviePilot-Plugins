@@ -22,7 +22,18 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # --- 视频文件扩展名 ---
 VIDEO_EXTENSIONS = [
     ".mkv",
-    ".mp4"
+    ".mp4",
+    ".ts",
+    ".avi",
+    ".rmvb",
+    ".wmv",
+    ".mov",
+    ".flv",
+    ".mpg",
+    ".mpeg",
+    ".iso", # 蓝光原盘
+    ".bdmv", # 蓝光原盘
+    ".m2ts", # 蓝光原盘
 ]
 
 # --- 临时文件后缀 ---
@@ -95,7 +106,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.0" 
+    plugin_version = "4.0.2" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -193,16 +204,30 @@ class OpenlistMover(_PluginBase):
                 self._clear_api_threshold = int(config.get("clear_api_threshold", 10))
             except ValueError:
                 self._clear_api_threshold = 10
-            
+
             try:
                 self._clear_panel_threshold = int(config.get("clear_panel_threshold", 30))
             except ValueError:
                 self._clear_panel_threshold = 30
-                
+
             try:
                 self._keep_successful_tasks = int(config.get("keep_successful_tasks", 3))
             except ValueError:
                 self._keep_successful_tasks = 3
+
+            # === 加载视频后缀配置 ===
+            video_extensions_config = config.get("video_extensions", "")
+            if video_extensions_config:
+                # 解析用户配置的视频后缀
+                custom_extensions = [
+                    ext.strip().lower()
+                    for ext in video_extensions_config.split("\n")
+                    if ext.strip() and ext.strip().startswith('.')
+                ]
+                if custom_extensions:
+                    global VIDEO_EXTENSIONS
+                    VIDEO_EXTENSIONS = custom_extensions
+                    logger.info(f"已加载 {len(VIDEO_EXTENSIONS)} 个自定义视频后缀: {VIDEO_EXTENSIONS}")
             # =======================
 
         # 停止现有任务
@@ -565,6 +590,48 @@ class OpenlistMover(_PluginBase):
                         ]
                     },
                     # =================================
+                    # === 新增视频文件后缀配置 ===
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "title": "视频文件后缀配置",
+                                            "text": "定义哪些文件扩展名被视为视频文件。用于文件监控和洗版模式的文件识别。",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "video_extensions",
+                                            "label": "视频文件后缀",
+                                            "rows": 3,
+                                            "placeholder": "每行一个后缀，例如：\n.mkv\n.mp4\n.ts\n.avi\n.rmvb\n.wmv\n.mov\n.flv\n.mpg\n.mpeg\n.iso\n.bdmv\n.m2ts",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # =================================
                     {
                         "component": "VAlert",
                         "props": {
@@ -589,7 +656,8 @@ class OpenlistMover(_PluginBase):
             "wash_delay_seconds": 60,
             "clear_api_threshold": 10,
             "clear_panel_threshold": 30,
-            "keep_successful_tasks": 3
+            "keep_successful_tasks": 3,
+            "video_extensions": ""
             # ======================
         }
 
@@ -1234,7 +1302,7 @@ class OpenlistMover(_PluginBase):
             if self._wash_mode_enabled:
                 is_wash = self._check_and_clean_similar_files(dst_dir, name)
                 if is_wash:
-                    logger.info(f"洗版模式：已清理类似文件，准备覆盖移动 {name}")
+                    logger.debug(f"洗版模式：已清理类似文件，准备覆盖移动 {name}")
 
             # 3. 准备 Payload
             payload = {"src_dir": src_dir, "dst_dir": dst_dir, "names": [name]}
@@ -1741,16 +1809,15 @@ class OpenlistMover(_PluginBase):
 
         # 如果发现需要删除的文件，执行删除操作
         if files_to_delete:
-            logger.info(f"洗版模式：删除 {len(files_to_delete)} 个类似文件: {files_to_delete}")
+            logger.debug(f"洗版模式：删除 {len(files_to_delete)} 个类似文件: {files_to_delete}")
             delete_success = self._call_openlist_remove_api(dst_dir, files_to_delete)
 
             if delete_success:
-                logger.info(f"洗版模式：成功删除类似文件")
+                logger.debug(f"洗版模式：成功删除类似文件")
                 return True
             else:
-                logger.warning(f"洗版模式：删除类似文件失败，但将继续移动操作")
+                logger.debug(f"洗版模式：删除类似文件失败，但将继续移动操作")
                 return True  # 即使删除失败，也标记为需要洗版
 
         logger.debug(f"目标目录 {dst_dir} 中未发现类似文件")
         return False
-
