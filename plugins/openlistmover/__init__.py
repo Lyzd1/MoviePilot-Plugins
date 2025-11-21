@@ -22,18 +22,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # --- 视频文件扩展名 ---
 VIDEO_EXTENSIONS = [
     ".mkv",
-    ".mp4",
-    ".ts",
-    ".avi",
-    ".rmvb",
-    ".wmv",
-    ".mov",
-    ".flv",
-    ".mpg",
-    ".mpeg",
-    ".iso", # 蓝光原盘
-    ".bdmv", # 蓝光原盘
-    ".m2ts", # 蓝光原盘
+    ".mp4"
 ]
 
 # --- 临时文件后缀 ---
@@ -1764,3 +1753,4 @@ class OpenlistMover(_PluginBase):
 
         logger.debug(f"目标目录 {dst_dir} 中未发现类似文件")
         return False
+
