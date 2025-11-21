@@ -106,7 +106,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.1" 
+    plugin_version = "4.1.1" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -299,7 +299,7 @@ class OpenlistMover(_PluginBase):
                     )
                     observer.daemon = True
                     observer.start()
-                    logger.debug(f"Openlist Mover {mon_path} 的监控服务启动")
+                    logger.info(f"Openlist Mover {mon_path} 的监控服务启动")
                 except Exception as e:
                     err_msg = str(e)
                     logger.error(f"{mon_path} 启动监控失败：{err_msg}")
@@ -314,7 +314,7 @@ class OpenlistMover(_PluginBase):
             # 启动全局扫描定时器
             self._start_global_scan_scheduler()
 
-            logger.info("Openlist 视频文件移动插件已启动")
+            logger.info("Openlist 视频文件移动插件已启动 (待机模式)")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -1785,10 +1785,11 @@ class OpenlistMover(_PluginBase):
             logger.error(f"调用 Openlist 清空 {task_type} 任务 API 时出错: {e} - {traceback.format_exc()}")
             return False
 
-    def _call_openlist_get_api(self, path: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    def _call_openlist_get_api(self, path: str) -> Tuple[Optional[bool], Optional[Dict[str, Any]]]:
         """
         调用 Openlist API /api/fs/get 检查文件或目录是否存在
         返回 (exists, file_info)
+        exists: True=存在, False=不存在, None=结果不明确（应取消操作）
         """
         api_url = f"{self._openlist_url}/api/fs/get"
 
@@ -1826,20 +1827,20 @@ class OpenlistMover(_PluginBase):
                             return False, None
                         else:
                             logger.warning(f"Openlist Get API 报告失败: {error_msg} (Path: {path})")
-                            return False, None
+                            return None, None  # 结果不明确，应取消操作
                 else:
                     logger.warning(f"Openlist Get API 返回非 200 状态码 {response_code}: {response_body}")
-                    return False, None
+                    return None, None  # 结果不明确，应取消操作
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 logger.debug(f"Openlist Get API: {path} 不存在 (HTTP 404)")
                 return False, None
             else:
                 logger.error(f"Openlist Get API 调用失败 (HTTPError {e.code}): {e}")
-                return False, None
+                return None, None  # 结果不明确，应取消操作
         except Exception as e:
             logger.error(f"调用 Openlist Get API 时出错: {e} - {traceback.format_exc()}")
-            return False, None
+            return None, None  # 结果不明确，应取消操作
 
     def _check_and_clean_similar_files(self, dst_dir: str, target_file: str) -> bool:
         """
@@ -1856,6 +1857,9 @@ class OpenlistMover(_PluginBase):
 
         # 构建目录路径进行检查
         dir_exists, dir_info = self._call_openlist_get_api(dst_dir)
+        if dir_exists is None:
+            logger.warning(f"洗版模式：目标目录 {dst_dir} 存在性检查结果不明确，取消移动操作")
+            return False  # 结果不明确，取消操作
         if not dir_exists:
             logger.debug(f"目标目录 {dst_dir} 不存在，无需检查类似文件")
             return False
@@ -1872,8 +1876,11 @@ class OpenlistMover(_PluginBase):
             check_file_path = f"{dst_dir.rstrip('/')}/{target_name_without_ext}{ext}"
             file_exists, file_info = self._call_openlist_get_api(check_file_path)
 
-            if file_exists:
-                logger.info(f"发现类似文件需要删除: {check_file_path}")
+            if file_exists is None:
+                logger.warning(f"洗版模式：文件 {check_file_path} 存在性检查结果不明确，取消移动操作")
+                return False  # 结果不明确，取消操作
+            elif file_exists:
+                logger.debug(f"发现类似文件需要删除: {check_file_path}")
                 files_to_delete.append(f"{target_name_without_ext}{ext}")
 
         # 如果发现需要删除的文件，执行删除操作
@@ -1882,11 +1889,11 @@ class OpenlistMover(_PluginBase):
             delete_success = self._call_openlist_remove_api(dst_dir, files_to_delete)
 
             if delete_success:
-                logger.info(f"洗版模式：成功删除类似文件")
+                logger.debug(f"洗版模式：成功删除类似文件")
                 return True
             else:
-                logger.info(f"洗版模式：删除类似文件失败，但将继续移动操作")
-                return True  # 即使删除失败，也标记为需要洗版
+                logger.warning(f"洗版模式：删除类似文件失败，取消移动操作")
+                return False  # 删除失败时取消移动操作
 
         logger.debug(f"目标目录 {dst_dir} 中未发现类似文件")
         return False
@@ -2019,4 +2026,3 @@ class OpenlistMover(_PluginBase):
                 logger.debug("全局扫描定时器已停止")
             except Exception as e:
                 logger.error(f"停止全局扫描定时器失败: {e}")
-
