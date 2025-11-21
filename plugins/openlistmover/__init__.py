@@ -299,7 +299,7 @@ class OpenlistMover(_PluginBase):
                     )
                     observer.daemon = True
                     observer.start()
-                    logger.info(f"Openlist Mover {mon_path} 的监控服务启动")
+                    logger.debug(f"Openlist Mover {mon_path} 的监控服务启动")
                 except Exception as e:
                     err_msg = str(e)
                     logger.error(f"{mon_path} 启动监控失败：{err_msg}")
@@ -2019,3 +2019,4 @@ class OpenlistMover(_PluginBase):
                 logger.debug("全局扫描定时器已停止")
             except Exception as e:
                 logger.error(f"停止全局扫描定时器失败: {e}")
+
