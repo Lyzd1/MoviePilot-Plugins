@@ -106,7 +106,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "3.9.1" 
+    plugin_version = "4.0" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -1240,31 +1240,42 @@ class OpenlistMover(_PluginBase):
                     )
                 return # 最终会进入 finally
 
-            # 2. 准备 Payload
+            # 2. 检查是否需要洗版（主动检查类似文件）
+            is_wash = False
+            if self._wash_mode_enabled:
+                is_wash = self._check_and_clean_similar_files(dst_dir, name)
+                if is_wash:
+                    logger.info(f"洗版模式：已清理类似文件，准备覆盖移动 {name}")
+
+            # 3. 准备 Payload
             payload = {"src_dir": src_dir, "dst_dir": dst_dir, "names": [name]}
-            
+
+            # 如果是洗版模式，添加覆盖参数
+            if is_wash:
+                payload["overwrite"] = True
+
             logger.debug(f"准备调用 Openlist API 移动文件: {payload}")
 
-            # 3. 调用 API (标准模式)
+            # 4. 调用 API
             # 返回: (task_id, code, message, is_wash_applied)
-            task_id, err_code, err_msg, is_wash = self._call_openlist_move_api(payload, is_wash=False)
-            
+            task_id, err_code, err_msg, is_wash_applied = self._call_openlist_move_api(payload, is_wash=is_wash)
+
             task_started = False
-            
+
             if task_id:
                 logger.info(f"移动任务:  {name} 移动到 {dst_dir}")
                 task_started = True
-                
-            # 4. 检查是否需要洗版
+
+            # 5. 检查是否需要传统洗版（基于 403 错误）
             elif self._wash_mode_enabled and err_code == 403 and err_msg and "exists" in err_msg:
-                logger.info(f"文件 {name} 已存在，启动洗版模式 (覆盖)...")
+                logger.info(f"文件 {name} 已存在，启动传统洗版模式 (覆盖)...")
                 payload["overwrite"] = True
-                
+
                 # 再次调用 API (洗版模式)
-                task_id, err_code, err_msg, is_wash = self._call_openlist_move_api(payload, is_wash=True)
-                
+                task_id, err_code, err_msg, is_wash_applied = self._call_openlist_move_api(payload, is_wash=True)
+
                 if task_id:
-                    logger.info(f"洗版移动任务: {name} (覆盖) 到 {dst_dir}")
+                    logger.info(f"传统洗版移动任务: {name} (覆盖) 到 {dst_dir}")
                     task_started = True
                 else:
                     logger.error(f"Openlist API 洗版移动失败: {name} (Code: {err_code}, Msg: {err_msg})")
@@ -1272,7 +1283,7 @@ class OpenlistMover(_PluginBase):
                     payload.pop("overwrite", None) # 移除 overwrite 字段以便日志清晰
                     logger.error(f"Openlist API 报告失败: {err_msg} (Payload: {payload})")
 
-            # 5. 处理最终结果
+            # 6. 处理最终结果
             if task_started:
                 # Add task to monitor list
                 new_task = {
@@ -1284,7 +1295,7 @@ class OpenlistMover(_PluginBase):
                     "status": TASK_STATUS_RUNNING,
                     "error": "",
                     "strm_status": "未执行",
-                    "is_wash": is_wash # 记录这是否是一个洗版任务
+                    "is_wash": is_wash_applied # 记录这是否是一个洗版任务
                 }
                 with task_lock:
                     self._move_tasks.append(new_task)
@@ -1647,3 +1658,109 @@ class OpenlistMover(_PluginBase):
         except Exception as e:
             logger.error(f"调用 Openlist 清空 {task_type} 任务 API 时出错: {e} - {traceback.format_exc()}")
             return False
+
+    def _call_openlist_get_api(self, path: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """
+        调用 Openlist API /api/fs/get 检查文件或目录是否存在
+        返回 (exists, file_info)
+        """
+        api_url = f"{self._openlist_url}/api/fs/get"
+
+        payload = {
+            "path": path,
+            "password": ""
+        }
+
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": self._openlist_token,
+                "User-Agent": "MoviePilot-OpenlistMover-FileCheck",
+            }
+
+            req = urllib.request.Request(api_url, data=data, headers=headers, method="POST")
+
+            logger.debug(f"调用 Openlist Get API: {api_url}")
+            logger.debug(f"Get API Payload: {payload}")
+
+            with urllib.request.urlopen(req, timeout=30) as response:
+                response_body = response.read().decode("utf-8")
+                response_code = response.getcode()
+
+                if response_code == 200:
+                    response_data = json.loads(response_body)
+                    if response_data.get("code") == 200:
+                        logger.debug(f"Openlist Get API 成功: {path} 存在")
+                        return True, response_data.get('data', {})
+                    else:
+                        error_msg = response_data.get('message', '未知错误')
+                        if "not exist" in error_msg.lower() or "not found" in error_msg.lower():
+                            logger.debug(f"Openlist Get API: {path} 不存在")
+                            return False, None
+                        else:
+                            logger.warning(f"Openlist Get API 报告失败: {error_msg} (Path: {path})")
+                            return False, None
+                else:
+                    logger.warning(f"Openlist Get API 返回非 200 状态码 {response_code}: {response_body}")
+                    return False, None
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                logger.debug(f"Openlist Get API: {path} 不存在 (HTTP 404)")
+                return False, None
+            else:
+                logger.error(f"Openlist Get API 调用失败 (HTTPError {e.code}): {e}")
+                return False, None
+        except Exception as e:
+            logger.error(f"调用 Openlist Get API 时出错: {e} - {traceback.format_exc()}")
+            return False, None
+
+    def _check_and_clean_similar_files(self, dst_dir: str, target_file: str) -> bool:
+        """
+        检查目标目录中是否存在类似文件（相同文件名但不同后缀），如果存在则删除
+        返回 True 表示需要洗版，False 表示不需要
+        """
+        if not self._wash_mode_enabled:
+            return False
+
+        target_path = Path(target_file)
+        target_name_without_ext = target_path.stem  # 获取文件名（不含后缀）
+
+        logger.debug(f"检查目标目录 {dst_dir} 中是否存在类似文件: {target_name_without_ext}.*")
+
+        # 构建目录路径进行检查
+        dir_exists, dir_info = self._call_openlist_get_api(dst_dir)
+        if not dir_exists:
+            logger.debug(f"目标目录 {dst_dir} 不存在，无需检查类似文件")
+            return False
+
+        # 假设目录存在，我们需要列出目录内容来检查类似文件
+        # 由于没有直接的 list API，我们通过尝试检查每个可能的视频文件来模拟
+        files_to_delete = []
+
+        # 检查所有视频扩展名的文件是否存在
+        for ext in VIDEO_EXTENSIONS:
+            if ext == target_path.suffix.lower():
+                continue  # 跳过目标文件本身的后缀
+
+            check_file_path = f"{dst_dir.rstrip('/')}/{target_name_without_ext}{ext}"
+            file_exists, file_info = self._call_openlist_get_api(check_file_path)
+
+            if file_exists:
+                logger.info(f"发现类似文件需要删除: {check_file_path}")
+                files_to_delete.append(f"{target_name_without_ext}{ext}")
+
+        # 如果发现需要删除的文件，执行删除操作
+        if files_to_delete:
+            logger.info(f"洗版模式：删除 {len(files_to_delete)} 个类似文件: {files_to_delete}")
+            delete_success = self._call_openlist_remove_api(dst_dir, files_to_delete)
+
+            if delete_success:
+                logger.info(f"洗版模式：成功删除类似文件")
+                return True
+            else:
+                logger.warning(f"洗版模式：删除类似文件失败，但将继续移动操作")
+                return True  # 即使删除失败，也标记为需要洗版
+
+        logger.debug(f"目标目录 {dst_dir} 中未发现类似文件")
+        return False
