@@ -106,7 +106,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.0.2" 
+    plugin_version = "4.1" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -158,6 +158,12 @@ class OpenlistMover(_PluginBase):
     _clear_panel_threshold = 30  # 自动清空成功任务面板记录的阈值 (默认 30 次成功)
     _keep_successful_tasks = 3   # 清空面板时保留的最新成功任务数量 (默认 3 个)
     # ======================================
+
+    # === 新增全局扫描配置 ===
+    _global_scan_enabled = False
+    _global_scan_time = "02:00"
+    _global_scan_scheduler: Optional[BackgroundScheduler] = None
+    # ==========================
 
     @staticmethod
     def __choose_observer():
@@ -230,6 +236,11 @@ class OpenlistMover(_PluginBase):
                     logger.info(f"已加载 {len(VIDEO_EXTENSIONS)} 个自定义视频后缀: {VIDEO_EXTENSIONS}")
             # =======================
 
+            # === 加载全局扫描配置 ===
+            self._global_scan_enabled = config.get("global_scan_enabled", False)
+            self._global_scan_time = config.get("global_scan_time", "02:00")
+            # =======================
+
         # 停止现有任务
         self.stop_service()
 
@@ -298,8 +309,12 @@ class OpenlistMover(_PluginBase):
                     )
             
             # 移除初始化时的自动启动，改为按需启动
-            # self._start_task_monitor() 
-            logger.info("Openlist 视频文件移动插件已启动 (待机模式)")
+            # self._start_task_monitor()
+
+            # 启动全局扫描定时器
+            self._start_global_scan_scheduler()
+
+            logger.info("Openlist 视频文件移动插件已启动")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -632,6 +647,57 @@ class OpenlistMover(_PluginBase):
                         ]
                     },
                     # =================================
+                    # === 新增全局扫描配置 ===
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "title": "全局扫描配置",
+                                            "text": "每天定时扫描本地监控目录，检查是否有未成功上传的文件并重新上传，防止网络波动导致的错误。",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "global_scan_enabled", "label": "启用全局扫描"},
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "global_scan_time",
+                                            "label": "扫描时间 (HH:MM)",
+                                            "placeholder": "例如: 02:00 (凌晨2点)",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # =================================
                     {
                         "component": "VAlert",
                         "props": {
@@ -657,7 +723,9 @@ class OpenlistMover(_PluginBase):
             "clear_api_threshold": 10,
             "clear_panel_threshold": 30,
             "keep_successful_tasks": 3,
-            "video_extensions": ""
+            "video_extensions": "",
+            "global_scan_enabled": False,
+            "global_scan_time": "02:00"
             # ======================
         }
 
@@ -801,8 +869,9 @@ class OpenlistMover(_PluginBase):
         退出插件
         """
         logger.debug("开始停止 Openlist Mover 服务")
-        
+
         self._stop_task_monitor()
+        self._stop_global_scan_scheduler()
 
         if self._observer:
             for observer in self._observer:
@@ -1813,11 +1882,140 @@ class OpenlistMover(_PluginBase):
             delete_success = self._call_openlist_remove_api(dst_dir, files_to_delete)
 
             if delete_success:
-                logger.debug(f"洗版模式：成功删除类似文件")
+                logger.info(f"洗版模式：成功删除类似文件")
                 return True
             else:
-                logger.debug(f"洗版模式：删除类似文件失败，但将继续移动操作")
+                logger.info(f"洗版模式：删除类似文件失败，但将继续移动操作")
                 return True  # 即使删除失败，也标记为需要洗版
 
         logger.debug(f"目标目录 {dst_dir} 中未发现类似文件")
         return False
+
+    def _scan_local_directories(self):
+        """
+        扫描本地监控目录，检查是否有未成功上传的视频文件
+        """
+        if not self._enabled or not self._global_scan_enabled:
+            return
+
+        logger.info("开始全局扫描本地监控目录...")
+
+        # 获取监控目录列表
+        monitor_dirs = [
+            d.strip() for d in self._monitor_paths.split("\n") if d.strip()
+        ]
+
+        if not monitor_dirs:
+            logger.warning("全局扫描：未配置监控目录")
+            return
+
+        total_files_found = 0
+        total_files_processed = 0
+
+        for monitor_dir in monitor_dirs:
+            if not os.path.exists(monitor_dir):
+                logger.warning(f"全局扫描：监控目录不存在 - {monitor_dir}")
+                continue
+
+            try:
+                logger.info(f"全局扫描：扫描目录 {monitor_dir}")
+
+                # 递归扫描目录中的所有视频文件
+                for root, dirs, files in os.walk(monitor_dir):
+                    for file in files:
+                        file_path = Path(root) / file
+                        file_suffix = file_path.suffix.lower()
+
+                        # 检查是否为视频文件
+                        if file_suffix in VIDEO_EXTENSIONS:
+                            total_files_found += 1
+
+                            # 检查是否为临时文件
+                            if file_suffix in TEMP_EXTENSIONS:
+                                logger.debug(f"全局扫描：跳过临时文件 {file_path}")
+                                continue
+
+                            # 检查文件是否正在处理中
+                            with self._processing_lock:
+                                if file_path in self._processing_files:
+                                    logger.debug(f"全局扫描：文件正在处理中，跳过 {file_path}")
+                                    continue
+
+                            # 检查文件是否已经在任务列表中
+                            file_already_in_tasks = False
+                            with task_lock:
+                                for task in self._move_tasks:
+                                    if task['file'] == file and task['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]:
+                                        file_already_in_tasks = True
+                                        break
+
+                            if file_already_in_tasks:
+                                logger.debug(f"全局扫描：文件已在任务列表中，跳过 {file_path}")
+                                continue
+
+                            # 检查文件是否稳定（大小不再变化）
+                            try:
+                                initial_size = file_path.stat().st_size
+                                time.sleep(2)  # 等待2秒
+                                final_size = file_path.stat().st_size
+
+                                if initial_size == final_size and initial_size > 0:
+                                    # 文件稳定，触发处理
+                                    logger.info(f"全局扫描：发现未上传文件 {file_path}")
+                                    threading.Thread(
+                                        target=self.process_new_file, args=(file_path,)
+                                    ).start()
+                                    total_files_processed += 1
+                                else:
+                                    logger.debug(f"全局扫描：文件仍在写入中，跳过 {file_path}")
+                            except OSError as e:
+                                logger.warning(f"全局扫描：检查文件状态失败 {file_path}: {e}")
+
+            except Exception as e:
+                logger.error(f"全局扫描：扫描目录 {monitor_dir} 时出错: {e}")
+
+        logger.info(f"全局扫描完成：发现 {total_files_found} 个视频文件，处理了 {total_files_processed} 个文件")
+
+    def _start_global_scan_scheduler(self):
+        """
+        启动全局扫描定时器
+        """
+        if not self._global_scan_enabled:
+            return
+
+        # 停止现有的全局扫描定时器
+        self._stop_global_scan_scheduler()
+
+        try:
+            # 解析扫描时间
+            hour, minute = map(int, self._global_scan_time.split(":"))
+
+            timezone = 'Asia/Shanghai'
+            self._global_scan_scheduler = BackgroundScheduler(timezone=timezone)
+
+            # 添加每天定时扫描任务
+            self._global_scan_scheduler.add_job(
+                self._scan_local_directories,
+                "cron",
+                hour=hour,
+                minute=minute,
+                name="Openlist 全局文件扫描"
+            )
+
+            self._global_scan_scheduler.start()
+            logger.info(f"全局扫描定时器已启动，每天 {self._global_scan_time} 执行扫描")
+
+        except Exception as e:
+            logger.error(f"启动全局扫描定时器失败: {e}")
+
+    def _stop_global_scan_scheduler(self):
+        """
+        停止全局扫描定时器
+        """
+        if self._global_scan_scheduler:
+            try:
+                self._global_scan_scheduler.shutdown(wait=False)
+                self._global_scan_scheduler = None
+                logger.debug("全局扫描定时器已停止")
+            except Exception as e:
+                logger.error(f"停止全局扫描定时器失败: {e}")
