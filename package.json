@@ -1,4 +1,17 @@
 {
+    "BonusExchangePlugin": {
+        "name": "魔力兑换助手",
+        "description": "自动监控分享率，在低于阈值时执行魔力兑换操作",
+        "labels": "文件整理",
+        "version": "1.0",
+        "icon": "Ombi_A.png",
+        "author": "Lyzd1",
+        "level": 1,
+        "v2": true,
+        "history": {
+                "v1.0": "测试数据"
+        }
+    },
     "RemoveLink": {
         "name": "清理媒体文件",
         "description": "媒体文件清理工具：支持硬链接文件清理、STRM文件清理、刮削文件清理（元数据、图片、字幕）、转移记录清理、种子联动删除等功能",
