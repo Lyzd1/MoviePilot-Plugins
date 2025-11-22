@@ -3,7 +3,7 @@
         "name": "魔力兑换助手",
         "description": "自动监控分享率，在低于阈值时执行魔力兑换操作",
         "labels": "文件整理",
-        "version": "1.1",
+        "version": "2.0",
         "icon": "Ombi_A.png",
         "author": "Lyzd1",
         "level": 1,
