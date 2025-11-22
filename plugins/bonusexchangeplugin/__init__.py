@@ -1,4 +1,5 @@
 import threading
+import time
 from dataclasses import asdict, fields
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple
@@ -21,8 +22,13 @@ from app.schemas import NotificationType
 from app.schemas.types import EventType, SystemConfigKey
 
 from .bonus_exchange_config import BonusExchangeConfig
+from .exchange_001 import Exchange001
 
 lock = threading.Lock()
+# 记录最后一次兑换时间，用于控制兑换间隔
+last_exchange_time = {}
+# 记录每个站点的当前魔力值（用于动态扣除）
+site_current_bonus = {}
 
 
 class BonusExchangePlugin(_PluginBase):
@@ -33,7 +39,7 @@ class BonusExchangePlugin(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/InfinityPacer/MoviePilot-Plugins/main/icons/trafficassistant.png"
     # 插件版本
-    plugin_version = "1.0"
+    plugin_version = "1.3"
     # 插件作者
     plugin_author = "Claude"
     # 作者主页
@@ -75,6 +81,13 @@ class BonusExchangePlugin(_PluginBase):
         if not result and not self._config:
             self.__update_config_if_error(config=config, error=reason)
             return
+
+        # 更新站点ID
+        if self._config.site_infos and self._config.parsed_exchange_configs:
+            self._config.update_site_ids(self._config.site_infos)
+
+        # 打印选中的站点信息
+        self.__print_site_info()
 
         if self._config.onlyonce:
             self._config.onlyonce = False
@@ -214,7 +227,7 @@ class BonusExchangePlugin(_PluginBase):
                                             'model': 'cron',
                                             'label': '执行周期',
                                             'placeholder': '5位cron表达式',
-                                            'hint': '使用cron表达式指定执行周期，如 0 8 * * *',
+                                            'hint': '使用cron表达式指定执行周期，如 0 */6 * * *',
                                             'persistent-hint': True
                                         }
                                     }
@@ -273,6 +286,74 @@ class BonusExchangePlugin(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'enable_bonus_check',
+                                            'label': '启用魔力检查',
+                                            'hint': '开启后监控站点魔力值',
+                                            'persistent-hint': True
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'bonus_threshold',
+                                            'label': '魔力阈值',
+                                            'type': 'number',
+                                            "min": "0",
+                                            'step': "1",
+                                            'hint': '设置魔力阈值，低于此值将触发操作',
+                                            'persistent-hint': True
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextarea',
+                                        'props': {
+                                            'model': 'site_exchange_rules',
+                                            'label': '站点兑换规则',
+                                            'rows': '5',
+                                            'placeholder': '每行配置一个站点，格式：站点名称 上传量阈值 兑换规则\n例如：学校 500G 2 5G 2300;3 10G 4200\n表示：当学校站点上传量低于500G时，且魔力大于2300时，可以调用option 2去兑换5G上传量',
+                                            'hint': '每行格式：站点名称 上传量阈值 兑换规则1;兑换规则2',
+                                            'persistent-hint': True
+                                        }
+                                    }
+                                ]
+                            },
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
                                 },
                                 'content': [
                                     {
@@ -280,7 +361,7 @@ class BonusExchangePlugin(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '当前版本为数据探索版本，仅用于获取和显示站点数据，不执行实际兑换操作'
+                                            'text': '插件默认每6小时执行一次监控，当分享率或上传量低于阈值时自动执行魔力兑换'
                                         }
                                     }
                                 ]
@@ -290,11 +371,15 @@ class BonusExchangePlugin(_PluginBase):
                 ]
             }
         ], {
-            "enabled": False,
+            "enabled": True,
             "onlyonce": False,
             "notify": True,
-            "enable_ratio_check": False,
-            "ratio_threshold": 1.0
+            "enable_ratio_check": True,
+            "ratio_threshold": 1.0,
+            "enable_bonus_check": True,
+            "bonus_threshold": 1000.0,
+            "cron": "0 */6 * * *",
+            "site_exchange_rules": ""
         }
 
     def get_page(self) -> List[dict]:
@@ -378,25 +463,41 @@ class BonusExchangePlugin(_PluginBase):
                 self.__send_message(title="魔力兑换助手", message=error_msg)
 
     def __print_detailed_statistics(self, site_statistics: dict):
-        """详细打印站点统计数据"""
-        logger.info("=== 站点数据详细信息 ===")
+        """精简打印站点统计数据 - 仅保留分享率、魔力值、上传量"""
+        logger.info("=== 站点数据摘要 ===")
         for site_name, site_data in site_statistics.items():
-            logger.info(f"站点: {site_name}")
-            logger.info(f"  数据日期: {site_data.get('statistic_time', 'N/A')}")
-            logger.info(f"  获取成功: {site_data.get('success', False)}")
-
             if site_data.get('success'):
-                # 打印所有可用的字段
-                for key, value in site_data.items():
-                    if key not in ['success', 'statistic_time']:
-                        logger.info(f"  {key}: {value}")
+                ratio = site_data.get('ratio', 'N/A')
+                bonus = site_data.get('bonus', 'N/A')
+                upload = site_data.get('upload', 'N/A')
+                stat_time = site_data.get('statistic_time', 'N/A')
+                # 将上传量从字节转换为GB
+                upload_gb = upload / (1024 * 1024 * 1024)
+                logger.info(f"站点: {site_name} (数据日期: {stat_time})")
+                logger.info(f"  分享率: {ratio}, 魔力值: {bonus}, 上传量: {upload_gb:.2f}GB")
             else:
-                logger.info(f"  错误信息: {site_data.get('err_msg', '未知错误')}")
+                logger.info(f"站点: {site_name} - 数据获取失败: {site_data.get('err_msg', '未知错误')}")
             logger.info("---")
 
     def __monitor_sites(self, config: BonusExchangeConfig, site_statistics: dict):
         """监控站点数据并执行相应操作"""
         aggregated_messages = []
+        exchange_results = []
+
+        # 初始化站点魔力值
+        global site_current_bonus
+        for site_id, site_info in config.site_infos.items():
+            site_name = site_info.name
+            site_stat = site_statistics.get(site_name)
+
+            if site_stat and site_stat.get("success"):
+                bonus_str = site_stat.get("bonus")
+                if bonus_str:
+                    try:
+                        site_current_bonus[site_name] = float(bonus_str)
+                        logger.info(f"站点 {site_name}: 初始化魔力值为 {site_current_bonus[site_name]}")
+                    except ValueError:
+                        site_current_bonus[site_name] = 0
 
         for site_id, site_info in config.site_infos.items():
             site_name = site_info.name
@@ -419,10 +520,23 @@ class BonusExchangePlugin(_PluginBase):
                 ratio_result = self.__check_ratio(config=config, site_name=site_name, site_stat=site_stat)
                 aggregated_messages.append(ratio_result)
 
+            # 检查魔力值
+            if config.enable_bonus_check:
+                bonus_result = self.__check_bonus(config=config, site_name=site_name, site_stat=site_stat)
+                aggregated_messages.append(bonus_result)
+
+            # 检查是否需要执行兑换，支持连续兑换
+            exchange_results.extend(self.__execute_continuous_exchange(config=config, site_info=site_info, site_stat=site_stat))
+
         # 发送聚合消息
         if aggregated_messages:
             full_message = "\n".join(aggregated_messages)
             self.__send_message(title="魔力兑换助手监控结果", message=full_message)
+
+        # 发送兑换结果消息
+        if exchange_results:
+            exchange_message = "\n".join(exchange_results)
+            self.__send_message(title="魔力兑换助手兑换结果", message=exchange_message)
 
     def __check_ratio(self, config: BonusExchangeConfig, site_name: str, site_stat: dict) -> str:
         """检查分享率"""
@@ -438,18 +552,12 @@ class BonusExchangePlugin(_PluginBase):
         stat_time = site_stat.get("statistic_time", "N/A")
 
         if ratio <= config.ratio_threshold:
-            # 分享率低于阈值，需要执行兑换操作
-            message = (f"站点 {site_name} (数据日期: {stat_time}):\n"
-                      f"  当前分享率: {ratio} ≤ 阈值: {config.ratio_threshold}\n"
-                      f"  [待执行] 魔力兑换操作")
-            logger.info(message)
-            return message
+            # 分享率低于阈值，需要检查魔力值
+            logger.info(f"站点 {site_name}: 当前分享率: {ratio} ≤ 阈值: {config.ratio_threshold}")
+            return f"站点 {site_name}: 当前分享率: {ratio} ≤ 阈值: {config.ratio_threshold}"
         else:
-            message = (f"站点 {site_name} (数据日期: {stat_time}):\n"
-                      f"  当前分享率: {ratio} > 阈值: {config.ratio_threshold}\n"
-                      f"  无需操作")
-            logger.info(message)
-            return message
+            logger.info(f"站点 {site_name}: 当前分享率: {ratio} > 阈值: {config.ratio_threshold}")
+            return f"站点 {site_name}: 当前分享率: {ratio} > 阈值: {config.ratio_threshold}"
 
     def __get_site_statistics(self) -> dict:
         """获取站点统计数据"""
@@ -530,6 +638,11 @@ class BonusExchangePlugin(_PluginBase):
             if config.ratio_threshold <= 0:
                 return False, "分享率阈值必须大于0"
 
+        # 检查魔力阈值是否有效
+        if config.enable_bonus_check:
+            if config.bonus_threshold < 0:
+                return False, "魔力阈值不能小于0"
+
         return True, "所有配置项都有效"
 
     def __validate_and_fix_config(self, config: dict = None) -> [bool, str]:
@@ -543,7 +656,7 @@ class BonusExchangePlugin(_PluginBase):
                 **{field.name: config.get(field.name, getattr(BonusExchangeConfig, field.name, None))
                    for field in fields(BonusExchangeConfig)})
 
-            result, reason = self.__validate_config(config=plugin_config, check_plugin_installed=False)
+            result, reason = self.__validate_config(config=plugin_config)
             if result:
                 # 过滤掉已删除的站点并保存
                 if plugin_config.sites:
@@ -560,6 +673,10 @@ class BonusExchangePlugin(_PluginBase):
                         if site_info:
                             site_infos[site_id] = site_info
                     plugin_config.site_infos = site_infos
+
+                    # 更新站点ID
+                    if plugin_config.parsed_exchange_configs:
+                        plugin_config.update_site_ids(site_infos)
 
                 self._config = plugin_config
                 return True, ""
@@ -595,6 +712,324 @@ class BonusExchangePlugin(_PluginBase):
         """记录错误日志并发送系统通知"""
         logger.error(message)
         self.systemmessage.put(message, title="魔力兑换助手")
+
+    def __print_site_info(self):
+        """打印选中的站点信息"""
+        if not self._config or not self._config.site_infos:
+            logger.info("没有配置站点信息")
+            return
+
+        logger.info("=== 选中的站点信息 ===")
+        for site_id, site_info in self._config.site_infos.items():
+            logger.debug(f"站点ID: {site_id}")
+            logger.debug(f"  站点名称: {site_info.name}")
+            logger.debug(f"  站点域名: {site_info.domain}")
+            logger.debug(f"  Cookie长度: {len(site_info.cookie) if site_info.cookie else 0}")
+            logger.debug(f"  User-Agent: {site_info.ua if site_info.ua else '默认'}")
+            logger.debug(f"  使用代理: {site_info.proxy}")
+
+            # 打印兑换规则
+            exchange_rules = self._config.get_exchange_rules_for_site(site_info.name)
+            if exchange_rules:
+                for rule in exchange_rules:
+                    logger.info(f"站点名称: {site_info.name} - 上传量阈值: {rule.upload_threshold}, 选项: {rule.option}, 上传量: {rule.upload_amount}, 魔力消耗: {rule.bonus_cost}")
+            else:
+                logger.info(f"站点名称: {site_info.name} - 无兑换规则,不可兑换")
+            logger.info("---")
+
+    def __check_bonus(self, config: BonusExchangeConfig, site_name: str, site_stat: dict) -> str:
+        """检查魔力值"""
+        bonus_str = site_stat.get("bonus")
+        if bonus_str is None:
+            return f"站点 {site_name}: 魔力值数据缺失"
+
+        try:
+            bonus = float(bonus_str)
+        except ValueError:
+            return f"站点 {site_name}: 魔力值格式错误 - {bonus_str}"
+
+        stat_time = site_stat.get("statistic_time", "N/A")
+
+        if bonus > config.bonus_threshold:
+            # 魔力值大于阈值，可以执行兑换操作
+            logger.info(f"站点 {site_name}: 当前魔力值: {bonus} > 阈值: {config.bonus_threshold}")
+            return f"站点 {site_name}: 当前魔力值: {bonus} > 阈值: {config.bonus_threshold}"
+        else:
+            logger.info(f"站点 {site_name}: 当前魔力值: {bonus} ≤ 阈值: {config.bonus_threshold}")
+            logger.info(f"站点 {site_name}: 魔力不足，无法兑换")
+            return f"站点 {site_name}: 当前魔力值: {bonus} ≤ 阈值: {config.bonus_threshold}"
+
+    def __check_and_execute_exchange(self, config: BonusExchangeConfig, site_info, site_stat: dict) -> str:
+        """检查并执行兑换操作"""
+        site_name = site_info.name
+
+        # 获取站点的兑换规则
+        exchange_rules = config.get_exchange_rules_for_site(site_name)
+        if not exchange_rules:
+            return None
+
+        # 获取分享率、上传量和魔力值
+        ratio_str = site_stat.get("ratio")
+        upload_str = site_stat.get("upload")
+        bonus_str = site_stat.get("bonus")
+
+        if ratio_str is None or upload_str is None or bonus_str is None:
+            return f"站点 {site_name}: 分享率、上传量或魔力值数据缺失"
+
+        try:
+            current_ratio = float(ratio_str)
+            current_upload_bytes = float(upload_str)
+            current_bonus = float(bonus_str)
+
+            # 将上传量从字节转换为GB
+            current_upload_gb = current_upload_bytes / (1024 * 1024 * 1024)
+        except ValueError:
+            return f"站点 {site_name}: 分享率、上传量或魔力值格式错误"
+
+        # 获取当前动态魔力值
+        global site_current_bonus
+        if site_name not in site_current_bonus:
+            site_current_bonus[site_name] = current_bonus
+            logger.info(f"站点 {site_name}: 初始化动态魔力值为 {site_current_bonus[site_name]}")
+
+        # 检查是否满足兑换条件
+        # 首先对兑换规则按魔力消耗从高到低排序
+        sorted_rules = sorted(exchange_rules, key=lambda x: float(x.bonus_cost), reverse=True)
+
+        for rule in sorted_rules:
+            try:
+                upload_threshold = float(rule.upload_threshold.replace('G', '').replace('g', ''))
+                bonus_cost = float(rule.bonus_cost)
+
+                # 检查兑换条件：
+                # 情况一：分享率低于阈值且魔力值大于阈值
+                # 情况二：上传量小于阈值且魔力值大于阈值
+                should_exchange = False
+
+                if config.enable_ratio_check and current_ratio <= config.ratio_threshold and site_current_bonus[site_name] > config.bonus_threshold:
+                    should_exchange = True
+                    logger.info(f"站点 {site_name}: 满足情况一（分享率低且魔力值高），准备兑换")
+                elif current_upload_gb <= upload_threshold and site_current_bonus[site_name] > config.bonus_threshold:
+                    should_exchange = True
+                    logger.info(f"站点 {site_name}: 满足情况二（上传量低且魔力值高），准备兑换")
+
+                # 如果满足兑换条件，检查具体兑换规则
+                if should_exchange and site_current_bonus[site_name] >= bonus_cost:
+                    # 检查兑换间隔
+                    if not self.__can_execute_exchange(site_name):
+                        return f"站点 {site_name}: 距离上次兑换不足30秒，跳过本次兑换"
+
+                    # 执行兑换
+                    success, message = self.__execute_exchange(site_info, rule)
+
+                    # 更新最后兑换时间
+                    global last_exchange_time
+                    last_exchange_time[site_name] = time.time()
+
+                    # 只有在兑换成功时才扣除魔力值
+                    if success:
+                        site_current_bonus[site_name] -= bonus_cost
+                        logger.info(f"站点 {site_name}: 兑换成功，扣除 {bonus_cost} 魔力，剩余魔力值: {site_current_bonus[site_name]}")
+                        # 兑换成功后，返回特殊标记表示需要继续兑换
+                        return f"CONTINUE_EXCHANGE|站点 {site_name}: 兑换成功 - {message}"
+                    else:
+                        # 兑换失败时，停止继续尝试其他规则
+                        logger.info(f"站点 {site_name}: 兑换失败，停止继续尝试其他兑换规则")
+                        return f"站点 {site_name}: 兑换失败 - {message}"
+
+            except ValueError:
+                continue
+
+        return None
+
+    def __execute_continuous_exchange(self, config: BonusExchangeConfig, site_info, site_stat: dict) -> list:
+        """执行连续兑换，每次最多兑换5次"""
+        exchange_results = []
+        max_exchanges = 5  # 每次最多兑换5次
+        exchange_count = 0
+
+        # 第一次检查是否满足兑换条件
+        initial_should_exchange = False
+        site_name = site_info.name
+
+        # 获取初始数据
+        ratio_str = site_stat.get("ratio")
+        upload_str = site_stat.get("upload")
+        bonus_str = site_stat.get("bonus")
+
+        try:
+            current_ratio = float(ratio_str) if ratio_str else 0
+            current_upload_bytes = float(upload_str) if upload_str else 0
+            current_bonus = float(bonus_str) if bonus_str else 0
+
+            # 将上传量从字节转换为GB
+            current_upload_gb = current_upload_bytes / (1024 * 1024 * 1024)
+
+            # 获取上传量阈值（从第一个兑换规则获取）
+            upload_threshold_gb = float(config.get_exchange_rules_for_site(site_name)[0].upload_threshold.replace('G', '').replace('g', ''))
+            logger.info(f"站点 {site_name}: 上传量 {current_upload_gb:.2f} GB  上传量阈值 = {upload_threshold_gb} GB")
+
+            # 检查是否满足初始兑换条件（必须同时满足魔力值大于阈值）
+            if current_bonus > config.bonus_threshold:
+                if config.enable_ratio_check and current_ratio <= config.ratio_threshold:
+                    initial_should_exchange = True
+                    logger.info(f"站点 {site_name}: 满足情况一（分享率低且魔力值高），开始连续兑换")
+                elif current_upload_gb <= upload_threshold_gb:
+                    initial_should_exchange = True
+                    logger.info(f"站点 {site_name}: 满足情况二（上传量低且魔力值高），开始连续兑换")
+                else:
+                    logger.info(f"站点 {site_name}: 魔力值足够但其他条件不满足，跳过连续兑换")
+            else:
+                logger.info(f"站点 {site_name}: 魔力值不足（{current_bonus} ≤ {config.bonus_threshold}），跳过连续兑换")
+        except (ValueError, TypeError, IndexError):
+            logger.warning(f"站点 {site_name}: 初始数据解析失败，无法开始连续兑换")
+            return exchange_results
+
+        if not initial_should_exchange:
+            logger.info(f"站点 {site_name}: 不满足初始兑换条件，跳过连续兑换")
+            return exchange_results
+
+        while exchange_count < max_exchanges:
+            # 在连续兑换中，只检查魔力值是否足够
+            result = self.__check_and_execute_exchange_continuous(config=config, site_info=site_info)
+
+            if not result:
+                # 没有兑换结果，说明魔力值不足
+                break
+
+            # 检查是否需要继续兑换
+            if result.startswith("CONTINUE_EXCHANGE|"):
+                # 兑换成功，需要继续兑换
+                exchange_results.append(result.replace("CONTINUE_EXCHANGE|", ""))
+                exchange_count += 1
+
+                if exchange_count >= max_exchanges:
+                    logger.info(f"站点 {site_name}: 已达到本次最大兑换次数({max_exchanges})，停止兑换")
+                    break
+
+                logger.info(f"站点 {site_name}: 兑换成功({exchange_count}/{max_exchanges})，等待30秒后继续判断...")
+
+                # 等待30秒
+                time.sleep(30)
+            else:
+                # 兑换失败
+                exchange_results.append(result)
+                break
+
+        if exchange_count > 0:
+            logger.info(f"站点 {site_name}: 本次共执行 {exchange_count} 次兑换")
+
+        return exchange_results
+
+    def __check_and_execute_exchange_continuous(self, config: BonusExchangeConfig, site_info) -> str:
+        """连续兑换专用：只检查魔力值是否足够"""
+        site_name = site_info.name
+
+        # 获取站点的兑换规则
+        exchange_rules = config.get_exchange_rules_for_site(site_name)
+        if not exchange_rules:
+            return None
+
+        # 首先对兑换规则按魔力消耗从高到低排序
+        sorted_rules = sorted(exchange_rules, key=lambda x: float(x.bonus_cost), reverse=True)
+
+        for rule in sorted_rules:
+            try:
+                bonus_cost = float(rule.bonus_cost)
+
+                # 在连续兑换中，只检查魔力值是否足够
+                global site_current_bonus
+                if site_name not in site_current_bonus:
+                    logger.warning(f"站点 {site_name}: 在连续兑换中未找到动态魔力值")
+                    return None
+
+                if site_current_bonus[site_name] >= bonus_cost:
+                    # 检查兑换间隔
+                    if not self.__can_execute_exchange(site_name):
+                        return f"站点 {site_name}: 距离上次兑换不足30秒，跳过本次兑换"
+
+                    # 执行兑换
+                    success, message = self.__execute_exchange(site_info, rule)
+
+                    # 更新最后兑换时间
+                    global last_exchange_time
+                    last_exchange_time[site_name] = time.time()
+
+                    # 只有在兑换成功时才扣除魔力值
+                    if success:
+                        site_current_bonus[site_name] -= bonus_cost
+                        logger.info(f"站点 {site_name}: 兑换成功，扣除 {bonus_cost} 魔力，剩余魔力值: {site_current_bonus[site_name]}")
+                        # 兑换成功后，返回特殊标记表示需要继续兑换
+                        return f"CONTINUE_EXCHANGE|站点 {site_name}: 兑换成功 - {message}"
+                    else:
+                        # 兑换失败时，停止继续尝试其他规则
+                        logger.info(f"站点 {site_name}: 兑换失败，停止继续尝试其他兑换规则")
+                        return f"站点 {site_name}: 兑换失败 - {message}"
+
+            except ValueError:
+                continue
+
+        # 没有找到可以兑换的规则（魔力值不足）
+        logger.info(f"站点 {site_name}: 魔力值不足，无法继续兑换")
+        return None
+
+    def __can_execute_exchange(self, site_name: str) -> bool:
+        """检查是否可以执行兑换（30秒间隔控制）"""
+        global last_exchange_time
+        current_time = time.time()
+
+        if site_name not in last_exchange_time:
+            return True
+
+        time_diff = current_time - last_exchange_time[site_name]
+        return time_diff >= 30  # 30秒间隔
+
+    def __execute_exchange(self, site_info, rule) -> (bool, str):
+        """执行兑换操作"""
+        try:
+            # --- 修改开始 ---
+            # 尝试获取站点完整的 URL (从 Indexer 配置中获取)
+            # site_info.domain 只是主域名，可能缺失子域名(如 pt.)或协议头
+            site_url = f"https://{site_info.domain}"
+            
+            try:
+                # 获取所有索引器配置
+                indexers = self.siteshelper.get_indexers()
+                for indexer in indexers:
+                    # 匹配站点ID
+                    if indexer.get("id") == site_info.id:
+                        indexer_url = indexer.get("domain")
+                        if indexer_url and indexer_url.startswith("http"):
+                            site_url = indexer_url
+                            logger.info(f"站点 {site_info.name}: 使用配置的完整URL -> {site_url}")
+                        break
+            except Exception as e:
+                logger.warning(f"获取站点 {site_info.name} 完整URL失败，回退到默认拼接: {e}")
+
+            # 去除 URL 末尾的斜杠，避免拼接时出现 //
+            site_url = site_url.rstrip('/')
+
+            # 创建兑换器
+            exchanger = Exchange001(
+                site_name=site_info.name,
+                site_url=site_url,
+                cookie=site_info.cookie,
+                ua=site_info.ua
+            )
+            # --- 修改结束 ---
+
+            # 执行兑换
+            success, message = exchanger.execute_exchange(
+                option=rule.option,
+                upload_amount=rule.upload_amount,
+                bonus_cost=rule.bonus_cost
+            )
+
+            return success, message
+
+        except Exception as e:
+            logger.error(f"执行兑换时发生错误: {str(e)}")
+            return False, f"兑换过程发生错误: {str(e)}"
 
     def __get_site_options(self):
         """获取当前可选的站点"""
