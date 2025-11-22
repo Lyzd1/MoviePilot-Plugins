@@ -19,6 +19,10 @@ from app.plugins import _PluginBase
 from app.schemas import NotificationType
 from apscheduler.schedulers.background import BackgroundScheduler
 
+# === 引用 StorageHelper 用于自动获取配置 ===
+from app.helper.storage import StorageHelper
+# ========================================
+
 # --- 视频文件扩展名 ---
 VIDEO_EXTENSIONS = [
     ".mkv",
@@ -106,7 +110,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.1.1" 
+    plugin_version = "4.1.3" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -245,8 +249,31 @@ class OpenlistMover(_PluginBase):
         self.stop_service()
 
         if self._enabled:
+            # =========================================================
+            # 自动配置逻辑：如果 URL 或 Token 未配置，尝试从系统存储中获取
+            # =========================================================
             if not self._openlist_url or not self._openlist_token:
-                logger.error("Openlist Mover 已启用，但 Openlist URL 或 Token 未配置！")
+                try:
+                    logger.debug("OpenlistMover: 插件配置中 URL 或 Token 为空，尝试从系统存储配置中自动读取...")
+                    storage_configs = StorageHelper.get_storagies()
+                    for s in storage_configs:
+                        if s.type in ['alist', 'openlist']:
+                            s_url = s.config.get('host') or s.config.get('url')
+                            s_token = s.config.get('token') or s.config.get('password')
+                            
+                            if s_url and s_token:
+                                logger.info(f"OpenlistMover: 自动检测到存储配置 [{s.name}]，将应用到插件配置。")
+                                if not self._openlist_url:
+                                    self._openlist_url = s_url.rstrip('/')
+                                if not self._openlist_token:
+                                    self._openlist_token = s_token
+                                break # 找到第一个符合的即可
+                except Exception as e:
+                    logger.error(f"OpenlistMover: 自动读取系统存储配置失败: {e}")
+            # =========================================================
+
+            if not self._openlist_url or not self._openlist_token:
+                logger.error("Openlist Mover 已启用，但 Openlist URL 或 Token 未配置（且未能自动获取）！")
                 self.systemmessage.put(
                     "Openlist Mover 启动失败：Openlist URL 或 Token 未配置",
                     title="Openlist 视频文件移动",
@@ -379,7 +406,7 @@ class OpenlistMover(_PluginBase):
                                             "type": "warning",
                                             "variant": "tonal",
                                             "title": "Openlist API 配置",
-                                            "text": "用于调用 Openlist 移动文件 API。URL 必须包含 http/https 协议头。",
+                                            "text": "如果不填写，插件将尝试自动从系统存储配置 (Storage) 中读取类型为 'alist' 或 'openlist' 的配置。",
                                         },
                                     }
                                 ]
@@ -397,7 +424,7 @@ class OpenlistMover(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "openlist_url",
-                                            "label": "Openlist URL",
+                                            "label": "Openlist URL (留空自动获取)",
                                             "placeholder": "例如: http://127.0.0.1:5244",
                                         },
                                     }
@@ -411,7 +438,7 @@ class OpenlistMover(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "openlist_token",
-                                            "label": "Openlist Token",
+                                            "label": "Openlist Token (留空自动获取)",
                                             "type": "password",
                                             "placeholder": "Openlist 管理员 Token",
                                         },
