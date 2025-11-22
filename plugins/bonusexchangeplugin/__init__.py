@@ -33,11 +33,11 @@ class BonusExchangePlugin(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/InfinityPacer/MoviePilot-Plugins/main/icons/trafficassistant.png"
     # 插件版本
-    plugin_version = "1.5"
+    plugin_version = "1.6"
     # 插件作者
-    plugin_author = "Claude"
+    plugin_author = "Lyzd1"
     # 作者主页
-    author_url = "https://claude.ai"
+    author_url = "https://github.com/Lyzd1"
     # 插件配置项ID前缀
     plugin_config_prefix = "bonus_exchange_"
     # 加载顺序
