@@ -23,6 +23,10 @@ from app.schemas.types import EventType
 from app.chain.storage import StorageChain
 from app import schemas
 
+# === 新增引用 ===
+from app.helper.storage import StorageHelper
+# ================
+
 state_lock = threading.Lock()
 deletion_queue_lock = threading.Lock()
 
@@ -200,7 +204,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.7.1"
+    plugin_version = "2.7.2"
     # 插件作者
     plugin_author = "Lyzd1,DzAvril"
     # 作者主页
@@ -327,6 +331,29 @@ class RemoveLink(_PluginBase):
         self.deletion_queue = []
 
         if self._enabled:
+            # =========================================================
+            # 自动配置逻辑：如果开启了 API 删除且 URL 或 Token 未配置，尝试从系统存储中获取
+            # =========================================================
+            if self._api_delete_empty_dirs and (not self._api_delete_url or not self._api_delete_token):
+                try:
+                    logger.debug("RemoveLink: AList API 清理已开启但 URL/Token 未配置，尝试从系统存储配置自动获取...")
+                    storage_configs = StorageHelper.get_storagies()
+                    for s in storage_configs:
+                        if s.type in ['alist', 'openlist']:
+                            s_url = s.config.get('host') or s.config.get('url')
+                            s_token = s.config.get('token') or s.config.get('password')
+                            
+                            if s_url and s_token:
+                                logger.info(f"RemoveLink: 自动检测到存储配置 [{s.name}]，将应用到 AList API 清理配置。")
+                                if not self._api_delete_url:
+                                    self._api_delete_url = s_url.rstrip('/')
+                                if not self._api_delete_token:
+                                    self._api_delete_token = s_token
+                                break # 找到第一个符合的即可
+                except Exception as e:
+                    logger.error(f"RemoveLink: 自动读取系统存储配置失败: {e}")
+            # =========================================================
+
             # 记录延迟删除配置状态
             if self._delayed_deletion:
                 logger.info(f"延迟删除功能已启用，延迟时间: {self._delay_seconds} 秒")
@@ -351,7 +378,7 @@ class RemoveLink(_PluginBase):
                     if self._api_delete_url and self._api_delete_token:
                         logger.info(f"AList API 空目录清理功能已启用，URL: {self._api_delete_url}")
                     else:
-                        logger.warning("AList API 空目录清理已启用，但 URL 或 Token 未配置")
+                        logger.warning("AList API 空目录清理已启用，但 URL 或 Token 未配置（自动获取失败）")
             else:
                 logger.info("STRM 文件删除监控功能已禁用")
 
@@ -829,7 +856,7 @@ class RemoveLink(_PluginBase):
                                             "type": "info",
                                             "variant": "tonal",
                                             "title": "AList API 空目录清理 (可选)",
-                                            "text": "启用后，当清理 Alist 上的 STRM 对应文件后，将调用 AList API 来删除空目录。仅当存储类型为 'alist' 时生效。",
+                                            "text": "启用后，当清理 Alist 上的 STRM 对应文件后，将调用 AList API 来删除空目录。仅当存储类型为 'alist' 时生效。如果不填写 URL 或 Token，将尝试自动从系统存储配置中读取。",
                                         },
                                     }
                                 ],
@@ -860,7 +887,7 @@ class RemoveLink(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "api_delete_url",
-                                            "label": "AList URL",
+                                            "label": "AList URL (留空自动获取)",
                                             "placeholder": "例如: http://127.0.0.1:5244",
                                         },
                                     }
@@ -874,7 +901,7 @@ class RemoveLink(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "api_delete_token",
-                                            "label": "AList Token",
+                                            "label": "AList Token (留空自动获取)",
                                             "type": "password",
                                             "placeholder": "AList 管理员 Token",
                                         },
