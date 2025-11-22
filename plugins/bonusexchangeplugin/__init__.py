@@ -39,7 +39,7 @@ class BonusExchangePlugin(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/InfinityPacer/MoviePilot-Plugins/main/icons/trafficassistant.png"
     # 插件版本
-    plugin_version = "1.3"
+    plugin_version = "1.4"
     # 插件作者
     plugin_author = "Claude"
     # 作者主页
@@ -450,7 +450,7 @@ class BonusExchangePlugin(_PluginBase):
             result = self.__get_site_statistics()
             if result.get("success"):
                 site_statistics = result.get("data")
-                logger.info(f"数据获取成功，获取到 {len(site_statistics)} 个站点的数据")
+                logger.debug(f"数据获取成功，获取到 {len(site_statistics)} 个站点的数据")
 
                 # 详细打印每个站点的数据
                 self.__print_detailed_statistics(site_statistics)
@@ -495,7 +495,7 @@ class BonusExchangePlugin(_PluginBase):
                 if bonus_str:
                     try:
                         site_current_bonus[site_name] = float(bonus_str)
-                        logger.info(f"站点 {site_name}: 初始化魔力值为 {site_current_bonus[site_name]}")
+                        logger.debug(f"站点 {site_name}: 初始化魔力值为 {site_current_bonus[site_name]}")
                     except ValueError:
                         site_current_bonus[site_name] = 0
 
@@ -553,10 +553,10 @@ class BonusExchangePlugin(_PluginBase):
 
         if ratio <= config.ratio_threshold:
             # 分享率低于阈值，需要检查魔力值
-            logger.info(f"站点 {site_name}: 当前分享率: {ratio} ≤ 阈值: {config.ratio_threshold}")
+            logger.debug(f"站点 {site_name}: 当前分享率: {ratio} ≤ 阈值: {config.ratio_threshold}")
             return f"站点 {site_name}: 当前分享率: {ratio} ≤ 阈值: {config.ratio_threshold}"
         else:
-            logger.info(f"站点 {site_name}: 当前分享率: {ratio} > 阈值: {config.ratio_threshold}")
+            logger.debug(f"站点 {site_name}: 当前分享率: {ratio} > 阈值: {config.ratio_threshold}")
             return f"站点 {site_name}: 当前分享率: {ratio} > 阈值: {config.ratio_threshold}"
 
     def __get_site_statistics(self) -> dict:
@@ -602,7 +602,7 @@ class BonusExchangePlugin(_PluginBase):
                 if is_data_valid(site_previous_data):
                     result["data"][site_name] = {**site_previous_data, "success": True,
                                                  "statistic_time": str(previous_day)}
-                    logger.info(f"站点 {site_name} 使用了 {previous_day} 的数据")
+                    logger.debug(f"站点 {site_name} 使用了 {previous_day} 的数据")
                     all_sites_failed = False
                 else:
                     err_msg = site_previous_data.get("err_msg", "无有效数据")
@@ -732,7 +732,11 @@ class BonusExchangePlugin(_PluginBase):
             exchange_rules = self._config.get_exchange_rules_for_site(site_info.name)
             if exchange_rules:
                 for rule in exchange_rules:
-                    logger.info(f"站点名称: {site_info.name} - 上传量阈值: {rule.upload_threshold}, 选项: {rule.option}, 上传量: {rule.upload_amount}, 魔力消耗: {rule.bonus_cost}")
+                    # 如果上传量阈值为0G，则不显示上传量阈值
+                    if rule.upload_threshold == "0G":
+                        logger.info(f"站点名称: {site_info.name} - 选项: {rule.option}, 上传量: {rule.upload_amount}, 魔力消耗: {rule.bonus_cost}")
+                    else:
+                        logger.info(f"站点名称: {site_info.name} - 上传量阈值: {rule.upload_threshold}, 选项: {rule.option}, 上传量: {rule.upload_amount}, 魔力消耗: {rule.bonus_cost}")
             else:
                 logger.info(f"站点名称: {site_info.name} - 无兑换规则,不可兑换")
             logger.info("---")
@@ -752,11 +756,10 @@ class BonusExchangePlugin(_PluginBase):
 
         if bonus > config.bonus_threshold:
             # 魔力值大于阈值，可以执行兑换操作
-            logger.info(f"站点 {site_name}: 当前魔力值: {bonus} > 阈值: {config.bonus_threshold}")
+            logger.debug(f"站点 {site_name}: 当前魔力值: {bonus} > 阈值: {config.bonus_threshold}")
             return f"站点 {site_name}: 当前魔力值: {bonus} > 阈值: {config.bonus_threshold}"
         else:
-            logger.info(f"站点 {site_name}: 当前魔力值: {bonus} ≤ 阈值: {config.bonus_threshold}")
-            logger.info(f"站点 {site_name}: 魔力不足，无法兑换")
+            logger.debug(f"站点 {site_name}: 当前魔力值: {bonus} ≤ 阈值: {config.bonus_threshold}")
             return f"站点 {site_name}: 当前魔力值: {bonus} ≤ 阈值: {config.bonus_threshold}"
 
     def __check_and_execute_exchange(self, config: BonusExchangeConfig, site_info, site_stat: dict) -> str:
@@ -866,21 +869,25 @@ class BonusExchangePlugin(_PluginBase):
             current_upload_gb = current_upload_bytes / (1024 * 1024 * 1024)
 
             # 获取上传量阈值（从第一个兑换规则获取）
-            upload_threshold_gb = float(config.get_exchange_rules_for_site(site_name)[0].upload_threshold.replace('G', '').replace('g', ''))
-            logger.info(f"站点 {site_name}: 上传量 {current_upload_gb:.2f} GB  上传量阈值 = {upload_threshold_gb} GB")
+            upload_threshold_str = config.get_exchange_rules_for_site(site_name)[0].upload_threshold
+            upload_threshold_gb = float(upload_threshold_str.replace('G', '').replace('g', ''))
+
+            # 如果上传量阈值不为0G，则显示上传量阈值
+            if upload_threshold_gb != 0:
+                logger.debug(f"站点 {site_name}: 上传量 {current_upload_gb:.2f} GB  上传量阈值 = {upload_threshold_gb} GB")
 
             # 检查是否满足初始兑换条件（必须同时满足魔力值大于阈值）
             if current_bonus > config.bonus_threshold:
                 if config.enable_ratio_check and current_ratio <= config.ratio_threshold:
                     initial_should_exchange = True
                     logger.info(f"站点 {site_name}: 满足情况一（分享率低且魔力值高），开始连续兑换")
-                elif current_upload_gb <= upload_threshold_gb:
+                elif upload_threshold_gb > 0 and current_upload_gb <= upload_threshold_gb:
                     initial_should_exchange = True
                     logger.info(f"站点 {site_name}: 满足情况二（上传量低且魔力值高），开始连续兑换")
                 else:
-                    logger.info(f"站点 {site_name}: 魔力值足够但其他条件不满足，跳过连续兑换")
+                    logger.debug(f"站点 {site_name}: 魔力值足够但其他条件不满足，跳过连续兑换")
             else:
-                logger.info(f"站点 {site_name}: 魔力值不足（{current_bonus} ≤ {config.bonus_threshold}），跳过连续兑换")
+                logger.debug(f"站点 {site_name}: 魔力值不足（{current_bonus} ≤ {config.bonus_threshold}），跳过连续兑换")
         except (ValueError, TypeError, IndexError):
             logger.warning(f"站点 {site_name}: 初始数据解析失败，无法开始连续兑换")
             return exchange_results
