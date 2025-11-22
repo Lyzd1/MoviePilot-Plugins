@@ -1,5 +1,27 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict
+import re
+
+
+@dataclass
+class ExchangeRule:
+    """单个兑换规则"""
+    option: str  # 兑换选项编号
+    upload_amount: str  # 上传量（GB）
+    bonus_cost: str  # 魔力消耗
+    upload_threshold: str  # 上传量阈值（GB）
+
+    def __str__(self):
+        return f"{self.option} {self.upload_amount} {self.bonus_cost}"
+
+
+@dataclass
+class SiteExchangeConfig:
+    """站点兑换配置"""
+    site_id: int
+    site_name: str
+    exchange_rules: List[ExchangeRule] = field(default_factory=list)
+    exchange_class: str = "exchange_001"  # 默认使用001类兑换
 
 
 @dataclass
@@ -7,20 +29,40 @@ class BonusExchangeConfig:
     """
     魔力兑换插件配置类
     """
-    enabled: Optional[bool] = False  # 启用插件
+    enabled: Optional[bool] = True  # 启用插件，默认开启
     sites: List[int] = field(default_factory=list)  # 站点列表
     site_infos: dict = None  # 站点信息字典
     onlyonce: Optional[bool] = False  # 立即运行一次
-    notify: Optional[bool] = False  # 发送通知
-    cron: Optional[str] = None  # 执行周期
+    notify: Optional[bool] = True  # 发送通知，默认开启
+    cron: Optional[str] = "0 */6 * * *"  # 执行周期，默认每6小时执行一次
 
-    # 分享率阈值配置
+    # 监控阈值配置
     ratio_threshold: Optional[float] = 1.0  # 分享率阈值
-    enable_ratio_check: Optional[bool] = False  # 启用分享率检查
+    enable_ratio_check: Optional[bool] = True  # 启用分享率检查，默认开启
+
+    bonus_threshold: Optional[float] = 1000.0  # 魔力阈值
+    enable_bonus_check: Optional[bool] = True  # 启用魔力检查，默认开启
+
+    # 站点兑换规则配置（文本格式：每行 站点名称 上传量阈值 兑换规则）
+    # 例如：学校 500G 2 5G 2300;3 10G 4200
+    site_exchange_rules: str = ""
+
+    # 解析后的站点兑换配置
+    parsed_exchange_configs: Dict[str, SiteExchangeConfig] = None
 
     def __post_init__(self):
         # 类型转换
         self.ratio_threshold = self._convert_float(self.ratio_threshold, 1.0)
+        self.bonus_threshold = self._convert_float(self.bonus_threshold, 1000.0)
+
+        # 初始化字典属性
+        if self.site_infos is None:
+            self.site_infos = {}
+        if self.parsed_exchange_configs is None:
+            self.parsed_exchange_configs = {}
+
+        # 解析兑换规则
+        self.parsed_exchange_configs = self._parse_exchange_rules()
 
     @staticmethod
     def _convert_float(value, default):
@@ -29,3 +71,99 @@ class BonusExchangeConfig:
             return float(value) if value is not None else default
         except (ValueError, TypeError):
             return default
+
+    def _parse_exchange_rules(self) -> Dict[str, SiteExchangeConfig]:
+        """解析站点兑换规则 - 支持有/无上传量限制的格式"""
+        if not self.site_exchange_rules:
+            return {}
+
+        configs = {}
+        lines = self.site_exchange_rules.strip().split('\n')
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                # 解析配置行：站点名称 [上传量限制] 等级 下载量 价格;等级 下载量 价格...
+                parsed_item = self._parse_config_line(line)
+                if parsed_item:
+                    site_name, upload_threshold, exchange_rules = parsed_item
+
+                    if exchange_rules:
+                        # 使用站点名称作为key
+                        configs[site_name] = SiteExchangeConfig(
+                            site_id=0,  # 稍后会更新为真实ID
+                            site_name=site_name,
+                            exchange_rules=exchange_rules
+                        )
+
+            except (ValueError, IndexError):
+                continue
+
+        return configs
+
+    def _parse_config_line(self, line: str) -> Optional[tuple]:
+        """解析单行配置，返回 (站点名称, 上传量阈值, 兑换规则列表)"""
+        parts = line.split()
+        if len(parts) < 4:
+            return None
+
+        site_name = parts[0]
+
+        # 检查第二个部分是否是上传量限制（以G结尾的数字）
+        upload_threshold = None
+        start_index = 1
+
+        if len(parts) > 1 and re.match(r'^\d+G$', parts[1]):
+            upload_threshold = parts[1]
+            start_index = 2
+
+        # 解析剩余部分作为等级配置
+        remaining = ' '.join(parts[start_index:])
+        exchange_rules = self._parse_level_rules(remaining, upload_threshold)
+
+        if exchange_rules:
+            return (site_name, upload_threshold, exchange_rules)
+
+        return None
+
+    def _parse_level_rules(self, levels_str: str, upload_threshold: Optional[str]) -> List[ExchangeRule]:
+        """解析等级配置字符串"""
+        exchange_rules = []
+        level_parts = levels_str.split(';')
+
+        for part in level_parts:
+            part = part.strip()
+            if not part:
+                continue
+
+            # 匹配: 等级 下载量 价格
+            level_match = re.match(r'(\d+)\s+(\d+G)\s+(\d+)', part)
+            if level_match:
+                exchange_rules.append(ExchangeRule(
+                    option=level_match.group(1),  # 等级作为选项编号
+                    upload_amount=level_match.group(2),  # 下载量
+                    bonus_cost=level_match.group(3),  # 价格
+                    upload_threshold=upload_threshold or "0G"  # 上传量阈值，如果没有则为0G
+                ))
+
+        return exchange_rules
+
+    def get_exchange_rules_for_site(self, site_name: str) -> List[ExchangeRule]:
+        """获取指定站点的兑换规则"""
+        if self.parsed_exchange_configs and site_name in self.parsed_exchange_configs:
+            return self.parsed_exchange_configs[site_name].exchange_rules
+        return []
+
+    def update_site_ids(self, site_infos: dict):
+        """更新站点ID"""
+        if not self.parsed_exchange_configs:
+            return
+
+        for site_name, config in self.parsed_exchange_configs.items():
+            for site_id, site_info in site_infos.items():
+                if site_info.name == site_name:
+                    config.site_id = site_id
+                    break
