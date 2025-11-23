@@ -9,7 +9,7 @@
         "level": 1,
         "v2": true,
         "history": {
-                "v1.6.1": "修改通知时机"
+                "v1.6.1": "修改通知时机",
                 "v1.5": "001 /mybonus.php?action=exchange"
         }
     },
