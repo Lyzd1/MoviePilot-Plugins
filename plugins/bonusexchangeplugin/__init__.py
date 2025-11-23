@@ -33,11 +33,11 @@ class BonusExchangePlugin(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/InfinityPacer/MoviePilot-Plugins/main/icons/trafficassistant.png"
     # 插件版本
-    plugin_version = "1.6.1"
+    plugin_version = "1.7"
     # 插件作者
-    plugin_author = "Lyzd1"
+    plugin_author = "Claude"
     # 作者主页
-    author_url = "https://github.com/Lyzd1"
+    author_url = "https://claude.ai"
     # 插件配置项ID前缀
     plugin_config_prefix = "bonus_exchange_"
     # 加载顺序
@@ -483,13 +483,12 @@ class BonusExchangePlugin(_PluginBase):
                 aggregated_messages.append(bonus_result)
             # 检查是否需要执行兑换，支持连续兑换
             exchange_results.extend(self.__execute_continuous_exchange(config=config, site_info=site_info, site_stat=site_stat))
-
+        # 发送聚合消息
+        if aggregated_messages:
+            full_message = "\n".join(aggregated_messages)
+            self.__send_message(title="魔力兑换助手监控结果", message=full_message)
         # 发送兑换结果消息
-        if exchange_results:       
-            # 发送聚合消息
-            if aggregated_messages:
-                full_message = "\n".join(aggregated_messages)
-                self.__send_message(title="魔力兑换助手监控结果", message=full_message)
+        if exchange_results:
             exchange_message = "\n".join(exchange_results)
             self.__send_message(title="魔力兑换助手兑换结果", message=exchange_message)
     def __check_ratio(self, config: BonusExchangeConfig, site_name: str, site_stat: dict) -> str:
@@ -718,12 +717,15 @@ class BonusExchangePlugin(_PluginBase):
                 # 情况一：分享率低于阈值且魔力值大于阈值
                 # 情况二：上传量小于阈值且魔力值大于阈值
                 should_exchange = False
-                if config.enable_ratio_check and current_ratio <= config.ratio_threshold and site_current_bonus[site_name] > config.bonus_threshold:
+                bonus_condition_met = True
+                if config.enable_bonus_check:
+                    bonus_condition_met = site_current_bonus[site_name] > config.bonus_threshold
+                if config.enable_ratio_check and current_ratio <= config.ratio_threshold and bonus_condition_met:
                     should_exchange = True
-                    logger.info(f"站点 {site_name}: 满足情况一（分享率低且魔力值高），准备兑换")
-                elif current_upload_gb <= upload_threshold and site_current_bonus[site_name] > config.bonus_threshold:
+                    logger.info(f"站点 {site_name}: 满足情况一（分享率低且魔力值满足条件），准备兑换")
+                elif current_upload_gb <= upload_threshold and bonus_condition_met:
                     should_exchange = True
-                    logger.info(f"站点 {site_name}: 满足情况二（上传量低且魔力值高），准备兑换")
+                    logger.info(f"站点 {site_name}: 满足情况二（上传量低且魔力值满足条件），准备兑换")
                 # 如果满足兑换条件，检查具体兑换规则
                 if should_exchange and site_current_bonus[site_name] >= bonus_cost:
                     # 检查兑换间隔
