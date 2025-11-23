@@ -1,4 +1,17 @@
 {
+    "MoviePilotRankSubscribe": {
+        "name": "MoviePilot榜单订阅",
+        "description": "定期获取MoviePilot内置榜单，根据评分和过滤条件自动订阅内容。",
+        "labels": "文件整理",
+        "version": "1.0",
+        "icon": "Ombi_A.png",
+        "author": "Lyzd1",
+        "level": 1,
+        "v2": true,
+        "history": {
+                "v1.0": "第一版"
+        }
+    },
     "BonusExchangePlugin": {
         "name": "魔力兑换助手",
         "description": "自动监控分享率，在低于阈值时执行魔力兑换操作",
