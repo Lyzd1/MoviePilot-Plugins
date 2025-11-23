@@ -3,12 +3,13 @@
         "name": "魔力兑换助手",
         "description": "自动监控分享率，在低于阈值时执行魔力兑换操作",
         "labels": "文件整理",
-        "version": "1.6.1",
+        "version": "1.7",
         "icon": "Ombi_A.png",
         "author": "Lyzd1",
         "level": 1,
         "v2": true,
         "history": {
+                "v1.7": "修复魔力阈值开关不可用问题",
                 "v1.6.1": "修改通知时机",
                 "v1.5": "001 /mybonus.php?action=exchange"
         }
