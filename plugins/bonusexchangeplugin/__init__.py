@@ -33,7 +33,7 @@ class BonusExchangePlugin(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/InfinityPacer/MoviePilot-Plugins/main/icons/trafficassistant.png"
     # 插件版本
-    plugin_version = "1.6"
+    plugin_version = "1.6.1"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -483,12 +483,13 @@ class BonusExchangePlugin(_PluginBase):
                 aggregated_messages.append(bonus_result)
             # 检查是否需要执行兑换，支持连续兑换
             exchange_results.extend(self.__execute_continuous_exchange(config=config, site_info=site_info, site_stat=site_stat))
-        # 发送聚合消息
-        if aggregated_messages:
-            full_message = "\n".join(aggregated_messages)
-            self.__send_message(title="魔力兑换助手监控结果", message=full_message)
+
         # 发送兑换结果消息
-        if exchange_results:
+        if exchange_results:       
+            # 发送聚合消息
+            if aggregated_messages:
+                full_message = "\n".join(aggregated_messages)
+                self.__send_message(title="魔力兑换助手监控结果", message=full_message)
             exchange_message = "\n".join(exchange_results)
             self.__send_message(title="魔力兑换助手兑换结果", message=exchange_message)
     def __check_ratio(self, config: BonusExchangeConfig, site_name: str, site_stat: dict) -> str:
