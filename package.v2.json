@@ -15,7 +15,7 @@
             "v4.0.1": "支持配置【事件删种策略】。更新后可能需要重启MP！",
             "v4.0": "适配 MoviePilot V2。"
         }
-    }
+    },
     "MoviePilotRankSubscribe": {
         "name": "MoviePilot榜单订阅",
         "description": "定期获取MoviePilot内置榜单，根据评分和过滤条件自动订阅内容。",
