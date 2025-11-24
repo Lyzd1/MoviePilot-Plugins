@@ -34,8 +34,6 @@ This repository contains plugins for MoviePilot.
 * Description: 自动托管刷流，将会提高对应站点的访问频率。
 * Version: 4.4.2
 
-## V2 Plugins
-
 ### DownloaderHelper
 * Name: 下载器助手
 * Description: 自动标签、自动做种、自动删种。

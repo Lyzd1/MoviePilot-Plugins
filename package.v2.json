@@ -1,21 +1,4 @@
 {
-    "DownloaderHelper": {
-        "name": "下载器助手",
-        "description": "自动标签、自动做种、自动删种。",
-        "labels": "下载管理,仪表板",
-        "version": "5.0",
-        "icon": "https://raw.githubusercontent.com/hotlcc/MoviePilot-Plugins-Third/main/icons/DownloaderHelper.png",
-        "author": "hotlcc",
-        "level": 1,
-        "history": {
-            "v5.0": "取消PT BT标签",
-            "v4.0.4": "修正Tracker域名解析缺陷。",
-            "v4.0.3": "修复活动种子仪表板报错的问题。",
-            "v4.0.2": "修正活动种子仪表板状态显示。",
-            "v4.0.1": "支持配置【事件删种策略】。更新后可能需要重启MP！",
-            "v4.0": "适配 MoviePilot V2。"
-        }
-    },
     "MoviePilotRankSubscribe": {
         "name": "MoviePilot榜单订阅",
         "description": "定期获取MoviePilot内置榜单，根据评分和过滤条件自动订阅内容。",
@@ -142,5 +125,22 @@
           "v4.0": "站点独立配置项支持配置NexusPHP 站点自动跳过下载提示页",
           "v3.9": "MoviePilot V2 版本站点刷流插件"
          }
+    },
+    "DownloaderHelper": {
+        "name": "下载器助手",
+        "description": "自动标签、自动做种、自动删种。",
+        "labels": "下载管理,仪表板",
+        "version": "5.0",
+        "icon": "https://raw.githubusercontent.com/hotlcc/MoviePilot-Plugins-Third/main/icons/DownloaderHelper.png",
+        "author": "hotlcc",
+        "level": 1,
+        "history": {
+            "v5.0": "取消PT BT标签",
+            "v4.0.4": "修正Tracker域名解析缺陷。",
+            "v4.0.3": "修复活动种子仪表板报错的问题。",
+            "v4.0.2": "修正活动种子仪表板状态显示。",
+            "v4.0.1": "支持配置【事件删种策略】。更新后可能需要重启MP！",
+            "v4.0": "适配 MoviePilot V2。"
+        }
     }
 }

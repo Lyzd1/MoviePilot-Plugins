@@ -110,7 +110,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.1.3" 
+    plugin_version = "4.3.1" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -200,7 +200,7 @@ class OpenlistMover(_PluginBase):
             self._monitor_paths = config.get("monitor_paths", "")
             self._path_mappings = config.get("path_mappings", "")
             self._strm_path_mappings = config.get("strm_path_mappings", "") # 加载 strm 映射
-            
+
             # === 加载洗版配置 ===
             self._wash_mode_enabled = config.get("wash_mode_enabled", False)
             try:
@@ -208,7 +208,7 @@ class OpenlistMover(_PluginBase):
             except ValueError:
                 self._wash_delay_seconds = 60
             # =======================
-            
+
             # === 加载新的配置项 ===
             try:
                 self._clear_api_threshold = int(config.get("clear_api_threshold", 10))
@@ -244,6 +244,27 @@ class OpenlistMover(_PluginBase):
             self._global_scan_enabled = config.get("global_scan_enabled", False)
             self._global_scan_time = config.get("global_scan_time", "02:00")
             # =======================
+
+        # === 加载持久化状态 ===
+        # 加载任务列表
+        saved_tasks = self.get_data('move_tasks') or []
+        self._move_tasks = []
+        for task in saved_tasks:
+            try:
+                # 反序列化 datetime 对象
+                if 'start_time' in task and isinstance(task['start_time'], str):
+                    task['start_time'] = datetime.fromisoformat(task['start_time'])
+                self._move_tasks.append(task)
+            except Exception as e:
+                logger.warning(f"加载任务时出错，跳过该任务: {task.get('id', 'unknown')} - {e}")
+
+        # 加载状态计数器
+        state_data = self.get_data('plugin_state') or {}
+        self._successful_moves_count = state_data.get('successful_moves_count', 0)
+        self._api_clear_pending = state_data.get('api_clear_pending', False)
+
+        logger.info(f"已加载 {len(self._move_tasks)} 个持久化任务，成功计数: {self._successful_moves_count}")
+        # =====================
 
         # 停止现有任务
         self.stop_service()
@@ -340,6 +361,13 @@ class OpenlistMover(_PluginBase):
 
             # 启动全局扫描定时器
             self._start_global_scan_scheduler()
+
+            # === 任务恢复逻辑 ===
+            active_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
+            if active_tasks:
+                logger.info(f"发现 {len(active_tasks)} 个未完成的任务，将自动启动任务监控服务。")
+                self._start_task_monitor()
+            # ====================
 
             logger.info("Openlist 视频文件移动插件已启动 (待机模式)")
 
@@ -910,6 +938,38 @@ class OpenlistMover(_PluginBase):
         self._observer = []
         logger.debug("Openlist Mover 服务停止完成")
 
+    def _save_move_tasks(self):
+        """
+        保存任务列表到持久化存储
+        """
+        try:
+            # 序列化 datetime 对象
+            serializable_tasks = []
+            for task in self._move_tasks:
+                serializable_task = task.copy()
+                if 'start_time' in serializable_task and isinstance(serializable_task['start_time'], datetime):
+                    serializable_task['start_time'] = serializable_task['start_time'].isoformat()
+                serializable_tasks.append(serializable_task)
+
+            self.save_data('move_tasks', serializable_tasks)
+            logger.debug(f"已保存 {len(serializable_tasks)} 个任务到持久化存储")
+        except Exception as e:
+            logger.error(f"保存任务列表时出错: {e}")
+
+    def _save_plugin_state(self):
+        """
+        保存插件状态到持久化存储
+        """
+        try:
+            state_data = {
+                'successful_moves_count': self._successful_moves_count,
+                'api_clear_pending': self._api_clear_pending
+            }
+            self.save_data('plugin_state', state_data)
+            logger.debug("已保存插件状态到持久化存储")
+        except Exception as e:
+            logger.error(f"保存插件状态时出错: {e}")
+
     def _start_task_monitor(self):
         """
         启动任务监控定时器 (按需启动)
@@ -979,6 +1039,7 @@ class OpenlistMover(_PluginBase):
                     task['status'] = TASK_STATUS_FAILED
                     task['error'] = f"任务超时 ({int(self._max_task_duration / 60)} 分钟)"
                     logger.error(f"Openlist 移动任务 {task['id']} 超时")
+                    self._save_move_tasks()  # 保存超时状态变更
                 self._send_task_notification(task, "Openlist 移动超时", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：任务超时")
                 continue
 
@@ -994,13 +1055,15 @@ class OpenlistMover(_PluginBase):
                     if new_status == TASK_STATUS_SUCCESS and task['status'] != TASK_STATUS_SUCCESS:
                         task['status'] = new_status
                         task['strm_status'] = '开始处理' # 标记开始 STRM 流程
-                        
+                        self._save_move_tasks()  # 保存任务状态变更
+
                         # 增加成功计数
                         self._successful_moves_count += 1
-                        
+                        self._save_plugin_state()  # 保存状态计数器
+
                         # 任务成功后，启动一个新的线程来处理 STRM
                         threading.Thread(
-                            target=self._process_strm_creation, 
+                            target=self._process_strm_creation,
                             args=(task,)
                         ).start()
                         
@@ -1008,8 +1071,10 @@ class OpenlistMover(_PluginBase):
                         task['status'] = new_status
                         task['error'] = error_msg if error_msg else "Openlist 报告失败"
                         self._send_task_notification(task, "Openlist 移动失败", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：{task['error']}")
+                        self._save_move_tasks()  # 保存任务状态变更
                     elif new_status == TASK_STATUS_RUNNING:
                         task['status'] = new_status
+                        self._save_move_tasks()  # 保存任务状态变更
                         
             except Exception as e:
                 logger.error(f"查询 Openlist 任务 {task['id']} 状态失败: {e}")
@@ -1025,8 +1090,9 @@ class OpenlistMover(_PluginBase):
                 
                 if not self._api_clear_pending: # 仅在首次触发时记录
                     logger.debug(f"成功移动任务达到 {self._successful_moves_count} 次，满足 Openlist API 任务清空阈值。")
-                    logger.debug("已标记 API 任务清空为“待处理”，将在所有活跃任务完成后执行。")
+                    logger.debug("已标记 API 任务清空为'待处理'，将在所有活跃任务完成后执行。")
                     self._api_clear_pending = True # 设置挂起标志
+                    self._save_plugin_state()  # 保存挂起标志
                 
                 # [!!] 移除立即执行
 
@@ -1050,13 +1116,15 @@ class OpenlistMover(_PluginBase):
                 tasks_to_keep.extend(successful_tasks[:self._keep_successful_tasks])
                 
                 self._move_tasks = tasks_to_keep
-                
+                self._save_move_tasks()  # 保存清理后的任务列表
+
                 logger.info(f"插件面板成功记录清空完毕，保留 {self._keep_successful_tasks} 条最新成功记录。")
                 clear_panel_triggered = True
 
             # 3. 仅在插件面板清空被触发时，重置计数器
             if clear_panel_triggered:
                  self._successful_moves_count = 0
+                 self._save_plugin_state()  # 保存重置后的计数器
                  logger.info("成功计数器已重置。")
 
             # --- 新增逻辑：处理挂起的 API 清空 ---
@@ -1078,6 +1146,7 @@ class OpenlistMover(_PluginBase):
                         logger.error(f"执行挂起的 Openlist API 任务清空时发生错误: {e}")
                     finally:
                         self._api_clear_pending = False # 无论成功与否，都重置标志，避免卡死
+                        self._save_plugin_state()  # 保存重置后的标志
                 else:
                     # 标志为 True，但仍有活跃任务
                     logger.debug(f"API 任务清空操作待处理，仍在等待 {len(active_tasks)} 个活跃任务完成...")
@@ -1101,6 +1170,7 @@ class OpenlistMover(_PluginBase):
                     task['strm_status'] = new_status
                     found_task = task
                     break
+            self._save_move_tasks()  # 保存 STRM 状态变更
         
         # 仅在 STRM 流程最终完成后发送通知
         if is_final and found_task:
@@ -1452,7 +1522,8 @@ class OpenlistMover(_PluginBase):
                 }
                 with task_lock:
                     self._move_tasks.append(new_task)
-                
+                    self._save_move_tasks()  # 保存任务列表
+
                 # === 关键修改：添加任务后，确保监控服务已启动 ===
                 self._start_task_monitor()
             else:
