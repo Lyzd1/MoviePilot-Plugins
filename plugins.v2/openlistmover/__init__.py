@@ -110,7 +110,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.3.1" 
+    plugin_version = "4.3.2" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -147,7 +147,6 @@ class OpenlistMover(_PluginBase):
     # === 新增：用于防止重复处理 ===
     _processing_files: set = set()
     _processing_lock = Lock()
-    _api_clear_pending = False # 新增：API 清空任务挂起标志
     # ==========================
     
     # Task tracking list
@@ -158,7 +157,7 @@ class OpenlistMover(_PluginBase):
 
     # === 新增属性用于任务计数和清空配置 ===
     _successful_moves_count = 0  # 累计成功移动次数
-    _clear_api_threshold = 10    # 自动清空 Openlist API 任务记录的阈值 (默认 10 次成功)
+    _clear_api_threshold = 10    # 自动清空 Openlist API 任务记录的阈值 (已弃用，保留以兼容旧配置)
     _clear_panel_threshold = 30  # 自动清空成功任务面板记录的阈值 (默认 30 次成功)
     _keep_successful_tasks = 3   # 清空面板时保留的最新成功任务数量 (默认 3 个)
     # ======================================
@@ -210,6 +209,7 @@ class OpenlistMover(_PluginBase):
             # =======================
 
             # === 加载新的配置项 ===
+            # _clear_api_threshold 已弃用，但仍保留以兼容旧配置
             try:
                 self._clear_api_threshold = int(config.get("clear_api_threshold", 10))
             except ValueError:
@@ -261,7 +261,6 @@ class OpenlistMover(_PluginBase):
         # 加载状态计数器
         state_data = self.get_data('plugin_state') or {}
         self._successful_moves_count = state_data.get('successful_moves_count', 0)
-        self._api_clear_pending = state_data.get('api_clear_pending', False)
 
         logger.info(f"已加载 {len(self._move_tasks)} 个持久化任务，成功计数: {self._successful_moves_count}")
         # =====================
@@ -599,7 +598,7 @@ class OpenlistMover(_PluginBase):
                                             "type": "info",
                                             "variant": "tonal",
                                             "title": "任务记录自动清空配置",
-                                            "text": "成功完成的移动任务达到设定次数后，将自动清空 Openlist 任务队列记录或插件面板记录。清空后，计数器将重置。",
+                                            "text": "成功完成的移动任务达到设定次数后，将自动清空插件面板记录和 Openlist 任务队列记录。清空后，计数器将重置。",
                                         },
                                     }
                                 ]
@@ -611,23 +610,7 @@ class OpenlistMover(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "clear_api_threshold",
-                                            "label": "清空Openlist任务API阈值 (次)",
-                                            "type": "number",
-                                            "min": 1,
-                                            "placeholder": "默认 10 (成功 10 次清空 Openlist 任务队列)",
-                                        },
-                                    }
-                                ]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -636,14 +619,14 @@ class OpenlistMover(_PluginBase):
                                             "label": "清空面板成功记录阈值 (次)",
                                             "type": "number",
                                             "min": 1,
-                                            "placeholder": "默认 30 (成功 30 次清空面板成功记录)",
+                                            "placeholder": "默认 30 (成功 30 次清空面板成功记录和API任务记录)",
                                         },
                                     }
                                 ]
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -775,7 +758,6 @@ class OpenlistMover(_PluginBase):
             # === 新增配置默认值 ===
             "wash_mode_enabled": False,
             "wash_delay_seconds": 60,
-            "clear_api_threshold": 10,
             "clear_panel_threshold": 30,
             "keep_successful_tasks": 3,
             "video_extensions": "",
@@ -962,8 +944,7 @@ class OpenlistMover(_PluginBase):
         """
         try:
             state_data = {
-                'successful_moves_count': self._successful_moves_count,
-                'api_clear_pending': self._api_clear_pending
+                'successful_moves_count': self._successful_moves_count
             }
             self.save_data('plugin_state', state_data)
             logger.debug("已保存插件状态到持久化存储")
@@ -1084,23 +1065,14 @@ class OpenlistMover(_PluginBase):
         with task_lock:
             clear_panel_triggered = False
 
-            # 1. 检查 API 任务清空阈值 (倍数触发)
-            if self._successful_moves_count > 0 and self._clear_api_threshold > 0 and \
-               self._successful_moves_count % self._clear_api_threshold == 0:
-                
-                if not self._api_clear_pending: # 仅在首次触发时记录
-                    logger.debug(f"成功移动任务达到 {self._successful_moves_count} 次，满足 Openlist API 任务清空阈值。")
-                    logger.debug("已标记 API 任务清空为'待处理'，将在所有活跃任务完成后执行。")
-                    self._api_clear_pending = True # 设置挂起标志
-                    self._save_plugin_state()  # 保存挂起标志
-                
-                # [!!] 移除立即执行
+            # 1. 检查 API 任务清空阈值 (倍数触发) - 已移除此功能，改为在面板清空时同时清空API任务记录
+            # (此部分已被移除)
 
 
             # 2. 检查 插件面板 清空阈值 (达到设定值触发)
             if self._successful_moves_count >= self._clear_panel_threshold and self._clear_panel_threshold > 0:
                 logger.debug(f"成功移动任务达到 {self._successful_moves_count} 次，满足插件面板清空阈值 ({self._clear_panel_threshold})，准备清空插件面板成功记录，保留最新 {self._keep_successful_tasks} 条。")
-                
+
                 tasks_to_keep = []
                 # 提取活跃任务和失败任务
                 tasks_to_keep.extend([t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]])
@@ -1111,52 +1083,40 @@ class OpenlistMover(_PluginBase):
                     [t for t in self._move_tasks if t['status'] == TASK_STATUS_SUCCESS],
                     key=lambda x: x['start_time'], reverse=True
                 )
-                
+
                 # 保留最新的成功任务
                 tasks_to_keep.extend(successful_tasks[:self._keep_successful_tasks])
-                
+
                 self._move_tasks = tasks_to_keep
                 self._save_move_tasks()  # 保存清理后的任务列表
 
                 logger.info(f"插件面板成功记录清空完毕，保留 {self._keep_successful_tasks} 条最新成功记录。")
                 clear_panel_triggered = True
 
-            # 3. 仅在插件面板清空被触发时，重置计数器
+            # 3. 仅在插件面板清空被触发时，重置计数器并清空Openlist API任务记录
             if clear_panel_triggered:
                  self._successful_moves_count = 0
                  self._save_plugin_state()  # 保存重置后的计数器
                  logger.info("成功计数器已重置。")
 
-            # --- 新增逻辑：处理挂起的 API 清空 ---
-            
-            # 首先，获取当前活跃任务
-            active_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
+                 # 同时清空Openlist API任务记录
+                 try:
+                    self._call_openlist_clear_tasks_api("copy")
+                    self._call_openlist_clear_tasks_api("move")
+                    logger.info("Openlist API 任务记录清空完毕。")
+                 except Exception as e:
+                    logger.error(f"执行 Openlist API 任务清空时发生错误: {e}")
 
-            # 4. 检查并执行挂起的 API 任务清空
-            if self._api_clear_pending:
-                if not active_tasks:
-                    # 只有在 挂起标志为 True 且 没有任何活跃任务时 才执行
-                    logger.info("所有活跃任务已完成，开始执行挂起的 Openlist API 任务清空操作...")
-                    
-                    try:
-                        self._call_openlist_clear_tasks_api("copy") 
-                        self._call_openlist_clear_tasks_api("move") 
-                        logger.info("Openlist API 任务记录清空完毕。")
-                    except Exception as e:
-                        logger.error(f"执行挂起的 Openlist API 任务清空时发生错误: {e}")
-                    finally:
-                        self._api_clear_pending = False # 无论成功与否，都重置标志，避免卡死
-                        self._save_plugin_state()  # 保存重置后的标志
-                else:
-                    # 标志为 True，但仍有活跃任务
-                    logger.debug(f"API 任务清空操作待处理，仍在等待 {len(active_tasks)} 个活跃任务完成...")
-            
-            # --- 结束新增逻辑 ---
+            # --- 已移除挂起的 API 清空逻辑 ---
+            # 原来的挂起机制已被移除，改为在面板清空时直接清空API任务记录
+
+            # 获取当前活跃任务用于其他用途
+            active_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
             
             logger.debug(f"Openlist Mover 任务检查完成，当前活跃任务数: {len(active_tasks)}")
 
-            # === 自动休眠：如果没有活跃任务且没有待处理的清空操作，则停止监控 ===
-            if not active_tasks and not self._api_clear_pending:
+            # === 自动休眠：如果没有活跃任务，则停止监控 ===
+            if not active_tasks:
                 self._stop_task_monitor()
             
     def _update_task_strm_status(self, task_id: str, new_status: str, is_final: bool = False):
