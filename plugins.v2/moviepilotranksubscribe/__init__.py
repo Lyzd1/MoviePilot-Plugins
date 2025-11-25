@@ -27,7 +27,7 @@ class MoviePilotRankSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "movie.jpg"
     # 插件版本
-    plugin_version = "1.5"
+    plugin_version = "1.7"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -43,6 +43,8 @@ class MoviePilotRankSubscribe(_PluginBase):
     _event = Event()
     # 私有属性
     _scheduler = None
+    _min_vote_movie = 0.0
+    _min_vote_tv = 0.0
 
     # 支持的榜单源
     _rank_sources = {
@@ -71,6 +73,7 @@ class MoviePilotRankSubscribe(_PluginBase):
     _max_items = 20
     _clear_history = False
     _clear_flag = False
+    _exclude_keywords = ""
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -78,10 +81,12 @@ class MoviePilotRankSubscribe(_PluginBase):
             self._cron = config.get("cron")
             self._onlyonce = config.get("onlyonce")
             self._sources = config.get("sources") or []
-            self._min_vote = float(config.get("min_vote")) if config.get("min_vote") else 0
+            self._min_vote_movie = float(config.get("min_vote_movie")) if config.get("min_vote_movie") else 0.0
+            self._min_vote_tv = float(config.get("min_vote_tv")) if config.get("min_vote_tv") else 0.0
             self._media_types = config.get("media_types") or []
             self._max_items = int(config.get("max_items")) if config.get("max_items") else 20
             self._clear_history = config.get("clear_history")
+            self._exclude_keywords = config.get("exclude_keywords") or ""
 
         logger.info(f"MoviePilot榜单订阅插件初始化: enabled={self._enabled}, sources={self._sources}")
 
@@ -326,13 +331,56 @@ class MoviePilotRankSubscribe(_PluginBase):
                                     {
                                         'component': 'VTextField',
                                         'props': {
-                                            'model': 'min_vote',
-                                            'label': '最低评分',
-                                            'placeholder': '只订阅评分大于等于该值的内容（0-10）',
+                                            'model': 'min_vote_movie',
+                                            'label': '电影最低评分',
+                                            'placeholder': '只订阅评分大于等于该值的电影（0-10）',
                                             'type': 'number',
                                             'min': 0,
                                             'max': 10,
                                             'step': 0.1
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'min_vote_tv',
+                                            'label': '电视剧最低评分',
+                                            'placeholder': '只订阅评分大于等于该值的电视剧（0-10）',
+                                            'type': 'number',
+                                            'min': 0,
+                                            'max': 10,
+                                            'step': 0.1
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'exclude_keywords',
+                                            'label': '排除关键词',
+                                            'placeholder': '多个关键词用|分隔，例如：历史|惊悚'
                                         }
                                     }
                                 ]
@@ -347,9 +395,11 @@ class MoviePilotRankSubscribe(_PluginBase):
             "onlyonce": False,
             "sources": [],
             "media_types": [],
-            "min_vote": 0,
+            "min_vote_movie": 0.0,
+            "min_vote_tv": 0.0,
             "max_items": 20,
-            "clear_history": False
+            "clear_history": False,
+            "exclude_keywords": ""
         }
 
     def get_page(self) -> List[dict]:
@@ -536,9 +586,11 @@ class MoviePilotRankSubscribe(_PluginBase):
             "onlyonce": self._onlyonce,
             "sources": self._sources,
             "media_types": self._media_types,
-            "min_vote": self._min_vote,
+            "min_vote_movie": self._min_vote_movie,
+            "min_vote_tv": self._min_vote_tv,
             "max_items": self._max_items,
-            "clear_history": self._clear_history
+            "clear_history": self._clear_history,
+            "exclude_keywords": self._exclude_keywords
         })
 
     def __sync_refresh_rankings(self):
@@ -653,9 +705,25 @@ class MoviePilotRankSubscribe(_PluginBase):
                     except (ValueError, TypeError):
                         vote_average = 0
 
-                    if vote_average < self._min_vote:
-                        logger.debug(f"{title} 评分 {vote_average} 低于最低要求 {self._min_vote}")
+                    media_type = item.get('type')
+                    min_vote = 0.0
+                    if media_type == '电影':
+                        min_vote = self._min_vote_movie
+                    elif media_type == '电视剧':
+                        min_vote = self._min_vote_tv
+
+                    if min_vote > 0 and vote_average < min_vote:
+                        logger.debug(f"'{title}' ({media_type}) 评分 {vote_average} 低于最低要求 {min_vote}，已跳过")
                         continue
+
+                    # 检查关键词过滤
+                    if self._exclude_keywords:
+                        overview = item.get('overview', '')
+                        if overview:
+                            exclude_list = [kw.strip() for kw in self._exclude_keywords.split('|') if kw.strip()]
+                            if any(keyword in overview for keyword in exclude_list):
+                                logger.debug(f"{title} 在简介中包含排除关键词，已跳过")
+                                continue
 
                     # 检查是否已处理过
                     unique_flag = f"moviepilotrank: {item.get('title')}"
