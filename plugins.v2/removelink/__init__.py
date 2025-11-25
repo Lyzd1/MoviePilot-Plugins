@@ -204,7 +204,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.7.2"
+    plugin_version = "2.7.3"
     # 插件作者
     plugin_author = "Lyzd1,DzAvril"
     # 作者主页
@@ -1571,6 +1571,46 @@ class RemoveLink(_PluginBase):
 
         return None, None, None, None
 
+    def _get_local_path_from_storage_path(
+        self, storage_type: str, storage_path: str
+    ) -> Optional[str]:
+        """
+        根据网盘存储路径和类型，获取映射的本地路径
+        """
+        mappings = self._parse_strm_path_mappings()
+
+        best_match = None
+        longest_prefix = -1
+
+        for _, (
+            map_storage_type,
+            map_storage_prefix,
+            map_local_storage_type,
+            map_local_storage_prefix,
+        ) in mappings.items():
+            if (map_storage_type != storage_type or
+                map_local_storage_type != 'local' or
+                not map_local_storage_prefix):
+                continue
+
+            storage_path_posix = Path(storage_path).as_posix()
+            map_storage_prefix_posix = Path(map_storage_prefix).as_posix()
+
+            # 确保前缀匹配逻辑正确
+            if storage_path_posix.startswith(map_storage_prefix_posix):
+                prefix_len = len(map_storage_prefix_posix)
+                if prefix_len > longest_prefix:
+                    longest_prefix = prefix_len
+                    relative_path = storage_path_posix[prefix_len:].lstrip('/')
+                    local_path = Path(map_local_storage_prefix).joinpath(relative_path)
+                    best_match = str(local_path)
+
+        if best_match:
+            logger.debug(f"路径转换: [{storage_type}]{storage_path} -> [local]{best_match}")
+
+        return best_match
+
+
     def _find_storage_media_file(
         self, storage_type: str, base_path: str
     ) -> schemas.FileItem:
@@ -1794,6 +1834,13 @@ class RemoveLink(_PluginBase):
                         logger.info(f"删除网盘空目录: [{storage_type}] {current_path}")
                         deleted_count += 1
 
+                        # 联动删除本地空目录
+                        local_dir_path = self._get_local_path_from_storage_path(storage_type, current_path)
+                        if local_dir_path:
+                            dummy_file_path = str(Path(local_dir_path) / "dummy.tmp")
+                            logger.info(f"联动检查本地空目录: {local_dir_path}")
+                            self._delete_local_empty_folders(dummy_file_path)
+
                         # 继续检查上级目录
                         current_path = str(Path(current_path).parent)
                         if current_path == current_path.replace(
@@ -1855,7 +1902,14 @@ class RemoveLink(_PluginBase):
                                     )
                                     deleted_count += 1
 
-                                    # 继续检查上级目录
+                                    # 联动删除本地空目录
+                        local_dir_path = self._get_local_path_from_storage_path(storage_type, current_path)
+                        if local_dir_path:
+                            dummy_file_path = str(Path(local_dir_path) / "dummy.tmp")
+                            logger.info(f"联动检查本地空目录: {local_dir_path}")
+                            self._delete_local_empty_folders(dummy_file_path)
+
+                        # 继续检查上级目录
                                     current_path = str(Path(current_path).parent)
                                     if current_path == current_path.replace(
                                         str(Path(current_path).name), ""
