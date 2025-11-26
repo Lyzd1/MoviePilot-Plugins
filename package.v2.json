@@ -29,11 +29,12 @@
         "name": "魔力兑换助手",
         "description": "自动监控分享率，在低于阈值时执行魔力兑换操作",
         "labels": "文件整理",
-        "version": "1.8",
+        "version": "1.9",
         "icon": "Ombi_A.png",
         "author": "Lyzd1",
         "level": 1,
         "history": {
+                "v1.9": "增加馒头站点兑换，馒头兑换规则需要填写，但实际与其没有关系。",
                 "v1.8": "修复魔力阈值开关不可用问题",
                 "v1.6.1": "修改通知时机",
                 "v1.5": "001 /mybonus.php?action=exchange"

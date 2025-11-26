@@ -20,6 +20,7 @@ from app.schemas import NotificationType
 from app.schemas.types import EventType, SystemConfigKey
 from .bonus_exchange_config import BonusExchangeConfig
 from .exchange_001 import Exchange001
+from .exchange_mteam import ExchangeMteam
 lock = threading.Lock()
 # 记录最后一次兑换时间，用于控制兑换间隔
 last_exchange_time = {}
@@ -33,7 +34,7 @@ class BonusExchangePlugin(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/InfinityPacer/MoviePilot-Plugins/main/icons/trafficassistant.png"
     # 插件版本
-    plugin_version = "1.8"
+    plugin_version = "1.9"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -651,6 +652,7 @@ class BonusExchangePlugin(_PluginBase):
             logger.debug(f"  Cookie长度: {len(site_info.cookie) if site_info.cookie else 0}")
             logger.debug(f"  User-Agent: {site_info.ua if site_info.ua else '默认'}")
             logger.debug(f"  使用代理: {site_info.proxy}")
+
             # 打印兑换规则
             exchange_rules = self._config.get_exchange_rules_for_site(site_info.name)
             if exchange_rules:
@@ -771,6 +773,11 @@ class BonusExchangePlugin(_PluginBase):
         """执行连续兑换，每次最多兑换5次"""
         exchange_results = []
         max_exchanges = 5  # 每次最多兑换5次
+        
+        if site_info.name == "馒头":
+            max_exchanges = 1
+            logger.info("检测到站点为【馒头】，单次兑换")
+            
         exchange_count = 0
         # 第一次检查是否满足兑换条件
         initial_should_exchange = False
@@ -901,41 +908,82 @@ class BonusExchangePlugin(_PluginBase):
     def __execute_exchange(self, site_info, rule) -> (bool, str):
         """执行兑换操作"""
         try:
-            # --- 修改开始 ---
-            # 尝试获取站点完整的 URL (从 Indexer 配置中获取)
-            # site_info.domain 只是主域名，可能缺失子域名(如 pt.)或协议头
-            site_url = f"https://{site_info.domain}"
-            
-            try:
-                # 获取所有索引器配置
-                indexers = self.siteshelper.get_indexers()
-                for indexer in indexers:
-                    # 匹配站点ID
-                    if indexer.get("id") == site_info.id:
-                        indexer_url = indexer.get("domain")
-                        if indexer_url and indexer_url.startswith("http"):
-                            site_url = indexer_url
-                            logger.info(f"站点 {site_info.name}: 使用配置的完整URL -> {site_url}")
-                        break
-            except Exception as e:
-                logger.warning(f"获取站点 {site_info.name} 完整URL失败，回退到默认拼接: {e}")
-            # 去除 URL 末尾的斜杠，避免拼接时出现 //
-            site_url = site_url.rstrip('/')
-            # 创建兑换器
-            exchanger = Exchange001(
-                site_name=site_info.name,
-                site_url=site_url,
-                cookie=site_info.cookie,
-                ua=site_info.ua
-            )
-            # --- 修改结束 ---
-            # 执行兑换
-            success, message = exchanger.execute_exchange(
-                option=rule.option,
-                upload_amount=rule.upload_amount,
-                bonus_cost=rule.bonus_cost
-            )
-            return success, message
+            # 特殊处理馒头站点
+            if site_info.name == "馒头":
+                # 从站点配置中获取API Key
+                api_key = site_info.apikey  
+
+                # 如果没有API Key，返回错误
+                if not api_key:
+                    logger.error(f"站点 {site_info.name}: 未找到API Key")
+                    return False, f"站点 {site_info.name}: 未找到API Key"
+
+                # 计算兑换数量 (魔力值/500=1G上传量)
+                try:
+                    # 获取当前魔力值
+                    global site_current_bonus
+                    current_bonus = site_current_bonus.get(site_info.name, 0)
+
+                    # 计算兑换数量
+                    quantity = int(current_bonus // 500)
+
+                    # 如果兑换数量小于等于0，不进行兑换
+                    if quantity <= 0:
+                        message = f"站点 {site_info.name}: 魔力值不足，无法兑换"
+                        logger.info(message)
+                        return False, message
+
+                except (ValueError, TypeError) as e:
+                    logger.error(f"站点 {site_info.name}: 计算兑换数量时出错: {e}")
+                    return False, f"站点 {site_info.name}: 计算兑换数量时出错: {e}"
+
+                # 创建馒头站点兑换器
+                exchanger = ExchangeMteam(
+                    site_name=site_info.name,
+                    api_key=api_key,
+                    base_url="https://api.m-team.io",  # 默认URL，可根据需要修改
+                    goods_id=1  # 固定的商品ID，可根据需要修改
+                )
+
+                # 执行兑换 (只需要一次兑换)
+                success, message = exchanger.execute_exchange(quantity=quantity)
+                return success, message
+            else:
+                # --- 修改开始 ---
+                # 尝试获取站点完整的 URL (从 Indexer 配置中获取)
+                # site_info.domain 只是主域名，可能缺失子域名(如 pt.)或协议头
+                site_url = f"https://{site_info.domain}"
+
+                try:
+                    # 获取所有索引器配置
+                    indexers = self.siteshelper.get_indexers()
+                    for indexer in indexers:
+                        # 匹配站点ID
+                        if indexer.get("id") == site_info.id:
+                            indexer_url = indexer.get("domain")
+                            if indexer_url and indexer_url.startswith("http"):
+                                site_url = indexer_url
+                                logger.info(f"站点 {site_info.name}: 使用配置的完整URL -> {site_url}")
+                            break
+                except Exception as e:
+                    logger.warning(f"获取站点 {site_info.name} 完整URL失败，回退到默认拼接: {e}")
+                # 去除 URL 末尾的斜杠，避免拼接时出现 //
+                site_url = site_url.rstrip('/')
+                # 创建兑换器
+                exchanger = Exchange001(
+                    site_name=site_info.name,
+                    site_url=site_url,
+                    cookie=site_info.cookie,
+                    ua=site_info.ua
+                )
+                # --- 修改结束 ---
+                # 执行兑换
+                success, message = exchanger.execute_exchange(
+                    option=rule.option,
+                    upload_amount=rule.upload_amount,
+                    bonus_cost=rule.bonus_cost
+                )
+                return success, message
         except Exception as e:
             logger.error(f"执行兑换时发生错误: {str(e)}")
             return False, f"兑换过程发生错误: {str(e)}"
