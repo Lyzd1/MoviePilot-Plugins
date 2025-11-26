@@ -15,7 +15,7 @@
     "MoviePilotRankSubscribe": {
         "name": "MoviePilot榜单订阅",
         "description": "定期获取MoviePilot内置榜单，根据评分和过滤条件自动订阅内容。",
-        "labels": "文件整理",
+        "labels": "订阅",
         "version": "1.7",
         "icon": "Ombi_A.png",
         "author": "Lyzd1",
@@ -28,12 +28,13 @@
     "BonusExchangePlugin": {
         "name": "魔力兑换助手",
         "description": "自动监控分享率，在低于阈值时执行魔力兑换操作",
-        "labels": "文件整理",
-        "version": "1.9",
+        "labels": "分享率",
+        "version": "1.9.1",
         "icon": "Ombi_A.png",
         "author": "Lyzd1",
         "level": 1,
         "history": {
+                "v1.9.1": "日志优化",
                 "v1.9": "增加馒头站点兑换，馒头兑换规则需要填写，但实际与其没有关系。",
                 "v1.8": "修复魔力阈值开关不可用问题",
                 "v1.6.1": "修改通知时机",
@@ -43,7 +44,7 @@
     "RemoveLink": {
         "name": "清理媒体文件",
         "description": "媒体文件清理工具：支持硬链接文件清理、STRM文件清理、刮削文件清理（元数据、图片、字幕）、转移记录清理、种子联动删除等功能",
-        "labels": "文件整理",
+        "labels": "云盘同步",
         "version": "2.7.2",
         "icon": "Ombi_A.png",
         "author": "Lyzd1,DzAvril",
@@ -163,7 +164,7 @@
     "AutoTorrentTransfer": {
         "name": "自动转移做种(站点plus)",
         "description": "定期转移下载器中的做种任务到另一个下载器，支持基于分享率的自动标签管理。",
-        "labels": "文件整理",
+        "labels": "分享率",
         "version": "1.10.7",
         "icon": "seed.png",
         "author": "Lyzd1,jxxghp",

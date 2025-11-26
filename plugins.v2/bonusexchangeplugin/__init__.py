@@ -34,7 +34,7 @@ class BonusExchangePlugin(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/InfinityPacer/MoviePilot-Plugins/main/icons/trafficassistant.png"
     # 插件版本
-    plugin_version = "1.9"
+    plugin_version = "1.9.1"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -508,7 +508,7 @@ class BonusExchangePlugin(_PluginBase):
             return f"站点 {site_name}: 当前分享率: {ratio} ≤ 阈值: {config.ratio_threshold}"
         else:
             logger.debug(f"站点 {site_name}: 当前分享率: {ratio} > 阈值: {config.ratio_threshold}")
-            return f"站点 {site_name}: 当前分享率: {ratio} > 阈值: {config.ratio_threshold}"
+            return f"站点 {site_name}: 当前分享率: {ratio} > 阈值: {config.ratio_threshold} ————>> OK"
     def __get_site_statistics(self) -> dict:
         """获取站点统计数据"""
         def is_data_valid(data):
@@ -686,7 +686,7 @@ class BonusExchangePlugin(_PluginBase):
             return f"站点 {site_name}: 当前魔力值: {bonus} > 阈值: {config.bonus_threshold}"
         else:
             logger.debug(f"站点 {site_name}: 当前魔力值: {bonus} ≤ 阈值: {config.bonus_threshold}")
-            return f"站点 {site_name}: 当前魔力值: {bonus} ≤ 阈值: {config.bonus_threshold}"
+            return f"站点 {site_name}: 当前魔力值: {bonus} ≤ 阈值: {config.bonus_threshold} ————>> OK"
     def __check_and_execute_exchange(self, config: BonusExchangeConfig, site_info, site_stat: dict) -> str:
         """检查并执行兑换操作"""
         site_name = site_info.name
@@ -797,7 +797,7 @@ class BonusExchangePlugin(_PluginBase):
             upload_threshold_gb = float(upload_threshold_str.replace('G', '').replace('g', ''))
             # 如果上传量阈值不为0G，则显示上传量阈值
             if upload_threshold_gb != 0:
-                logger.debug(f"站点 {site_name}: 上传量 {current_upload_gb:.2f} GB  上传量阈值 = {upload_threshold_gb} GB")
+                logger.debug(f"站点 {site_name}: 上传量 {current_upload_gb:.2f} GB  上传量阈值 = {upload_threshold_gb} GB ————>> OK")
             # 检查是否满足初始兑换条件
             # 只有启用魔力阈值检查时才检查魔力值，否则认为魔力值足够
             bonus_sufficient = not config.enable_bonus_check or current_bonus > config.bonus_threshold
