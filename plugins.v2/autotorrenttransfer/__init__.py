@@ -10,29 +10,32 @@ from apscheduler.triggers.cron import CronTrigger
 from bencode import bdecode, bencode
 from qbittorrentapi import TorrentDictionary
 
+import threading
 from app.core.config import settings
+from app.core.event import Event, eventmanager
 from app.helper.downloader import DownloaderHelper
 from app.log import logger
 from app.modules.qbittorrent import Qbittorrent
 from app.modules.transmission import Transmission
 from app.plugins import _PluginBase
 from app.schemas import NotificationType, ServiceInfo
+from app.schemas.types import EventType
 from app.utils.string import StringUtils
 
 
-class TorrentTransfer(_PluginBase):
+class AutoTorrentTransfer(_PluginBase):
     # 插件名称
-    plugin_name = "自动转移做种"
+    plugin_name = "自动转移做种(增强版)"
     # 插件描述
-    plugin_desc = "定期转移下载器中的做种任务到另一个下载器。"
+    plugin_desc = "定期转移下载器中的做种任务到另一个下载器，支持基于分享率的自动标签管理。"
     # 插件图标
     plugin_icon = "seed.png"
     # 插件版本
-    plugin_version = "1.10.3"
+    plugin_version = "1.10.7"
     # 插件作者
-    plugin_author = "jxxghp"
+    plugin_author = "Lyzd1,jxxghp"
     # 作者主页
-    author_url = "https://github.com/jxxghp"
+    author_url = "https://github.com/Lyzd1"
     # 插件配置项ID前缀
     plugin_config_prefix = "torrenttransfer_"
     # 加载顺序
@@ -42,6 +45,7 @@ class TorrentTransfer(_PluginBase):
 
     # 私有属性
     _scheduler = None
+    siteoper = None
 
     # 开关
     _enabled = False
@@ -66,7 +70,7 @@ class TorrentTransfer(_PluginBase):
     _remainoldcat = False
     _remainoldtag = False
     # 退出事件
-    _event = Event()
+    _event = threading.Event()
     # 待检查种子清单
     _recheck_torrents = {}
     _is_recheck_running = False
@@ -74,6 +78,8 @@ class TorrentTransfer(_PluginBase):
     _torrent_tags = []
 
     def init_plugin(self, config: dict = None):
+        from app.db.site_oper import SiteOper
+        self.siteoper = SiteOper()
 
         # 读取配置
         if config:
@@ -99,6 +105,10 @@ class TorrentTransfer(_PluginBase):
             self._torrent_tags = self._add_torrent_tags.strip().split(",") if self._add_torrent_tags else []
             self._remainoldcat = config.get("remainoldcat")
             self._remainoldtag = config.get("remainoldtag")
+            # 新增配置
+            self._auto_label_enabled = config.get("auto_label_enabled")
+            self._share_ratio_threshold = config.get("share_ratio_threshold")
+            self._site_label_mapping = config.get("site_label_mapping")
 
         # 停止现有任务
         self.stop_service()
@@ -352,6 +362,56 @@ class TorrentTransfer(_PluginBase):
                                         }
                                     }
                                 ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'auto_label_enabled',
+                                            'label': '启用自动标签',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'share_ratio_threshold',
+                                            'label': '分享率阈值',
+                                            'placeholder': '例如: 1.0'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextarea',
+                                        'props': {
+                                            'model': 'site_label_mapping',
+                                            'label': '站点标签映射',
+                                            'rows': 3,
+                                            'placeholder': '每行一个映射，格式为 sitename:labelname'
+                                        }
+                                    }
+                                ]
                             }
                         ]
                     },
@@ -590,7 +650,10 @@ class TorrentTransfer(_PluginBase):
             "transferemptylabel": False,
             "add_torrent_tags": "已整理,转移做种",
             "remainoldcat": False,
-            "remainoldtag": False
+            "remainoldtag": False,
+            "auto_label_enabled": False,
+            "share_ratio_threshold": "",
+            "site_label_mapping": ""
         }
 
     def get_page(self) -> List[dict]:
@@ -1086,6 +1149,203 @@ class TorrentTransfer(_PluginBase):
         except Exception as e:
             print(str(e))
         return None
+
+    @eventmanager.register(EventType.SiteRefreshed)
+    def transfer_monitor(self, event: Event = None):
+        """
+        站点数据刷新完成后的监听器，用于自动更新转移标签
+        """
+        # 检查自动标签功能是否启用
+        if not self._auto_label_enabled:
+            return
+
+        if event:
+            event_data = event.event_data
+            # 确保是所有站点刷新完成的信号
+            if not event_data or event_data.get("site_id") != "*":
+                return
+            else:
+                logger.info("站点数据刷新完成，开始检查分享率并更新转移标签...")
+
+        # 获取所有站点的统计数据
+        site_statistics = self.__get_site_statistics()
+        if not site_statistics:
+            logger.warn("未能获取站点统计数据")
+            return
+
+        # 解析站点标签映射
+        site_label_map = {}
+        if self._site_label_mapping:
+            for line in self._site_label_mapping.split('\n'):
+                if ':' in line:
+                    site_name, label = line.split(':', 1)
+                    site_label_map[site_name.strip()] = label.strip()
+        else:
+            # 如果没有设置标签映射文本，默认添加为 站点/{站点名}
+            for site_name in site_statistics.keys():
+                site_label_map[site_name] = f"站点/{site_name}"
+
+        # 解析分享率阈值
+        try:
+            share_ratio_threshold = float(self._share_ratio_threshold)
+        except ValueError:
+            logger.error(f"无效的分享率阈值: {self._share_ratio_threshold}")
+            return
+
+        # 获取当前的 includelabels 并分离手动标签和自动标签
+        current_labels = set()
+        manual_labels = set()
+        auto_labels = set()
+
+        if self._includelabels:
+            # 支持'|'分隔符的'或'逻辑和','分隔符的'与'逻辑
+            if '|' in self._includelabels:
+                # 使用'|'分隔符处理'或'逻辑
+                all_labels = set(label.strip() for label in self._includelabels.split('|') if label.strip())
+            else:
+                # 使用','分隔符处理'与'逻辑
+                all_labels = set(label.strip() for label in self._includelabels.split(',') if label.strip())
+
+            # 分离手动标签和自动标签
+            auto_label_values = set(site_label_map.values())
+            for label in all_labels:
+                if label in auto_label_values:
+                    auto_labels.add(label)
+                else:
+                    manual_labels.add(label)
+            current_labels = all_labels
+
+        # 收集需要保留的自动标签（分享率高于阈值的站点）
+        active_auto_labels = set()
+        for site_name, stats in site_statistics.items():
+            # 获取站点当前分享率
+            share_ratio = stats.get('share_ratio', 0)
+
+            # 如果分享率高于阈值，查找对应的标签
+            if share_ratio > share_ratio_threshold:
+                label = site_label_map.get(site_name)
+                if label:
+                    active_auto_labels.add(label)
+                    logger.info(f"站点 {site_name} 分享率 {share_ratio} 高于阈值 {share_ratio_threshold}，将保留标签 {label}")
+                else:
+                    logger.warn(f"站点 {site_name} 分享率高于阈值，但未找到对应的标签映射")
+
+        # 计算需要添加和移除的标签
+        labels_to_add = active_auto_labels - auto_labels
+        labels_to_remove = auto_labels - active_auto_labels
+
+        # 生成新的自动标签集合
+        new_auto_labels = (auto_labels - labels_to_remove) | labels_to_add
+
+        # 合并手动标签和新的自动标签
+        new_labels = manual_labels | new_auto_labels
+
+        # 生成新的 includelabels 字符串，使用'|'连接以实现'或'逻辑
+        new_includelabels = '|'.join(sorted(new_labels)) if new_labels else ""
+
+        # 只有当标签发生变化时才更新配置
+        if new_includelabels != (self._includelabels or ""):
+            # 更新配置
+            self._includelabels = new_includelabels
+            self.update_config(config={
+                "enabled": self._enabled,
+                "onlyonce": self._onlyonce,
+                "cron": self._cron,
+                "notify": self._notify,
+                "nolabels": self._nolabels,
+                "includelabels": self._includelabels,
+                "includecategory": self._includecategory,
+                "frompath": self._frompath,
+                "topath": self._topath,
+                "fromdownloader": self._fromdownloader,
+                "todownloader": self._todownloader,
+                "deletesource": self._deletesource,
+                "deleteduplicate": self._deleteduplicate,
+                "fromtorrentpath": self._fromtorrentpath,
+                "nopaths": self._nopaths,
+                "autostart": self._autostart,
+                "skipverify": self._skipverify,
+                "transferemptylabel": self._transferemptylabel,
+                "add_torrent_tags": self._add_torrent_tags,
+                "remainoldcat": self._remainoldcat,
+                "remainoldtag": self._remainoldtag,
+                "auto_label_enabled": self._auto_label_enabled,
+                "share_ratio_threshold": self._share_ratio_threshold,
+                "site_label_mapping": self._site_label_mapping
+            })
+
+            # 发送通知
+            if self._notify:
+                notification_text = ""
+                if labels_to_add:
+                    notification_text += f"添加了 {len(labels_to_add)} 个新标签: {', '.join(sorted(labels_to_add))}。"
+                if labels_to_remove:
+                    notification_text += f"移除了 {len(labels_to_remove)} 个标签: {', '.join(sorted(labels_to_remove))}。"
+
+                if notification_text:
+                    self.post_message(
+                        mtype=NotificationType.SiteMessage,
+                        title="【自动转移做种】",
+                        text=f"已更新转移标签。{notification_text}"
+                    )
+
+            logger.info(f"已更新转移标签: {new_includelabels}")
+        else:
+            logger.info("转移标签无需更新，当前标签已符合要求")
+
+    def __get_site_statistics(self):
+        """获取站点统计数据"""
+        try:
+            from datetime import datetime, timedelta
+            import pytz
+            from app.core.config import settings
+
+            def is_data_valid(data):
+                """检查数据是否有效"""
+                return data is not None and "ratio" in data and not data.get("err_msg")
+
+            current_day = datetime.now(tz=pytz.timezone(settings.TZ)).date()
+            previous_day = current_day - timedelta(days=1)
+
+            # 尝试获取当天和前一天的数据
+            current_data = {data.name: data for data in
+                            (self.siteoper.get_userdata_by_date(date=str(current_day)) or [])}
+            previous_day_data = {data.name: data for data in
+                                 (self.siteoper.get_userdata_by_date(date=str(previous_day)) or [])}
+
+            site_stats = {}
+
+            # 获取所有站点名称
+            all_site_names = set(list(current_data.keys()) + list(previous_day_data.keys()))
+
+            for site_name in all_site_names:
+                site_current_data = current_data.get(site_name)
+                site_current_data = site_current_data.to_dict() if site_current_data else {}
+                site_previous_data = previous_day_data.get(site_name)
+                site_previous_data = site_previous_data.to_dict() if site_previous_data else {}
+
+                if is_data_valid(site_current_data):
+                    site_stats[site_name] = {
+                        'share_ratio': float(site_current_data.get("ratio", 0)) if site_current_data.get("ratio") else 0,
+                        'upload': float(site_current_data.get("upload", 0)) if site_current_data.get("upload") else 0,
+                        'download': float(site_current_data.get("download", 0)) if site_current_data.get("download") else 0,
+                        'seeding': site_current_data.get("seeding", 0),
+                        'leeching': site_current_data.get("leeching", 0)
+                    }
+                else:
+                    if is_data_valid(site_previous_data):
+                        site_stats[site_name] = {
+                            'share_ratio': float(site_previous_data.get("ratio", 0)) if site_previous_data.get("ratio") else 0,
+                            'upload': float(site_previous_data.get("upload", 0)) if site_previous_data.get("upload") else 0,
+                            'download': float(site_previous_data.get("download", 0)) if site_previous_data.get("download") else 0,
+                            'seeding': site_previous_data.get("seeding", 0),
+                            'leeching': site_previous_data.get("leeching", 0)
+                        }
+
+            return site_stats
+        except Exception as e:
+            logger.error(f"获取站点统计数据失败: {str(e)}")
+            return {}
 
     def stop_service(self):
         """
