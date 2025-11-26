@@ -145,5 +145,18 @@
             "v4.0.1": "支持配置【事件删种策略】。更新后可能需要重启MP！",
             "v4.0": "适配 MoviePilot V2。"
         }
+    },
+    "TorrentTransfer": {
+        "name": "自动转移做种",
+        "description": "定期转移下载器中的做种任务到另一个下载器。",
+        "labels": "文件整理",
+        "version": "1.10.3",
+        "icon": "seed.png",
+        "author": "jxxghp",
+        "level": 2,
+        "history": {
+            "v1.10.3": "增加'|'分隔符的'或'逻辑标签匹配功能",
+            "v1.10.2": "初始版本"
+        }
     }
 }
