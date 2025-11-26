@@ -1,4 +1,17 @@
 {
+    "TorrentRemoverSeparated": {
+        "name": "自动删除(主辅分离)",
+        "description": "自动删除下载器中的下载任务，支持主辅种分离处理。",
+        "labels": "下载管理",
+        "version": "2.3.1",
+        "icon": "delete.jpg",
+        "author": "Lyzd1",
+        "level": 2,
+        "history": {
+            "v2.3.1": "主辅联动删除",
+            "v2.2": "初始版本"
+        }
+    },
     "MoviePilotRankSubscribe": {
         "name": "MoviePilot榜单订阅",
         "description": "定期获取MoviePilot内置榜单，根据评分和过滤条件自动订阅内容。",
@@ -147,7 +160,7 @@
         }
     },
     "AutoTorrentTransfer": {
-        "name": "自动转移做种(增强版)",
+        "name": "自动转移做种(站点plus)",
         "description": "定期转移下载器中的做种任务到另一个下载器，支持基于分享率的自动标签管理。",
         "labels": "文件整理",
         "version": "1.10.7",

@@ -25,7 +25,7 @@ from app.utils.string import StringUtils
 
 class AutoTorrentTransfer(_PluginBase):
     # 插件名称
-    plugin_name = "自动转移做种(增强版)"
+    plugin_name = "自动转移做种(站点plus)"
     # 插件描述
     plugin_desc = "定期转移下载器中的做种任务到另一个下载器，支持基于分享率的自动标签管理。"
     # 插件图标
@@ -37,7 +37,7 @@ class AutoTorrentTransfer(_PluginBase):
     # 作者主页
     author_url = "https://github.com/Lyzd1"
     # 插件配置项ID前缀
-    plugin_config_prefix = "torrenttransfer_"
+    plugin_config_prefix = "autotorrenttransfer_"
     # 加载顺序
     plugin_order = 18
     # 可使用的用户级别
@@ -191,7 +191,7 @@ class AutoTorrentTransfer(_PluginBase):
         if self.get_state():
             return [
                 {
-                    "id": "TorrentTransfer",
+                    "id": "AutoTorrentTransfer",
                     "name": "转移做种服务",
                     "trigger": CronTrigger.from_crontab(self._cron),
                     "func": self.transfer,
