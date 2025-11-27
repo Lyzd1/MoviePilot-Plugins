@@ -204,7 +204,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.7.2"
+    plugin_version = "2.7.3"
     # 插件作者
     plugin_author = "Lyzd1,DzAvril"
     # 作者主页
@@ -835,7 +835,7 @@ class RemoveLink(_PluginBase):
                                             "model": "strm_path_mappings",
                                             "label": "STRM路径映射",
                                             "rows": 4,
-                                            "placeholder": "STRM目录:存储类型:网盘目录[:local:本地目录]，每行一个映射关系\n例如：/ssd/strm:u115:/media\n例如：/nas/strm:alipan:/阿里云盘/媒体:local:/mnt/local_media",
+                                            "placeholder": "STRM目录:存储类型:网盘目录[:alistlocal:本地目录]，每行一个映射关系\n例如：/ssd/strm:u115:/media\n例如：/nas/strm:alipan:/阿里云盘/媒体:alistlocal:/mnt/local_media",
                                         },
                                     }
                                 ],
@@ -923,7 +923,7 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "STRM文件监控：启用后会自动监控映射中的STRM目录，当STRM文件删除时会查找并删除网盘上对应的视频文件。路径映射格式：STRM目录:存储类型:网盘目录[:本地存储类型:本地目录]，例如 /strm:alist:/remote:local:/local/media 表示 /strm/test.strm 对应 alist 上的 /remote/test 和本地的 /local/media/test。本地目录为可选配置，用于联动删除本地空目录。",
+                                            "text": "STRM文件监控：启用后会自动监控映射中的STRM目录，当STRM文件删除时会查找并删除网盘上对应的视频文件。路径映射格式：STRM目录:存储类型:网盘目录[:本地存储类型:本地目录]，例如 /strm:alist:/remote:alistlocal:/local/media 表示 /strm/test.strm 对应 alist 上的 /remote/test 和本地的 /local/media/test。本地目录为可选配置，用于联动删除本地空目录。",
                                         },
                                     }
                                 ],
@@ -1750,6 +1750,37 @@ class RemoveLink(_PluginBase):
             logger.error(f"Error calling API to delete {dir_path}: {e} - {traceback.format_exc()}")
             return False
 
+    def _get_mapped_local_details_from_storage_path(
+        self, storage_type: str, storage_path: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """
+        根据云盘路径查找对应的本地(alistlocal)存储详情
+        返回 (local_storage_type, local_storage_path) 或 (None, None)
+        """
+        mappings = self._parse_strm_path_mappings()
+
+        # 遍历所有映射配置
+        for strm_prefix, (
+            mapped_storage_type,
+            mapped_storage_prefix,
+            local_storage_type,
+            local_storage_prefix,
+        ) in mappings.items():
+            # 检查云盘存储类型和路径前缀是否匹配
+            if (
+                mapped_storage_type == storage_type and
+                storage_path.startswith(mapped_storage_prefix)
+            ):
+                # 计算相对路径
+                relative_path = storage_path[len(mapped_storage_prefix):].lstrip("/")
+
+                # 如果配置了本地映射且类型为 alistlocal，则构建本地路径
+                if local_storage_type and local_storage_prefix and local_storage_type == "alistlocal":
+                    local_path = local_storage_prefix.rstrip("/") + "/" + relative_path
+                    return local_storage_type, local_path
+
+        return None, None
+
     def _delete_storage_empty_folders(
         self, storage_type: str, storage_file_item: schemas.FileItem
     ) -> int:
@@ -1789,10 +1820,37 @@ class RemoveLink(_PluginBase):
                         deleted_successfully = self._call_api_delete_dir(current_path)
                     else:
                         deleted_successfully = self._storagechain.delete_file(current_item)
-                    
+
                     if deleted_successfully:
                         logger.info(f"删除网盘空目录: [{storage_type}] {current_path}")
                         deleted_count += 1
+
+                        # --- 新增逻辑开始 ---
+                        # 同步删除对应的本地目录
+                        local_storage_type, local_storage_path = self._get_mapped_local_details_from_storage_path(
+                            storage_type, current_path
+                        )
+                        if local_storage_type and local_storage_path:
+                            # 如果本地存储类型是 alistlocal，使用 AList API 删除
+                            if local_storage_type == "alistlocal":
+                                # 直接调用 AList API 删除本地目录
+                                if self._call_api_delete_dir(local_storage_path):
+                                    logger.info(f"同步删除本地目录 (通过 AList API): [{local_storage_type}] {local_storage_path}")
+                                else:
+                                    logger.warning(f"同步删除本地目录失败 (通过 AList API): [{local_storage_type}] {local_storage_path}")
+                            else:
+                                # 对于其他本地存储类型，使用 StorageChain
+                                local_dir_item = schemas.FileItem(
+                                    storage="local",
+                                    path=local_storage_path if local_storage_path.endswith("/") else local_storage_path + "/",
+                                    type="dir"
+                                )
+                                # 直接删除本地目录，无论是否存在文件
+                                if self._storagechain.delete_file(local_dir_item):
+                                    logger.info(f"同步删除本地目录: [{local_storage_type}] {local_storage_path}")
+                                else:
+                                    logger.warning(f"同步删除本地目录失败: [{local_storage_type}] {local_storage_path}")
+                        # --- 新增逻辑结束 ---
 
                         # 继续检查上级目录
                         current_path = str(Path(current_path).parent)
@@ -1855,6 +1913,33 @@ class RemoveLink(_PluginBase):
                                     )
                                     deleted_count += 1
 
+                                    # --- 新增逻辑开始 ---
+                                    # 同步删除对应的本地目录
+                                    local_storage_type, local_storage_path = self._get_mapped_local_details_from_storage_path(
+                                        storage_type, current_path
+                                    )
+                                    if local_storage_type and local_storage_path:
+                                        # 如果本地存储类型是 alistlocal，使用 AList API 删除
+                                        if local_storage_type == "alistlocal":
+                                            # 直接调用 AList API 删除本地目录
+                                            if self._call_api_delete_dir(local_storage_path):
+                                                logger.info(f"同步删除本地目录 (通过 AList API): [{local_storage_type}] {local_storage_path}")
+                                            else:
+                                                logger.warning(f"同步删除本地目录失败 (通过 AList API): [{local_storage_type}] {local_storage_path}")
+                                        else:
+                                            # 对于其他本地存储类型，使用 StorageChain
+                                            local_dir_item = schemas.FileItem(
+                                                storage="local",
+                                                path=local_storage_path if local_storage_path.endswith("/") else local_storage_path + "/",
+                                                type="dir"
+                                            )
+                                            # 直接删除本地目录，无论是否存在文件
+                                            if self._storagechain.delete_file(local_dir_item):
+                                                logger.info(f"同步删除本地目录: [{local_storage_type}] {local_storage_path}")
+                                            else:
+                                                logger.warning(f"同步删除本地目录失败: [{local_storage_type}] {local_storage_path}")
+                                    # --- 新增逻辑结束 ---
+
                                     # 继续检查上级目录
                                     current_path = str(Path(current_path).parent)
                                     if current_path == current_path.replace(
@@ -1881,62 +1966,6 @@ class RemoveLink(_PluginBase):
                 f"清理网盘空目录失败: [{storage_type}] {storage_file_item.path} - {str(e)}"
             )
 
-        return deleted_count
-
-    def _delete_local_empty_folders(self, media_file_path: str) -> int:
-        """
-        从指定本地路径开始，逐级向上层目录检测并删除空目录
-        返回删除的目录数量
-        """
-        if not media_file_path:
-            return 0
-        
-        deleted_count = 0
-        try:
-            path = Path(media_file_path)
-            # 文件可能不存在（例如只是为了路径），我们从父目录开始检查
-            parent_path = path.parent
-            
-            # 逐级向上检查
-            while True:
-                if not os.path.exists(parent_path):
-                    logger.debug(f"本地空目录检查：路径 {parent_path} 不存在，停止")
-                    break
-                
-                # 如果当前路径是某个映射的根路径，停止
-                # 简单起见：如果父路径是 / 或根驱动器，停止
-                if parent_path == parent_path.parent:
-                    break
-
-                # 检查是否只剩刮削文件 (logic from `delete_empty_folders`)
-                try:
-                    if self._delete_scrap_infos and self.scrape_files_left(parent_path):
-                        logger.info(f"本地目录 {parent_path} 只剩刮削文件，清理...")
-                        for file in parent_path.iterdir():
-                            file.unlink()
-                            logger.info(f"删除本地刮削文件：{file}")
-                except Exception as e:
-                    logger.error(f"清理本地刮削文件时发生错误：{str(e)}")
-
-                # 检查目录是否为空
-                try:
-                    if not os.listdir(parent_path):
-                        os.rmdir(parent_path)
-                        logger.info(f"清理本地空目录：{parent_path}")
-                        deleted_count += 1
-                        # 更新路径为父目录，准备下一轮检查
-                        parent_path = parent_path.parent
-                    else:
-                        # 目录不为空，停止
-                        logger.debug(f"本地目录 {parent_path} 不为空，停止清理")
-                        break
-                except Exception as e:
-                    logger.error(f"清理本地空目录 {parent_path} 发生错误：{str(e)}")
-                    break # 发生错误，停止
-                        
-        except Exception as e:
-            logger.error(f"清理本地空目录时发生错误：{str(e)} - {traceback.format_exc()}")
-        
         return deleted_count
 
     def _get_storage_dir_item(
@@ -2019,12 +2048,6 @@ class RemoveLink(_PluginBase):
                     f"成功删除网盘文件: [{storage_type}] {storage_file_item.path}"
                 )
 
-                # 清理本地 strm 目录的刮削文件
-                local_scrap_deleted = 0
-                if self._delete_scrap_infos:
-                    self.delete_scrap_infos(strm_file_path)
-                    local_scrap_deleted = 1  # 简化计数，实际可能删除多个
-
                 # 清理网盘上的刮削文件
                 storage_scrap_deleted = 0
                 storage_dirs_deleted = 0
@@ -2035,25 +2058,6 @@ class RemoveLink(_PluginBase):
                     # 清理网盘空目录
                     storage_dirs_deleted = self._delete_storage_empty_folders(
                         storage_type, storage_file_item
-                    )
-
-                # 清理本地空目录 (if mapped)
-                local_dirs_deleted = 0
-                if local_storage_type == "local" and local_storage_path:
-                    # local_storage_path 是文件前缀，我们需要附加找到的视频文件扩展名
-                    
-                    # --- 
-                    # 修正：使用 f".{storage_file_item.extension}" 替代 "storage_file_item.extension_with_dot"
-                    # ---
-                    local_media_file_full_path = (
-                        f"{local_storage_path}.{storage_file_item.extension}"
-                    )
-                    
-                    logger.info(
-                        f"开始清理 {local_media_file_full_path} 对应的本地空目录"
-                    )
-                    local_dirs_deleted = self._delete_local_empty_folders(
-                        local_media_file_full_path
                     )
 
                 # 删除转移记录（通过网盘文件路径查询）
@@ -2084,11 +2088,7 @@ class RemoveLink(_PluginBase):
                         else:
                             notification_parts.append("📝 无转移记录")
                     if self._delete_scrap_infos:
-                        if local_scrap_deleted > 0 and storage_scrap_deleted > 0:
-                            scrap_msg = f"🖼️ 已清理刮削文件（本地+网盘 {storage_scrap_deleted} 个）"
-                        elif local_scrap_deleted > 0:
-                            scrap_msg = "🖼️ 已清理本地刮削文件"
-                        elif storage_scrap_deleted > 0:
+                        if storage_scrap_deleted > 0:
                             scrap_msg = (
                                 f"🖼️ 已清理网盘刮削文件（{storage_scrap_deleted} 个）"
                             )
@@ -2096,15 +2096,9 @@ class RemoveLink(_PluginBase):
                             scrap_msg = "🖼️ 无刮削文件需要清理"
 
                         # 添加空目录清理信息
-                        if storage_dirs_deleted > 0 and local_dirs_deleted > 0:
-                            scrap_msg += f"，清理空目录 (网盘 {storage_dirs_deleted} 个，本地 {local_dirs_deleted} 个)"
-                        elif storage_dirs_deleted > 0:
+                        if storage_dirs_deleted > 0:
                             scrap_msg += (
-                                f"，清理网盘空目录 {storage_dirs_deleted} 个"
-                            )
-                        elif local_dirs_deleted > 0:
-                            scrap_msg += (
-                                f"，清理本地空目录 {local_dirs_deleted} 个"
+                                f"，清理空目录 {storage_dirs_deleted} 个"
                             )
 
                         if use_api_delete := (

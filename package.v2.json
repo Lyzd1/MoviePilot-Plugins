@@ -45,11 +45,12 @@
         "name": "清理媒体文件",
         "description": "媒体文件清理工具：支持硬链接文件清理、STRM文件清理、刮削文件清理（元数据、图片、字幕）、转移记录清理、种子联动删除等功能",
         "labels": "云盘同步",
-        "version": "2.7.2",
+        "version": "2.7.3",
         "icon": "Ombi_A.png",
         "author": "Lyzd1,DzAvril",
         "level": 1,
         "history": {
+            "v2.7.3": "优化本地空目录删除 使用openlist api",
             "v2.7.2": "自动从MP获取存储信息",
             "v2.7.1": "监控strm删除，删除openlist空目录时，同样删除本地对应目录空目录",
             "v2.6": "监控strm删除，修复MP不能正确删除openlist空目录。将延迟删除也应用于strm删除",
