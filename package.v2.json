@@ -3,7 +3,7 @@
         "name": "AI提示词编辑器",
         "description": "编辑AI助手的提示词并清空缓存使其立即生效。",
         "labels": "提示词",
-        "version": "1.0,
+        "version": "1.0",
         "icon": "delete.jpg",
         "author": "Lyzd1",
         "level": 2,
