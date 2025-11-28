@@ -5,7 +5,7 @@ from app.core.config import settings
 from app.plugins import _PluginBase
 from app.agent.prompt import PromptManager
 from app.log import logger
-from app.agent import agent__init__
+from app.agent import __init__
 
 
 class PromptEditor(_PluginBase):
@@ -51,9 +51,9 @@ class PromptEditor(_PluginBase):
                     # 清空全局PromptManager缓存
                     # 如果存在全局agent manager，尝试清除其中的prompt manager缓存
                     try:
-                        if hasattr(agent__init__, 'agent_manager') and agent__init__.agent_manager:
+                        if hasattr(__init__, 'agent_manager') and __init__.agent_manager:
                             # 为所有现有的agent实例清空缓存
-                            for agent in agent__init__.agent_manager.active_agents.values():
+                            for agent in __init__.agent_manager.active_agents.values():
                                 if hasattr(agent, 'prompt_manager') and agent.prompt_manager:
                                     agent.prompt_manager.clear_cache()
                                     logger.info(f"已清空Agent {agent.session_id} 的提示词缓存")
