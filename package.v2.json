@@ -1,4 +1,16 @@
 {
+    "PromptEditor": {
+        "name": "AI提示词编辑器",
+        "description": "编辑AI助手的提示词并清空缓存使其立即生效。",
+        "labels": "AI",
+        "version": "1.0,
+        "icon": "delete.jpg",
+        "author": "Lyzd1",
+        "level": 2,
+        "history": {
+            "v1.0": "初始版本"
+        }
+    },
     "TorrentRemoverSeparated": {
         "name": "自动删除(主辅分离)",
         "description": "自动删除下载器中的下载任务，支持主辅种分离处理。",
