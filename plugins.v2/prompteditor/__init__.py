@@ -16,7 +16,7 @@ class PromptEditor(_PluginBase):
     # 插件图标
     plugin_icon = "prompt_A.png"
     # 插件版本
-    plugin_version = "1.0"
+    plugin_version = "1.1"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -33,7 +33,7 @@ class PromptEditor(_PluginBase):
     _content = ""
 
     # Agent Prompt文件路径
-    prompt_file_path = Path("/app/agent/prompt/Agent Prompt.txt")
+    prompt_file_path = Path("/app/app/agent/prompt/Agent Prompt.txt")
 
     def init_plugin(self, config: dict = None):
         if config:
