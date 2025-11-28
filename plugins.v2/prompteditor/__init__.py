@@ -16,7 +16,7 @@ class PromptEditor(_PluginBase):
     # 插件图标
     plugin_icon = "prompt_A.png"
     # 插件版本
-    plugin_version = "1.1"
+    plugin_version = "1.2"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -39,40 +39,48 @@ class PromptEditor(_PluginBase):
         if config:
             self._enabled = config.get("enabled")
             self._content = config.get("content") or ""
-            # 写入文件
-            if self._enabled and self._content:
+
+        # 总是尝试写入提示词文件（无论插件是否启用）
+        # 这样可以确保每次启动时都能恢复自定义提示词
+        if self._content:
+            try:
+                # 确保目录存在
+                self.prompt_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # 写入提示词内容到文件
+                self.prompt_file_path.write_text(self._content, encoding="utf-8")
+
+                # 清空全局PromptManager缓存
+                # 如果存在全局agent manager，尝试清除其中的prompt manager缓存
                 try:
-                    # 确保目录存在
-                    self.prompt_file_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    # 写入新的提示词内容到文件
-                    self.prompt_file_path.write_text(self._content, encoding="utf-8")
-
-                    # 清空全局PromptManager缓存
-                    # 如果存在全局agent manager，尝试清除其中的prompt manager缓存
-                    try:
-                        if hasattr(__init__, 'agent_manager') and __init__.agent_manager:
-                            # 为所有现有的agent实例清空缓存
-                            for agent in __init__.agent_manager.active_agents.values():
-                                if hasattr(agent, 'prompt_manager') and agent.prompt_manager:
-                                    agent.prompt_manager.clear_cache()
-                                    logger.info(f"已清空Agent {agent.session_id} 的提示词缓存")
-                    except Exception as e:
-                        logger.warning(f"清空Agent实例缓存时出错: {e}")
-
-                    # 清空默认PromptManager缓存
-                    prompt_manager = PromptManager()
-                    prompt_manager.clear_cache()
-                    logger.info("已清空默认PromptManager缓存")
-
-                    logger.info("AI提示词已更新并清空缓存")
-                    self.systemmessage.put("AI提示词已更新并清空缓存，修改已立即生效！", title="提示词编辑器")
+                    if hasattr(__init__, 'agent_manager') and __init__.agent_manager:
+                        # 为所有现有的agent实例清空缓存
+                        for agent in __init__.agent_manager.active_agents.values():
+                            if hasattr(agent, 'prompt_manager') and agent.prompt_manager:
+                                agent.prompt_manager.clear_cache()
+                                logger.info(f"已清空Agent {agent.session_id} 的提示词缓存")
                 except Exception as e:
-                    error_msg = f"更新提示词失败: {str(e)}"
-                    logger.error(error_msg)
+                    logger.warning(f"清空Agent实例缓存时出错: {e}")
+
+                # 清空默认PromptManager缓存
+                prompt_manager = PromptManager()
+                prompt_manager.clear_cache()
+                logger.info("已清空默认PromptManager缓存")
+
+                logger.info("AI提示词已恢复并清空缓存")
+
+                # 只有在手动启用时才发送通知消息
+                if self._enabled:
+                    self.systemmessage.put("AI提示词已更新并清空缓存，修改已立即生效！", title="提示词编辑器")
+            except Exception as e:
+                error_msg = f"写入提示词失败: {str(e)}"
+                logger.error(error_msg)
+                # 只有在手动启用时才发送错误消息
+                if self._enabled:
                     self.systemmessage.put(error_msg, title="提示词编辑器")
-                finally:
-                    # 重置插件状态
+            finally:
+                # 只有在手动启用时才重置插件状态
+                if self._enabled:
                     self._enabled = False
                     self.update_config({
                         "enabled": False,
