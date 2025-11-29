@@ -20,7 +20,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.2.2"  # 版本号更新
+    plugin_version = "3.2.3"  # 版本号更新
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -185,7 +185,7 @@ class SubscribeGroup(_PluginBase):
             return
 
         if not self._category:
-            logger.error("二级分类自定义填充未开启")
+            logger.debug("二级分类自定义填充未开启")
             return
 
         if len(self._subscribe_confs.keys()) == 0:
@@ -295,11 +295,11 @@ class SubscribeGroup(_PluginBase):
             history_handle: List[str] = self.get_data('history_handle') or []
 
             if f"{download_history.type}:{download_history.tmdbid}" in history_handle:
-                logger.warning(f"下载历史:{download_history.title} 已处理过，不再重复处理")
+                logger.debug(f"下载历史:{download_history.title} 已处理过，不再重复处理")
                 return
 
             if download_history.type != '电视剧':
-                logger.warning(f"下载历史:{download_history.title} 不是电视剧，不进行官组填充")
+                logger.debug(f"下载历史:{download_history.title} 不是电视剧，不进行官组填充")
                 return
 
             # 根据下载历史查询订阅记录
@@ -316,7 +316,7 @@ class SubscribeGroup(_PluginBase):
 
             for subscribe in subscribes:
                 if subscribe.type != '电视剧':
-                    logger.warning(f"订阅记录:{subscribe.name} 不是电视剧，不进行官组填充")
+                    logger.debug(f"订阅记录:{subscribe.name} 不是电视剧，不进行官组填充")
                     continue
 
                 # 开始填充官组和站点
