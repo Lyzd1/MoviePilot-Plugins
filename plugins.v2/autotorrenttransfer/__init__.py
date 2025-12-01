@@ -31,7 +31,7 @@ class AutoTorrentTransfer(_PluginBase):
     # 插件图标
     plugin_icon = "seed.png"
     # 插件版本
-    plugin_version = "1.10.7"
+    plugin_version = "1.10.8"
     # 插件作者
     plugin_author = "Lyzd1,jxxghp"
     # 作者主页
@@ -391,7 +391,7 @@ class AutoTorrentTransfer(_PluginBase):
                                         'props': {
                                             'model': 'share_ratio_threshold',
                                             'label': '分享率阈值',
-                                            'placeholder': '例如: 1.0'
+                                            'placeholder': '例如: 1.0 (低于此值的站点种子将被转移)'
                                         }
                                     }
                                 ]
@@ -1215,20 +1215,20 @@ class AutoTorrentTransfer(_PluginBase):
                     manual_labels.add(label)
             current_labels = all_labels
 
-        # 收集需要保留的自动标签（分享率高于阈值的站点）
+        # 收集需要保留的自动标签（分享率低于阈值的站点）
         active_auto_labels = set()
         for site_name, stats in site_statistics.items():
             # 获取站点当前分享率
             share_ratio = stats.get('share_ratio', 0)
 
-            # 如果分享率高于阈值，查找对应的标签
-            if share_ratio > share_ratio_threshold:
+            # 如果分享率低于阈值，查找对应的标签
+            if share_ratio < share_ratio_threshold:
                 label = site_label_map.get(site_name)
                 if label:
                     active_auto_labels.add(label)
-                    logger.info(f"站点 {site_name} 分享率 {share_ratio} 高于阈值 {share_ratio_threshold}，将保留标签 {label}")
+                    logger.info(f"站点 {site_name} 分享率 {share_ratio} 低于阈值 {share_ratio_threshold}，将保留标签 {label}")
                 else:
-                    logger.warn(f"站点 {site_name} 分享率高于阈值，但未找到对应的标签映射")
+                    logger.warn(f"站点 {site_name} 分享率低于阈值，但未找到对应的标签映射")
 
         # 计算需要添加和移除的标签
         labels_to_add = active_auto_labels - auto_labels
