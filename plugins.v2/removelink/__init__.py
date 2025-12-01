@@ -49,6 +49,21 @@ class DeletionTask:
     processed: bool = False
 
 
+@dataclass
+class DeletionResult:
+    """删除结果"""
+
+    file_path: Path
+    task_type: str  # "hardlink" 或 "strm"
+    success: bool
+    storage_type: Optional[str] = None
+    storage_path: Optional[str] = None
+    scrap_deleted: int = 0
+    dirs_deleted: int = 0
+    history_deleted: bool = False
+    hardlink_count: int = 0  # 仅 hardlink 任务使用
+
+
 class FileMonitorHandler(FileSystemEventHandler):
     """
     目录监控处理
@@ -204,7 +219,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.7.3"
+    plugin_version = "2.8"
     # 插件作者
     plugin_author = "Lyzd1,DzAvril"
     # 作者主页
@@ -1157,53 +1172,62 @@ class RemoveLink(_PluginBase):
             # 更新路径为父目录，准备下一轮检查
             path = parent_path
 
-    def _execute_delayed_deletion(self, task: DeletionTask):
+    def _execute_delayed_deletion(self, task: DeletionTask) -> Optional[DeletionResult]:
         """
         执行延迟删除任务 - 路由到特定处理器
+        返回 DeletionResult 对象
         """
+        result = None
         try:
             if task.task_type == "hardlink":
-                # Call the renamed function
-                self._execute_hardlink_delayed_deletion(task)
+                result = self._execute_hardlink_delayed_deletion(task)
             elif task.task_type == "strm":
-                # Call the new STRM delay handler
-                self._execute_strm_delayed_deletion(task)
+                result = self._execute_strm_delayed_deletion(task)
             else:
                 logger.warning(f"未知的延迟删除任务类型: {task.task_type}")
-        
+
         except Exception as e:
             logger.error(f"执行延迟删除任务失败 ({task.task_type}): {str(e)} - {traceback.format_exc()}")
         finally:
-            # This is the finally block from the original _execute_delayed_deletion
             task.processed = True
+
+        return result
             
-    def _execute_strm_delayed_deletion(self, task: DeletionTask):
+    def _execute_strm_delayed_deletion(self, task: DeletionTask) -> Optional[DeletionResult]:
         """
         执行 STRM 的延迟删除任务
+        返回 DeletionResult 对象
         """
         logger.debug(f"开始执行延迟删除任务 (strm): {task.file_path}")
-        
+
         # 1. 检查文件是否被重新创建
         if task.file_path.exists():
             logger.info(f"STRM 文件 {task.file_path} 已被重新创建，跳过删除操作")
-            return
-        
-        # 2. 执行实际的删除逻辑
+            return None
+
+        # 2. 执行实际的删除逻辑（不发送通知，由批量通知处理）
         logger.debug(
             f"STRM 文件 {task.file_path} 确认被删除，开始执行延迟删除操作"
         )
-        self._execute_strm_deletion(task.file_path)
+        return self._execute_strm_deletion(task.file_path, send_notify=False)
 
-    def _execute_hardlink_delayed_deletion(self, task: DeletionTask):
+    def _execute_hardlink_delayed_deletion(self, task: DeletionTask) -> Optional[DeletionResult]:
         """
         执行硬链接的延迟删除任务
+        返回 DeletionResult 对象
         """
         logger.debug(f"开始执行延迟删除任务 (hardlink): {task.file_path}")
+
+        result = DeletionResult(
+            file_path=task.file_path,
+            task_type="hardlink",
+            success=False
+        )
 
         # 验证原文件是否仍然被删除（未被重新创建）
         if task.file_path.exists():
             logger.info(f"文件 {task.file_path} (hardlink) 已被重新创建，跳过删除操作")
-            return
+            return None
 
         # 检查是否有相同inode的新文件（重新硬链接的情况）
         with state_lock:
@@ -1216,7 +1240,7 @@ class RemoveLink(_PluginBase):
                         logger.info(
                             f"检测到相同inode的新文件 {path}，添加时间 {file_info.add_time} 晚于删除时间 {task.timestamp}，可能是重新硬链接，跳过删除操作"
                         )
-                        return
+                        return None
 
         # 延迟执行所有删除相关操作
         logger.debug(
@@ -1232,7 +1256,9 @@ class RemoveLink(_PluginBase):
                     EventType.DownloadFileDeleted, {"src": str(task.file_path)}
                 )
         # 删除转移记录
-        self.delete_history(str(task.file_path))
+        if self._delete_history:
+            self.delete_history(str(task.file_path))
+            result.history_deleted = True
 
         # 查找并删除硬链接文件
         deleted_files = []
@@ -1264,31 +1290,11 @@ class RemoveLink(_PluginBase):
                     # 从状态集合中移除
                     self.file_state.pop(path, None)
 
-        # 发送通知（在锁外执行）
-        if self._notify and deleted_files:
-            file_count = len(deleted_files)
+        if deleted_files:
+            result.success = True
+            result.hardlink_count = len(deleted_files)
 
-            # 构建通知内容
-            notification_parts = [f"🗂️ 源文件：{task.file_path}"]
-
-            if file_count == 1:
-                notification_parts.append(f"🔗 硬链接：{deleted_files[0]}")
-            else:
-                notification_parts.append(f"🔗 删除了 {file_count} 个硬链接文件")
-
-            # 添加其他操作记录
-            if self._delete_history:
-                notification_parts.append("📝 已清理转移记录")
-            if self._delete_torrents:
-                notification_parts.append("🌱 已联动删除种子")
-            if self._delete_scrap_infos:
-                notification_parts.append("🖼️ 已清理刮削文件")
-
-            self.post_message(
-                mtype=NotificationType.SiteMessage,
-                title="🧹 媒体文件清理",
-                text=f"⏰ 延迟删除完成 (硬链接)\n\n" + "\n".join(notification_parts),
-            )
+        return result
 
     def _process_deletion_queue(self):
         """
@@ -1298,59 +1304,33 @@ class RemoveLink(_PluginBase):
             current_time = datetime.now()
             tasks_to_process = []
 
-            # 先获取需要处理的任务，避免在处理任务时持有锁
+            # 滑动窗口模式：处理队列中所有未处理的任务
             with deletion_queue_lock:
-                # 找到需要处理的任务
-                for task in self.deletion_queue:
-                    if not task.processed:
-                        elapsed = (current_time - task.timestamp).total_seconds()
-                        if elapsed >= self._delay_seconds:
-                            tasks_to_process.append(task)
-
+                tasks_to_process = [task for task in self.deletion_queue if not task.processed]
                 if tasks_to_process:
-                    logger.debug(
-                        f"处理延迟删除队列，待处理任务数: {len(tasks_to_process)}"
-                    )
+                    logger.info(f"处理延迟删除队列，待处理任务数: {len(tasks_to_process)}")
 
             # 在锁外处理任务，避免死锁
-            processed_count = 0
+            results: List[DeletionResult] = []
             for task in tasks_to_process:
                 try:
-                    self._execute_delayed_deletion(task)
-                    processed_count += 1
+                    result = self._execute_delayed_deletion(task)
+                    if result:
+                        results.append(result)
                 except Exception as e:
                     logger.error(f"处理延迟删除任务失败：{task.file_path} - {e}")
 
-            # 重新获取锁进行清理和定时器管理
+            # 发送批量通知
+            if results and self._notify:
+                self._send_batch_notification(results)
+
+            # 清理已处理的任务
             with deletion_queue_lock:
-                # 清理已处理的任务
-                original_count = len(self.deletion_queue)
                 self.deletion_queue = [
                     task for task in self.deletion_queue if not task.processed
                 ]
-                cleaned_count = original_count - len(self.deletion_queue)
-
-                if cleaned_count > 0:
-                    logger.debug(f"清理了 {cleaned_count} 个已处理的任务")
-
-                # 如果还有未处理的任务，重新启动定时器
-                if self.deletion_queue:
-                    # 计算下一个任务的等待时间
-                    next_task_time = min(
-                        (task.timestamp.timestamp() + self._delay_seconds)
-                        for task in self.deletion_queue
-                        if not task.processed
-                    )
-                    wait_time = max(1, next_task_time - current_time.timestamp())
-
-                    logger.debug(
-                        f"还有 {len(self.deletion_queue)} 个任务待处理，"
-                        f"{wait_time:.1f} 秒后重新检查"
-                    )
-                    self._start_deletion_timer(wait_time)
-                else:
-                    self._deletion_timer = None
-                    logger.debug("延迟删除队列已清空，定时器停止")
+                self._deletion_timer = None
+                logger.debug("延迟删除队列处理完成")
 
         except Exception as e:
             logger.error(f"处理延迟删除队列失败：{str(e)} - {traceback.format_exc()}")
@@ -1369,6 +1349,76 @@ class RemoveLink(_PluginBase):
         self._deletion_timer = threading.Timer(delay_time, self._process_deletion_queue)
         self._deletion_timer.daemon = True
         self._deletion_timer.start()
+
+    def _send_batch_notification(self, results: List[DeletionResult]):
+        """
+        发送批量删除通知
+        """
+        if not results:
+            return
+
+        # 分类统计
+        strm_results = [r for r in results if r.task_type == "strm" and r.success]
+        hardlink_results = [r for r in results if r.task_type == "hardlink" and r.success]
+
+        total_scrap = sum(r.scrap_deleted for r in results)
+        total_dirs = sum(r.dirs_deleted for r in results)
+        total_hardlinks = sum(r.hardlink_count for r in results)
+        history_deleted = any(r.history_deleted for r in results)
+
+        # 构建通知内容
+        parts = []
+
+        # STRM 文件列表
+        if strm_results:
+            parts.append(f"📺 STRM 文件: {len(strm_results)} 个")
+            for r in strm_results[:5]:  # 最多显示5个
+                parts.append(f"  └─ {r.file_path.name} → [{r.storage_type}]")
+            if len(strm_results) > 5:
+                parts.append(f"  └─ ... 等 {len(strm_results) - 5} 个")
+
+        # 硬链接文件列表
+        if hardlink_results:
+            parts.append(f"🔗 硬链接文件: {len(hardlink_results)} 个 (共 {total_hardlinks} 个链接)")
+            for r in hardlink_results[:5]:
+                parts.append(f"  └─ {r.file_path.name}")
+            if len(hardlink_results) > 5:
+                parts.append(f"  └─ ... 等 {len(hardlink_results) - 5} 个")
+
+        # 汇总信息
+        summary = []
+        if self._delete_scrap_infos:
+            if total_scrap > 0 or total_dirs > 0:
+                msg = f"🖼️ 清理刮削文件 {total_scrap} 个"
+                if total_dirs > 0:
+                    msg += f"，空目录 {total_dirs} 个"
+                    # 检查是否使用了 AList API
+                    if (
+                        self._api_delete_empty_dirs
+                        and self._api_delete_url
+                        and self._api_delete_token
+                        and any(r.storage_type == "alist" for r in strm_results)
+                    ):
+                        msg += " (使用 AList API)"
+                summary.append(msg)
+            else:
+                summary.append("🖼️ 无刮削文件需要清理")
+
+        if self._delete_history:
+            if history_deleted:
+                summary.append("📝 已清理转移记录")
+        if self._delete_torrents and hardlink_results:
+            summary.append("🌱 已联动删除种子")
+
+        if summary:
+            parts.append("")
+            parts.extend(summary)
+
+        self.post_message(
+            mtype=NotificationType.SiteMessage,
+            title=f"🧹 媒体文件清理 - 批量处理 {len(results)} 个",
+            text="⏰ 延迟删除完成\n\n" + "\n".join(parts),
+        )
 
     def handle_deleted(self, file_path: Path):
         """
@@ -1402,13 +1452,11 @@ class RemoveLink(_PluginBase):
 
                 with deletion_queue_lock:
                     self.deletion_queue.append(task)
-                    # 只有在没有定时器运行时才启动新的定时器
-                    # 避免频繁的删除事件重置定时器导致任务永远不被处理
-                    if not self._deletion_timer:
-                        self._start_deletion_timer()
-                        logger.debug("启动延迟删除定时器")
-                    else:
-                        logger.debug("延迟删除定时器已在运行，任务已加入队列")
+                    # 滑动窗口延迟：每次有新任务时重置定时器，合并连续删除
+                    if self._deletion_timer:
+                        self._deletion_timer.cancel()
+                    self._start_deletion_timer()
+                    logger.debug(f"延迟删除定时器已重置，当前队列 {len(self.deletion_queue)} 个任务")
             else:
                 # 立即删除模式（原有逻辑）
                 deleted_files = []
@@ -2010,10 +2058,16 @@ class RemoveLink(_PluginBase):
             )
             return None
 
-    def _execute_strm_deletion(self, strm_file_path: Path):
+    def _execute_strm_deletion(self, strm_file_path: Path, send_notify: bool = True) -> Optional[DeletionResult]:
         """
         执行 strm 文件的实际删除逻辑（用于立即删除或延迟删除）
+        返回 DeletionResult 对象，如果 send_notify=True 则同时发送通知
         """
+        result = DeletionResult(
+            file_path=strm_file_path,
+            task_type="strm",
+            success=False
+        )
         try:
             # 获取对应的网盘文件路径和本地文件路径
             (
@@ -2027,7 +2081,7 @@ class RemoveLink(_PluginBase):
                 logger.warning(
                     f"无法找到 strm 文件 {strm_file_path} 对应的网盘路径映射"
                 )
-                return
+                return result
 
             # 查找网盘中的视频文件
             storage_file_item = self._find_storage_media_file(
@@ -2038,7 +2092,7 @@ class RemoveLink(_PluginBase):
                 logger.info(
                     f"网盘中未找到对应的视频文件: [{storage_type}] {storage_path}"
                 )
-                return
+                return result
 
             logger.info(f"准备删除网盘文件: [{storage_type}] {storage_file_item.path}")
 
@@ -2047,76 +2101,29 @@ class RemoveLink(_PluginBase):
                 logger.info(
                     f"成功删除网盘文件: [{storage_type}] {storage_file_item.path}"
                 )
+                result.success = True
+                result.storage_type = storage_type
+                result.storage_path = storage_file_item.path
 
                 # 清理网盘上的刮削文件
-                storage_scrap_deleted = 0
-                storage_dirs_deleted = 0
                 if self._delete_scrap_infos:
-                    storage_scrap_deleted = self._delete_storage_scrap_files(
+                    result.scrap_deleted = self._delete_storage_scrap_files(
                         storage_type, storage_file_item
                     )
                     # 清理网盘空目录
-                    storage_dirs_deleted = self._delete_storage_empty_folders(
+                    result.dirs_deleted = self._delete_storage_empty_folders(
                         storage_type, storage_file_item
                     )
 
                 # 删除转移记录（通过网盘文件路径查询）
-                history_deleted = False
                 if self._delete_history:
-                    history_deleted = self.delete_history_by_dest(
+                    result.history_deleted = self.delete_history_by_dest(
                         storage_file_item.path
                     )
 
-                # 发送通知
-                if self._notify:
-                    # 构建通知内容
-                    notification_parts = [f"🗂️ STRM 文件：{strm_file_path}"]
-                    notification_parts.append(
-                        f"🗑️ 已删除网盘文件：[{storage_type}] {storage_file_item.path}"
-                    )
-
-                    # 检查是否为延迟删除
-                    is_delayed = self._delayed_deletion
-                    title_prefix = (
-                        "⏰ 延迟删除完成 (STRM)" if is_delayed else "⚡ 立即删除完成 (STRM)"
-                    )
-
-                    # 添加其他操作记录
-                    if self._delete_history:
-                        if history_deleted:
-                            notification_parts.append("📝 已清理转移记录")
-                        else:
-                            notification_parts.append("📝 无转移记录")
-                    if self._delete_scrap_infos:
-                        if storage_scrap_deleted > 0:
-                            scrap_msg = (
-                                f"🖼️ 已清理网盘刮削文件（{storage_scrap_deleted} 个）"
-                            )
-                        else:
-                            scrap_msg = "🖼️ 无刮削文件需要清理"
-
-                        # 添加空目录清理信息
-                        if storage_dirs_deleted > 0:
-                            scrap_msg += (
-                                f"，清理空目录 {storage_dirs_deleted} 个"
-                            )
-
-                        if use_api_delete := (
-                            self._api_delete_empty_dirs
-                            and self._api_delete_url
-                            and self._api_delete_token
-                            and storage_type == "alist"
-                        ):
-                            if storage_dirs_deleted > 0:
-                                scrap_msg += " (使用 AList API)"
-
-                        notification_parts.append(scrap_msg)
-
-                    self.post_message(
-                        mtype=NotificationType.SiteMessage,
-                        title="🧹 媒体文件清理",
-                        text=f"{title_prefix}\n\n" + "\n".join(notification_parts),
-                    )
+                # 发送通知（仅立即删除模式）
+                if send_notify and self._notify:
+                    self._send_single_strm_notification(result)
             else:
                 logger.error(
                     f"删除网盘文件失败: [{storage_type}] {storage_file_item.path}"
@@ -2126,6 +2133,46 @@ class RemoveLink(_PluginBase):
             logger.error(
                 f"处理 strm 文件删除失败: {strm_file_path} - {str(e)} - {traceback.format_exc()}"
             )
+
+        return result
+
+    def _send_single_strm_notification(self, result: DeletionResult):
+        """发送单个 STRM 删除通知（用于立即删除模式）"""
+        notification_parts = [f"🗂️ STRM 文件：{result.file_path}"]
+        notification_parts.append(
+            f"🗑️ 已删除网盘文件：[{result.storage_type}] {result.storage_path}"
+        )
+
+        if self._delete_history:
+            if result.history_deleted:
+                notification_parts.append("📝 已清理转移记录")
+            else:
+                notification_parts.append("📝 无转移记录")
+        if self._delete_scrap_infos:
+            if result.scrap_deleted > 0:
+                scrap_msg = f"🖼️ 已清理网盘刮削文件（{result.scrap_deleted} 个）"
+            else:
+                scrap_msg = "🖼️ 无刮削文件需要清理"
+
+            if result.dirs_deleted > 0:
+                scrap_msg += f"，清理空目录 {result.dirs_deleted} 个"
+
+            if (
+                self._api_delete_empty_dirs
+                and self._api_delete_url
+                and self._api_delete_token
+                and result.storage_type == "alist"
+                and result.dirs_deleted > 0
+            ):
+                scrap_msg += " (使用 AList API)"
+
+            notification_parts.append(scrap_msg)
+
+        self.post_message(
+            mtype=NotificationType.SiteMessage,
+            title="🧹 媒体文件清理",
+            text="⚡ 立即删除完成 (STRM)\n\n" + "\n".join(notification_parts),
+        )
 
     def handle_strm_deleted(self, strm_file_path: Path):
         """
@@ -2148,12 +2195,11 @@ class RemoveLink(_PluginBase):
 
             with deletion_queue_lock:
                 self.deletion_queue.append(task)
-                # 只有在没有定时器运行时才启动新的定时器
-                if not self._deletion_timer:
-                    self._start_deletion_timer()
-                    logger.debug("启动延迟删除定时器")
-                else:
-                    logger.debug("延迟删除定时器已在运行，任务已加入队列")
+                # 滑动窗口延迟：每次有新任务时重置定时器，合并连续删除
+                if self._deletion_timer:
+                    self._deletion_timer.cancel()
+                self._start_deletion_timer()
+                logger.debug(f"延迟删除定时器已重置，当前队列 {len(self.deletion_queue)} 个任务")
         else:
             # 立即删除模式
             logger.debug(f"STRM 文件 {strm_file_path.name} 立即删除")
