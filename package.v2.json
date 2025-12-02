@@ -193,5 +193,17 @@
             "v1.10.5": "增加基于站点分享率的自动标签功能",
             "v1.10.2": "初始版本"
         }
+    },
+    "iyuuautoseedplus": {
+        "name": "IYUU自动辅种Plus",
+        "description": "基于IYUU官方Api实现自动辅种。",
+        "labels": "IYUU",
+        "version": "2.16",
+        "icon": "IYUU.png",
+        "author": "Lyzd1,jxxghp,CKun",
+        "level": 2,
+        "history": {
+            "v2.16": "将原始种子添加进入success缓存中，方便自动转移做种不重复添加"
+        }
     }
 }
