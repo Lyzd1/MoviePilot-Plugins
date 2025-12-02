@@ -198,12 +198,12 @@
         "name": "IYUU自动辅种Plus",
         "description": "基于IYUU官方Api实现自动辅种。",
         "labels": "IYUU",
-        "version": "2.16",
+        "version": "2.17",
         "icon": "IYUU.png",
         "author": "Lyzd1,jxxghp,CKun",
         "level": 2,
         "history": {
-            "v2.16": "将原始种子添加进入success缓存中，方便自动转移做种不重复添加"
+            "v2.17": "将原始种子添加进入success缓存中，方便自动转移做种不重复添加"
         }
     }
 }
