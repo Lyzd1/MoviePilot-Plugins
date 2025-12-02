@@ -26,9 +26,9 @@ from app.utils.http import RequestUtils
 from app.utils.string import StringUtils
 
 
-class IYUUAutoSeedPlus(_PluginBase):
+class IYUUAutoSeed(_PluginBase):
     # 插件名称
-    plugin_name = "IYUU自动辅种Plus"
+    plugin_name = "IYUU自动辅种"
     # 插件描述
     plugin_desc = "基于IYUU官方Api实现自动辅种。"
     # 插件图标
@@ -40,7 +40,7 @@ class IYUUAutoSeedPlus(_PluginBase):
     # 作者主页
     author_url = "https://github.com/Lyzd1"
     # 插件配置项ID前缀
-    plugin_config_prefix = "iyuuautoseedplus_"
+    plugin_config_prefix = "iyuuautoseed_"
     # 加载顺序
     plugin_order = 17
     # 可使用的用户级别
@@ -226,8 +226,8 @@ class IYUUAutoSeedPlus(_PluginBase):
         """
         if self.get_state():
             return [{
-                "id": "IYUUAutoSeedplus",
-                "name": "IYUU自动辅种服务Plus",
+                "id": "IYUUAutoSeed",
+                "name": "IYUU自动辅种服务",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.auto_seed,
                 "kwargs": {}

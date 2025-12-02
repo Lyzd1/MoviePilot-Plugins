@@ -194,8 +194,8 @@
             "v1.10.2": "初始版本"
         }
     },
-    "iyuuautoseedplus": {
-        "name": "IYUU自动辅种Plus",
+    "iyuuautoseed": {
+        "name": "IYUU自动辅种",
         "description": "基于IYUU官方Api实现自动辅种。",
         "labels": "IYUU",
         "version": "2.17",
