@@ -34,11 +34,11 @@ class IYUUAutoSeed(_PluginBase):
     # 插件图标
     plugin_icon = "IYUU.png"
     # 插件版本
-    plugin_version = "2.17"
+    plugin_version = "2.16"
     # 插件作者
-    plugin_author = "Lyzd1,jxxghp,CKun"
+    plugin_author = "jxxghp,CKun"
     # 作者主页
-    author_url = "https://github.com/Lyzd1"
+    author_url = "https://github.com/jxxghp"
     # 插件配置项ID前缀
     plugin_config_prefix = "iyuuautoseed_"
     # 加载顺序
@@ -714,9 +714,6 @@ class IYUUAutoSeed(_PluginBase):
                     return
                 # 获取种子hash
                 hash_str = self.__get_hash(torrent=torrent, dl_type=service.type)
-                if hash_str in self._success_caches:
-                    logger.info(f"种子 {hash_str} 已处理过辅种，跳过 ...")
-                    continue
                 if hash_str in self._error_caches or hash_str in self._permanent_error_caches:
                     logger.info(f"种子 {hash_str} 辅种失败且已缓存，跳过 ...")
                     continue
@@ -750,6 +747,8 @@ class IYUUAutoSeed(_PluginBase):
                     logger.info(f"种子 {hash_str} 大小:{torrent_size:.2f}GB，小于设定 {self._size}GB，跳过 ...")
                     continue
                 category = self.__get_category(torrent=torrent, dl_type=service.type) if self._auto_category else None
+                if hash_str not in self._success_caches:
+                    self._success_caches.append(hash_str)
                 hash_strs.append({
                     "hash": hash_str,
                     "save_path": save_path,
@@ -765,10 +764,6 @@ class IYUUAutoSeed(_PluginBase):
                     # 处理分组
                     self.__seed_torrents(hash_strs=chunk,
                                          service=service)
-                # 将原始种子hash加入成功缓存
-                for item in hash_strs:
-                    if item["hash"] not in self._success_caches:
-                        self._success_caches.append(item["hash"])
                 # 触发校验检查
                 self.check_recheck()
             else:

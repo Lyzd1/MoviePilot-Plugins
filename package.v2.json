@@ -198,7 +198,7 @@
         "name": "IYUU自动辅种",
         "description": "基于IYUU官方Api实现自动辅种。",
         "labels": "IYUU",
-        "version": "2.17",
+        "version": "2.16",
         "icon": "IYUU.png",
         "author": "Lyzd1,jxxghp,CKun",
         "level": 2,
