@@ -39,10 +39,10 @@ class Exchange001:
         try:
             # 这些日志现在应该能正常显示在 MoviePilot 控制台了
             logger.info(f"执行站点 {self.site_name} 的魔力兑换")
-            logger.info(f"兑换URL: {self.exchange_url}")
-            logger.info(f"请求参数: option={option}")
+            logger.debug(f"兑换URL: {self.exchange_url}")
+            logger.debug(f"请求参数: option={option}")
 
-            logger.info("正在发送兑换请求...")
+            logger.debug("正在发送兑换请求...")
             
             # 设置超时时间为 30 秒，避免无限等待
             response = requests.post(self.exchange_url, headers=headers, data=payload, timeout=30)
@@ -50,7 +50,7 @@ class Exchange001:
             # 检查响应状态码
             response.raise_for_status() 
 
-            logger.info(f"请求完成，状态码: {response.status_code}")
+            logger.debug(f"请求完成，状态码: {response.status_code}")
 
             # 检查兑换结果 - 只要返回200状态码就认为是成功
             if response.status_code == 200:

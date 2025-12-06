@@ -44,8 +44,8 @@ class ExchangeMteam:
 
         try:
             logger.info(f"执行站点 {self.site_name} 的魔力兑换")
-            logger.info(f"兑换URL: {self.exchange_url}")
-            logger.info(f"请求参数: goodsId={self.goods_id}, num={quantity}")
+            logger.debug(f"兑换URL: {self.exchange_url}")
+            logger.debug(f"请求参数: goodsId={self.goods_id}, num={quantity}")
 
             # 发送POST请求
             response = requests.post(self.exchange_url, headers=headers, data=payload, timeout=30)

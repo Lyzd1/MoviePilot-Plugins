@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Tuple
 import pytz
 from app.helper.sites import SitesHelper
 from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
 from ruamel.yaml import YAMLError
 from app.core.config import settings
 from app.core.event import Event, eventmanager
@@ -15,9 +14,8 @@ from app.db.site_oper import SiteOper
 from app.db.systemconfig_oper import SystemConfigOper
 from app.log import logger
 from app.plugins import _PluginBase
-from app.scheduler import Scheduler
 from app.schemas import NotificationType
-from app.schemas.types import EventType, SystemConfigKey
+from app.schemas.types import EventType
 from .bonus_exchange_config import BonusExchangeConfig
 from .exchange_001 import Exchange001
 from .exchange_mteam import ExchangeMteam
@@ -34,7 +32,7 @@ class BonusExchangePlugin(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/InfinityPacer/MoviePilot-Plugins/main/icons/trafficassistant.png"
     # 插件版本
-    plugin_version = "2.0"
+    plugin_version = "2.1"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -191,25 +189,6 @@ class BonusExchangePlugin(_PluginBase):
                                     }
                                 ]
                             },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 4,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VCronField',
-                                        'props': {
-                                            'model': 'cron',
-                                            'label': '执行周期',
-                                            'placeholder': '5位cron表达式',
-                                            'hint': '使用cron表达式指定执行周期，如 0 */6 * * *',
-                                            'persistent-hint': True
-                                        }
-                                    }
-                                ]
-                            }
                         ]
                     },
                     {
@@ -338,7 +317,7 @@ class BonusExchangePlugin(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '插件默认每6小时执行一次监控，当分享率或上传量低于阈值时自动执行魔力兑换'
+                                            'text': '插件在站点数据刷新完成后自动触发，也可通过"立即运行一次"手动执行'
                                         }
                                     }
                                 ]
@@ -355,32 +334,15 @@ class BonusExchangePlugin(_PluginBase):
             "ratio_threshold": 1.0,
             "enable_bonus_check": True,
             "bonus_threshold": 1000.0,
-            "cron": "0 */6 * * *",
             "site_exchange_rules": ""
         }
     def get_page(self) -> List[dict]:
         pass
     def get_service(self) -> List[Dict[str, Any]]:
         """
-        注册插件公共服务
-        [{
-            "id": "服务ID",
-            "name": "服务名称",
-            "trigger": "触发器：cron/interval/date/CronTrigger.from_crontab()",
-            "func": self.xxx,
-            "kwargs": {} # 定时器参数
-        }]
+        注册插件公共服务 - 仅事件驱动和手动运行，无定时任务
         """
-        if not self._config:
-            return []
-        if self._config.enabled and self._config.cron:
-            return [{
-                "id": "BonusExchangePlugin",
-                "name": "魔力兑换助手服务",
-                "trigger": CronTrigger.from_crontab(self._config.cron),
-                "func": self.exchange_monitor,
-                "kwargs": {}
-            }]
+        return []
     def stop_service(self):
         """
         退出插件
@@ -504,7 +466,7 @@ class BonusExchangePlugin(_PluginBase):
             return f"站点 {site_name}: 当前分享率: {ratio} ≤ 阈值: {config.ratio_threshold}"
         else:
             logger.debug(f"站点 {site_name}: 当前分享率: {ratio} > 阈值: {config.ratio_threshold}")
-            return f"站点 {site_name}: 当前分享率: {ratio} > 阈值: {config.ratio_threshold} ————>> OK"
+            return f"站点 {site_name}: 当前分享率: {ratio} > 阈值: {config.ratio_threshold}"
     def __get_site_statistics(self) -> dict:
         """获取站点统计数据"""
         def is_data_valid(data):
@@ -682,7 +644,7 @@ class BonusExchangePlugin(_PluginBase):
             return f"站点 {site_name}: 当前魔力值: {bonus} > 阈值: {config.bonus_threshold}"
         else:
             logger.debug(f"站点 {site_name}: 当前魔力值: {bonus} ≤ 阈值: {config.bonus_threshold}")
-            return f"站点 {site_name}: 当前魔力值: {bonus} ≤ 阈值: {config.bonus_threshold} ————>> OK"
+            return f"站点 {site_name}: 当前魔力值: {bonus} ≤ 阈值: {config.bonus_threshold}"
     def __check_and_execute_exchange(self, config: BonusExchangeConfig, site_info, site_stat: dict) -> str:
         """检查并执行兑换操作"""
         site_name = site_info.name

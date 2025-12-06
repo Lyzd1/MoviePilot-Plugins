@@ -34,7 +34,6 @@ class BonusExchangeConfig:
     site_infos: dict = None  # 站点信息字典
     onlyonce: Optional[bool] = False  # 立即运行一次
     notify: Optional[bool] = True  # 发送通知，默认开启
-    cron: Optional[str] = "0 */6 * * *"  # 执行周期，默认每6小时执行一次
 
     # 监控阈值配置
     ratio_threshold: Optional[float] = 1.0  # 分享率阈值
