@@ -9,24 +9,26 @@ class ExchangeMteam:
     馒头(M-Team)站点魔力兑换规则
     """
 
-    def __init__(self, site_name: str, api_key: str, base_url: str = 'https://api.m-team.io', goods_id: int = 1):
+    def __init__(self, site_name: str, api_key: str, current_bonus: float, base_url: str = 'https://api.m-team.io', goods_id: int = 1):
         self.site_name = site_name
         self.api_key = api_key
-        self.base_url = base_url.rstrip('/')  # 确保URL末尾没有斜杠
+        self.current_bonus = current_bonus
+        self.base_url = base_url.rstrip('/')
         self.goods_id = goods_id
         self.exchange_url = f"{self.base_url}/api/mall/exchange"
 
-    def execute_exchange(self, quantity: int) -> Tuple[bool, str]:
+    def execute_exchange(self, **kwargs) -> Tuple[bool, str]:
         """
         执行魔力兑换操作
-        :param quantity: 兑换数量
         :return: (是否成功, 消息)
         """
         if not self.api_key:
             return False, "API Key为空，无法执行兑换"
 
+        # 计算兑换数量 (魔力值/500=1G上传量)
+        quantity = int(self.current_bonus // 500)
         if quantity <= 0:
-            return False, "兑换数量必须大于0"
+            return False, "魔力值不足，无法兑换"
 
         # 设置请求头
         headers = {

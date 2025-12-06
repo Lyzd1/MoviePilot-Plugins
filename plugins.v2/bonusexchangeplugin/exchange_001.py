@@ -16,7 +16,7 @@ class Exchange001:
         self.ua = ua if ua else 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         self.exchange_url = f"{site_url}/mybonus.php?action=exchange"
 
-    def execute_exchange(self, option: str, upload_amount: str, bonus_cost: str) -> Tuple[bool, str]:
+    def execute_exchange(self, option: str = None, upload_amount: str = None, bonus_cost: str = None, **kwargs) -> Tuple[bool, str]:
         """
         执行魔力兑换操作
         """
