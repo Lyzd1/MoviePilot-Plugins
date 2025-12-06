@@ -32,7 +32,7 @@ class BonusExchangePlugin(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/InfinityPacer/MoviePilot-Plugins/main/icons/trafficassistant.png"
     # 插件版本
-    plugin_version = "2.1"
+    plugin_version = "2.2"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -789,7 +789,13 @@ class BonusExchangePlugin(_PluginBase):
 
         if exchange_count > 0:
             logger.info(f"站点 {site_name}: 本次共执行 {exchange_count} 次兑换")
-            return [f"站点 {site_name}: 共兑换 {exchange_count} 次，消耗 {total_bonus_cost:.0f} 魔力，获得 {total_upload:.0f}G 上传量"]
+            remaining_bonus = site_current_bonus.get(site_name, 0)
+            return [f"🎉 {site_name} 兑换成功\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"📊 兑换次数: {exchange_count} 次\n"
+                    f"💎 消耗魔力: {total_bonus_cost:.0f}\n"
+                    f"📤 获得上传: {total_upload:.0f}G\n"
+                    f"💰 剩余魔力: {remaining_bonus:.0f}"]
         return []
     def __check_and_execute_exchange_continuous(self, config: BonusExchangeConfig, site_info):
         """连续兑换专用：返回 (result, bonus_cost, upload_amount)"""
