@@ -31,7 +31,7 @@ class AutoTorrentTransfer(_PluginBase):
     # 插件图标
     plugin_icon = "seed.png"
     # 插件版本
-    plugin_version = "1.10.8"
+    plugin_version = "1.10.9"
     # 插件作者
     plugin_author = "Lyzd1,jxxghp"
     # 作者主页
@@ -826,6 +826,7 @@ class AutoTorrentTransfer(_PluginBase):
                             logger.info(f"种子 {hash_str} 不含有任何转移标签 ({self._includelabels})，跳过 ...")
                     else:
                         # '与'逻辑: 必须包含所有标签
+                        is_skip = False
                         missing_labels = []
                         for label in self._includelabels.split(','):
                             label = label.strip()  # 去除可能的空格
