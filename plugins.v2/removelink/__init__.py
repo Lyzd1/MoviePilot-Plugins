@@ -134,11 +134,13 @@ class FileMonitorHandler(FileSystemEventHandler):
     def on_deleted(self, event):
         file_path = Path(event.src_path)
         if event.is_directory:
-            # 单独处理文件夹删除触发删除种子
+            # STRM 监控：文件夹删除时直接删除云盘对应文件夹
+            if self.monitor_type == "strm":
+                self.sync.handle_strm_folder_deleted(file_path)
+                return
+            # 硬链接监控：文件夹删除触发删除种子
             if self.sync._delete_torrents:
-                # 发送事件
                 logger.info(f"监测到删除文件夹：{file_path}")
-                # 文件夹删除发送 DownloadFileDeleted 事件
                 eventmanager.send_event(
                     EventType.DownloadFileDeleted, {"src": str(file_path)}
                 )
@@ -219,7 +221,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.8"
+    plugin_version = "2.9"
     # 插件作者
     plugin_author = "Lyzd1,DzAvril"
     # 作者主页
@@ -283,6 +285,8 @@ class RemoveLink(_PluginBase):
     deletion_queue: List[DeletionTask] = []
     # 延迟删除定时器
     _deletion_timer = None
+    # 已删除的 STRM 文件夹路径集合（用于过滤文件夹内的文件事件）
+    deleted_strm_folders: set = set()
     # AList API 配置
     _api_delete_empty_dirs = False
     _api_delete_url = ""
@@ -344,6 +348,8 @@ class RemoveLink(_PluginBase):
 
         # 初始化延迟删除队列
         self.deletion_queue = []
+        # 初始化已删除文件夹集合
+        self.deleted_strm_folders = set()
 
         if self._enabled:
             # =========================================================
@@ -1183,6 +1189,8 @@ class RemoveLink(_PluginBase):
                 result = self._execute_hardlink_delayed_deletion(task)
             elif task.task_type == "strm":
                 result = self._execute_strm_delayed_deletion(task)
+            elif task.task_type == "strm_folder":
+                result = self._execute_strm_folder_delayed_deletion(task)
             else:
                 logger.warning(f"未知的延迟删除任务类型: {task.task_type}")
 
@@ -1192,6 +1200,27 @@ class RemoveLink(_PluginBase):
             task.processed = True
 
         return result
+
+    def _execute_strm_folder_delayed_deletion(self, task: DeletionTask) -> Optional[DeletionResult]:
+        """
+        执行 STRM 文件夹的延迟删除任务
+        """
+        logger.debug(f"开始执行延迟删除任务 (strm_folder): {task.file_path}")
+
+        # 检查文件夹是否被重新创建
+        if task.file_path.exists():
+            logger.info(f"STRM 文件夹 {task.file_path} 已被重新创建，跳过删除操作")
+            # 从已删除文件夹集合中移除
+            self.deleted_strm_folders.discard(str(task.file_path))
+            return None
+
+        # 执行删除
+        result = self._execute_strm_folder_deletion(task.file_path, send_notify=False)
+
+        # 处理完成后从已删除文件夹集合中移除
+        self.deleted_strm_folders.discard(str(task.file_path))
+
+        return result
             
     def _execute_strm_delayed_deletion(self, task: DeletionTask) -> Optional[DeletionResult]:
         """
@@ -1199,6 +1228,12 @@ class RemoveLink(_PluginBase):
         返回 DeletionResult 对象
         """
         logger.debug(f"开始执行延迟删除任务 (strm): {task.file_path}")
+
+        # 检查文件是否属于已删除的文件夹（由文件夹删除统一处理）
+        for deleted_folder in self.deleted_strm_folders.copy():
+            if str(task.file_path).startswith(str(deleted_folder) + os.sep):
+                logger.debug(f"文件 {task.file_path} 属于已删除文件夹 {deleted_folder}，跳过")
+                return None
 
         # 1. 检查文件是否被重新创建
         if task.file_path.exists():
@@ -1359,6 +1394,7 @@ class RemoveLink(_PluginBase):
 
         # 分类统计
         strm_results = [r for r in results if r.task_type == "strm" and r.success]
+        strm_folder_results = [r for r in results if r.task_type == "strm_folder" and r.success]
         hardlink_results = [r for r in results if r.task_type == "hardlink" and r.success]
 
         total_scrap = sum(r.scrap_deleted for r in results)
@@ -1368,6 +1404,14 @@ class RemoveLink(_PluginBase):
 
         # 构建通知内容
         parts = []
+
+        # STRM 文件夹列表
+        if strm_folder_results:
+            parts.append(f"📁 STRM 文件夹: {len(strm_folder_results)} 个")
+            for r in strm_folder_results[:5]:
+                parts.append(f"  └─ {r.file_path.name} → [{r.storage_type}]")
+            if len(strm_folder_results) > 5:
+                parts.append(f"  └─ ... 等 {len(strm_folder_results) - 5} 个")
 
         # STRM 文件列表
         if strm_results:
@@ -2179,7 +2223,13 @@ class RemoveLink(_PluginBase):
         处理 strm 文件删除事件
         """
         logger.info(f"处理 strm 文件删除: {strm_file_path}")
-        
+
+        # 检查文件是否属于已删除的文件夹（如果是则跳过，由文件夹删除统一处理）
+        for deleted_folder in self.deleted_strm_folders.copy():
+            if str(strm_file_path).startswith(str(deleted_folder) + os.sep):
+                logger.debug(f"文件 {strm_file_path} 属于已删除文件夹 {deleted_folder}，跳过")
+                return
+
         # 根据配置选择立即删除或延迟删除
         if self._delayed_deletion:
             # 延迟删除模式
@@ -2204,6 +2254,155 @@ class RemoveLink(_PluginBase):
             # 立即删除模式
             logger.debug(f"STRM 文件 {strm_file_path.name} 立即删除")
             self._execute_strm_deletion(strm_file_path)
+
+    def handle_strm_folder_deleted(self, folder_path: Path):
+        """
+        处理 strm 文件夹删除事件
+        """
+        logger.info(f"处理 strm 文件夹删除: {folder_path}")
+
+        # 记录已删除的文件夹路径
+        self.deleted_strm_folders.add(str(folder_path))
+
+        # 根据配置选择立即删除或延迟删除
+        if self._delayed_deletion:
+            logger.info(
+                f"STRM 文件夹 {folder_path.name} 加入延迟删除队列，延迟 {self._delay_seconds} 秒"
+            )
+            task = DeletionTask(
+                file_path=folder_path,
+                timestamp=datetime.now(),
+                task_type="strm_folder"
+            )
+
+            with deletion_queue_lock:
+                self.deletion_queue.append(task)
+                if self._deletion_timer:
+                    self._deletion_timer.cancel()
+                self._start_deletion_timer()
+                logger.debug(f"延迟删除定时器已重置，当前队列 {len(self.deletion_queue)} 个任务")
+        else:
+            # 立即删除模式
+            logger.debug(f"STRM 文件夹 {folder_path.name} 立即删除")
+            self._execute_strm_folder_deletion_immediate(folder_path)
+
+    def _get_storage_folder_path_from_strm(
+        self, strm_folder_path: Path
+    ) -> Tuple[str, str, Optional[str], Optional[str]]:
+        """
+        根据 strm 文件夹路径获取对应的网盘存储文件夹路径
+        返回 (storage_type, storage_path, local_storage_type, local_storage_path) 或 (None, None, None, None)
+        """
+        mappings = self._parse_strm_path_mappings()
+        strm_path_str = str(strm_folder_path)
+
+        for strm_prefix, (
+            storage_type,
+            storage_prefix,
+            local_storage_type,
+            local_storage_prefix,
+        ) in mappings.items():
+            if strm_path_str.startswith(strm_prefix):
+                # 计算相对路径
+                relative_path = strm_path_str[len(strm_prefix):].lstrip("/\\")
+
+                # 构建网盘路径
+                storage_folder_path = storage_prefix.rstrip("/") + "/" + relative_path if relative_path else storage_prefix
+
+                # 构建本地路径
+                local_folder_path = None
+                if local_storage_type and local_storage_prefix:
+                    local_folder_path = (
+                        local_storage_prefix.rstrip("/") + "/" + relative_path if relative_path else local_storage_prefix
+                    )
+
+                return storage_type, storage_folder_path, local_storage_type, local_folder_path
+
+        return None, None, None, None
+
+    def _execute_strm_folder_deletion_immediate(self, folder_path: Path) -> Optional[DeletionResult]:
+        """
+        立即执行 STRM 文件夹删除
+        """
+        return self._execute_strm_folder_deletion(folder_path, send_notify=True)
+
+    def _execute_strm_folder_deletion(self, folder_path: Path, send_notify: bool = True) -> Optional[DeletionResult]:
+        """
+        执行 STRM 文件夹删除逻辑
+        """
+        result = DeletionResult(
+            file_path=folder_path,
+            task_type="strm_folder",
+            success=False
+        )
+
+        try:
+            # 获取对应的网盘文件夹路径
+            (
+                storage_type,
+                storage_path,
+                local_storage_type,
+                local_storage_path,
+            ) = self._get_storage_folder_path_from_strm(folder_path)
+
+            if not storage_type or not storage_path:
+                logger.warning(f"无法找到 strm 文件夹 {folder_path} 对应的网盘路径映射")
+                return result
+
+            logger.info(f"准备删除网盘文件夹: [{storage_type}] {storage_path}")
+
+            # 使用 AList API 删除整个文件夹
+            deleted = False
+            if storage_type == "alist" and self._api_delete_url and self._api_delete_token:
+                deleted = self._call_api_delete_dir(storage_path)
+            else:
+                # 使用 StorageChain 删除
+                folder_item = schemas.FileItem(
+                    storage=storage_type,
+                    path=storage_path if storage_path.endswith("/") else storage_path + "/",
+                    type="dir"
+                )
+                deleted = self._storagechain.delete_file(folder_item)
+
+            if deleted:
+                logger.info(f"成功删除网盘文件夹: [{storage_type}] {storage_path}")
+                result.success = True
+                result.storage_type = storage_type
+                result.storage_path = storage_path
+                result.dirs_deleted = 1
+
+                # 删除本地对应文件夹
+                if local_storage_type and local_storage_path:
+                    if local_storage_type == "alistlocal" and self._api_delete_url and self._api_delete_token:
+                        if self._call_api_delete_dir(local_storage_path):
+                            logger.info(f"成功删除本地文件夹 (AList API): {local_storage_path}")
+                        else:
+                            logger.warning(f"删除本地文件夹失败 (AList API): {local_storage_path}")
+                    else:
+                        local_item = schemas.FileItem(
+                            storage="local",
+                            path=local_storage_path if local_storage_path.endswith("/") else local_storage_path + "/",
+                            type="dir"
+                        )
+                        if self._storagechain.delete_file(local_item):
+                            logger.info(f"成功删除本地文件夹: {local_storage_path}")
+                        else:
+                            logger.warning(f"删除本地文件夹失败: {local_storage_path}")
+
+                # 发送通知
+                if send_notify and self._notify:
+                    self.post_message(
+                        mtype=NotificationType.SiteMessage,
+                        title="🧹 媒体文件清理",
+                        text=f"📁 文件夹删除完成\n\n🗂️ STRM 文件夹：{folder_path}\n🗑️ 已删除网盘文件夹：[{storage_type}] {storage_path}",
+                    )
+            else:
+                logger.error(f"删除网盘文件夹失败: [{storage_type}] {storage_path}")
+
+        except Exception as e:
+            logger.error(f"处理 strm 文件夹删除失败: {folder_path} - {str(e)} - {traceback.format_exc()}")
+
+        return result
 
     def delete_history_by_dest(self, dest_path: str) -> bool:
         """
