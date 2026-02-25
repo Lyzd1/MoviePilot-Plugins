@@ -25,8 +25,8 @@ class ExchangeMteam:
         if not self.api_key:
             return False, "API Key为空，无法执行兑换"
 
-        # 计算兑换数量 (魔力值/500=1G上传量)
-        quantity = int(self.current_bonus // 500)
+        # 计算兑换数量 (魔力值/800=1G上传量)
+        quantity = int(self.current_bonus // 800)
         if quantity <= 0:
             return False, "魔力值不足，无法兑换"
 
@@ -71,7 +71,7 @@ class ExchangeMteam:
             # 检查业务逻辑是否成功
             # 根据用户要求，检查message字段是否为"SUCCESS"
             if response_data.get('message') == 'SUCCESS':
-                message = f"兑换成功！消耗 {quantity * 500} 魔力获得 {quantity}G 上传量"
+                message = f"兑换成功！消耗 {quantity * 800} 魔力获得 {quantity}G 上传量"
                 logger.info(message)
                 return True, message
             else:
