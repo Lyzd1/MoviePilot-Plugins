@@ -43,7 +43,7 @@
         "name": "魔力兑换助手",
         "description": "自动监控分享率，在低于阈值时执行魔力兑换操作",
         "labels": "分享率",
-        "version": "2.2",
+        "version": "2.2.1",
         "icon": "Ombi_A.png",
         "author": "Lyzd1",
         "level": 1,
