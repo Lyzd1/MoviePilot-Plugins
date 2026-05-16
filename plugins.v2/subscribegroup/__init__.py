@@ -20,7 +20,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.3.5"  # 版本号更新，添加副标题匹配功能
+    plugin_version = "3.3.5.1"  # 版本号更新，修复调试日志和副标题匹配问题
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -65,12 +65,13 @@ class SubscribeGroup(_PluginBase):
             self._web_source_confs = config.get("web_source_confs")
             self._subtitle_confs = config.get("subtitle_confs")  # 读取副标题配置
 
-            # 调试模式日志：输出插件初始化配置
+            # 调试模式日志：输出插件初始化配置（使用info级别确保能看见）
             if self._debug:
-                logger.debug("=" * 60)
-                logger.debug("【订阅规则自动填充插件】调试模式已开启")
-                logger.debug(f"初始化配置: {config}")
-                logger.debug("=" * 60)
+                logger.info("=" * 60)
+                logger.info("【订阅规则自动填充插件】调试模式已开启")
+                logger.info(f"初始化配置: enabled={self._enabled}, category={self._category}, debug={self._debug}")
+                logger.info(f"更新详情配置: {self._update_details}")
+                logger.info("=" * 60)
 
             # 解析 web_source_confs
             # 格式：Netflix:NF 或 Netflix:NF.*
@@ -84,9 +85,11 @@ class SubscribeGroup(_PluginBase):
                             self._download_web_source_rules[k] = v
                 logger.info(f"获取到Web源自定义配置 {len(self._download_web_source_rules.keys())} 个")
                 if self._debug:
-                    logger.debug(f"Web源规则详情: {self._download_web_source_rules}")
+                    logger.info(f"Web源规则详情: {self._download_web_source_rules}")
             else:
                 self._download_web_source_rules = {}
+                if self._debug:
+                    logger.info("未配置Web源规则")
 
             # 解析副标题匹配规则
             # 格式：每行一个正则表达式，匹配description字段
@@ -99,13 +102,16 @@ class SubscribeGroup(_PluginBase):
                             # 验证正则表达式是否有效
                             re.compile(rule)
                             self._download_subtitle_rules.append(rule)
-                            if self._debug:
-                                logger.debug(f"添加副标题规则: {rule}")
+                            logger.info(f"添加副标题规则: {rule}")
                         except re.error as e:
                             logger.error(f"副标题规则无效: {rule}, 错误: {e}")
                 logger.info(f"获取到副标题匹配规则 {len(self._download_subtitle_rules)} 个")
+                if self._debug:
+                    logger.info(f"副标题规则列表: {self._download_subtitle_rules}")
             else:
                 self._download_subtitle_rules = []
+                if self._debug:
+                    logger.info("未配置副标题匹配规则")
 
             if self._update_confs:
                 active_sites = self._siteoper.list_active()
@@ -160,7 +166,7 @@ class SubscribeGroup(_PluginBase):
                             }
                 logger.info(f"获取到二级分类自定义配置 {len(self._subscribe_confs.keys())} 个")
                 if self._debug:
-                    logger.debug(f"二级分类配置详情: {self._subscribe_confs}")
+                    logger.info(f"二级分类配置详情: {self._subscribe_confs}")
             else:
                 self._subscribe_confs = {}
 
@@ -168,7 +174,7 @@ class SubscribeGroup(_PluginBase):
             if self._clear_handle:
                 self.del_data(key="history_handle")
                 if self._debug:
-                    logger.debug("已处理历史记录已清理")
+                    logger.info("已处理历史记录已清理")
 
                 self._clear_handle = False
                 self.__update_config()
@@ -178,7 +184,7 @@ class SubscribeGroup(_PluginBase):
             if self._clear:
                 self.del_data(key="history")
                 if self._debug:
-                    logger.debug("历史记录已清理")
+                    logger.info("历史记录已清理")
 
                 self._clear = False
                 self.__update_config()
@@ -206,17 +212,18 @@ class SubscribeGroup(_PluginBase):
             logger.error("订阅事件数据为空")
             return
 
-        # 调试模式：输出原始事件数据
+        # 调试模式：输出原始事件数据（使用info级别）
         if self._debug:
-            logger.debug("=" * 60)
-            logger.debug("【SubscribeAdded事件】接收到订阅添加事件")
-            logger.debug(f"事件原始数据: {event}")
+            logger.info("=" * 60)
+            logger.info("【SubscribeAdded事件】接收到订阅添加事件")
+            logger.info(f"事件原始数据: {event}")
             if hasattr(event, 'event_data'):
-                logger.debug(f"事件数据内容: {event.event_data}")
-            logger.debug("=" * 60)
+                logger.info(f"事件数据内容: {event.event_data}")
+            logger.info("=" * 60)
 
         if not self._category:
-            logger.debug("二级分类自定义填充未开启")
+            if self._debug:
+                logger.info("二级分类自定义填充未开启")
             return
 
         if len(self._subscribe_confs.keys()) == 0:
@@ -228,23 +235,23 @@ class SubscribeGroup(_PluginBase):
             if not event_data or not event_data.get("subscribe_id") or not event_data.get("mediainfo"):
                 logger.error(f"订阅事件数据不完整 {event_data}")
                 if self._debug:
-                    logger.debug(f"事件数据缺失字段: subscribe_id={event_data.get('subscribe_id')}, mediainfo={event_data.get('mediainfo')}")
+                    logger.info(f"事件数据缺失字段: subscribe_id={event_data.get('subscribe_id')}, mediainfo={event_data.get('mediainfo')}")
                 return
 
             sid = event_data.get("subscribe_id")
             category = event_data.get("mediainfo").get("category")
             
             if self._debug:
-                logger.debug(f"订阅ID: {sid}, 原始分类: {category}")
+                logger.info(f"订阅ID: {sid}, 原始分类: {category}")
             
             if not category:
                 media_info = self.chain.recognize_media(mtype=MediaType(event_data.get("mediainfo").get("type")),
                                                         tmdbid=event_data.get("mediainfo").get("tmdb_id"))
                 logger.error(f"订阅ID:{sid} 未获取到二级分类，尝试通过媒体信息识别 {media_info}")
                 if self._debug:
-                    logger.debug(f"媒体识别结果: {media_info}")
+                    logger.info(f"媒体识别结果: {media_info}")
                     if media_info:
-                        logger.debug(f"识别到的分类: {media_info.category}")
+                        logger.info(f"识别到的分类: {media_info.category}")
                 
                 if media_info and media_info.category:
                     category = media_info.category
@@ -256,19 +263,19 @@ class SubscribeGroup(_PluginBase):
             if category not in self._subscribe_confs.keys():
                 logger.error(f"订阅ID:{sid} 二级分类:{category} 未配置自定义规则")
                 if self._debug:
-                    logger.debug(f"可用分类配置: {list(self._subscribe_confs.keys())}")
+                    logger.info(f"可用分类配置: {list(self._subscribe_confs.keys())}")
                 return
 
             # 查询订阅
             subscribe = self._subscribeoper.get(sid)
             
             if self._debug:
-                logger.debug(f"订阅信息: name={subscribe.name}, current_config={subscribe.dict() if hasattr(subscribe, 'dict') else subscribe}")
+                logger.info(f"订阅信息: name={subscribe.name}")
 
             # 二级分类自定义配置
             category_conf = self._subscribe_confs.get(category)
 
-            logger.error(
+            logger.info(
                 f"订阅记录:{subscribe.name} 二级分类:{category} 自定义配置:{category_conf}")
 
             update_dict = {}
@@ -295,7 +302,7 @@ class SubscribeGroup(_PluginBase):
                     update_dict['save_path'] = category_conf.get('savepath')
 
             if self._debug:
-                logger.debug(f"准备更新的字段: {update_dict}")
+                logger.info(f"准备更新的字段: {update_dict}")
 
             # 更新订阅自定义配置
             self._subscribeoper.update(sid, update_dict)
@@ -322,43 +329,36 @@ class SubscribeGroup(_PluginBase):
             logger.error("下载事件数据为空")
             return
 
-        # 调试模式：输出原始事件数据
+        # 调试模式：输出原始事件数据（使用info级别）
         if self._debug:
-            logger.debug("=" * 60)
-            logger.debug("【DownloadAdded事件】接收到下载添加事件")
-            logger.debug(f"事件原始数据: {event}")
+            logger.info("=" * 60)
+            logger.info("【DownloadAdded事件】接收到下载添加事件")
+            logger.info(f"事件原始数据: {event}")
             if hasattr(event, 'event_data'):
-                logger.debug(f"事件数据内容: {event.event_data}")
+                logger.info(f"事件数据内容: {event.event_data}")
                 # 详细输出context中的信息
                 context = event.event_data.get("context")
                 if context:
-                    logger.debug(f"Context类型: {type(context)}")
+                    logger.info(f"Context类型: {type(context)}")
                     if hasattr(context, 'torrent_info'):
-                        logger.debug(f"Torrent Info: {context.torrent_info}")
+                        logger.info(f"Torrent Info Site: {context.torrent_info.site if context.torrent_info else None}")
+                        logger.info(f"Torrent Info Site Name: {context.torrent_info.site_name if context.torrent_info else None}")
+                        logger.info(f"Torrent Info Description: {context.torrent_info.description if context.torrent_info else None}")
                     if hasattr(context, 'meta_info'):
-                        logger.debug(f"Meta Info: {context.meta_info}")
-                        if context.meta_info:
-                            logger.debug(f"  - resource_type: {context.meta_info.resource_type}")
-                            logger.debug(f"  - resource_pix: {context.meta_info.resource_pix}")
-                            logger.debug(f"  - resource_effect: {context.meta_info.resource_effect}")
-                            logger.debug(f"  - web_source: {context.meta_info.web_source}")
-                            logger.debug(f"  - org_string: {context.meta_info.org_string}")
-                            logger.debug(f"  - video_encode: {getattr(context.meta_info, 'video_encode', 'N/A')}")
+                        logger.info(f"Meta Info Web Source: {context.meta_info.web_source if context.meta_info else None}")
+                        logger.info(f"Meta Info Resource Team: {context.meta_info.resource_team if context.meta_info else None}")
                     if hasattr(context, 'media_info'):
-                        logger.debug(f"Media Info: {context.media_info}")
-                        if context.media_info:
-                            logger.debug(f"  - category: {context.media_info.category}")
-                            logger.debug(f"  - type: {context.media_info.type}")
-            logger.debug("=" * 60)
+                        logger.info(f"Media Info Category: {context.media_info.category if context.media_info else None}")
+            logger.info("=" * 60)
 
         if not self._enabled:
             if self._debug:
-                logger.debug("种子下载自定义填充未开启")
+                logger.info("种子下载自定义填充未开启")
             return
 
-        if len(self._update_details) == 0:
+        if "制作组" not in self._update_details:
             if self._debug:
-                logger.debug("插件未开启更新填充内容")
+                logger.info("规则匹配未在填充内容中勾选")
             return
 
         if event:
@@ -369,7 +369,7 @@ class SubscribeGroup(_PluginBase):
             download_hash = event_data.get("hash")
             
             if self._debug:
-                logger.debug(f"下载Hash: {download_hash}")
+                logger.info(f"下载Hash: {download_hash}")
             
             # 根据hash查询下载记录
             download_history = self._downloadhistoryoper.get_by_hash(download_hash)
@@ -378,20 +378,17 @@ class SubscribeGroup(_PluginBase):
                 return
 
             if self._debug:
-                logger.debug(f"下载历史记录: title={download_history.title}, type={download_history.type}, tmdbid={download_history.tmdbid}, seasons={download_history.seasons}")
+                logger.info(f"下载历史记录: title={download_history.title}, type={download_history.type}, tmdbid={download_history.tmdbid}")
 
             history_handle: List[str] = self.get_data('history_handle') or []
 
             if f"{download_history.type}:{download_history.tmdbid}" in history_handle:
-                logger.debug(f"下载历史:{download_history.title} 已处理过，不再重复处理")
-                if self._debug:
-                    logger.debug(f"已处理记录: {history_handle}")
+                logger.info(f"下载历史:{download_history.title} 已处理过，不再重复处理")
                 return
 
             if download_history.type != '电视剧':
-                logger.debug(f"下载历史:{download_history.title} 不是电视剧，不进行官组填充")
                 if self._debug:
-                    logger.debug(f"类型为: {download_history.type}, 期望类型: 电视剧")
+                    logger.info(f"下载历史:{download_history.title} 不是电视剧，跳过")
                 return
 
             # 根据下载历史查询订阅记录
@@ -401,165 +398,105 @@ class SubscribeGroup(_PluginBase):
                                                                download_history.seasons.count('-') == 0 else None)
             if not subscribes or len(subscribes) == 0:
                 logger.warning(f"下载历史:{download_history.title} tmdbid:{download_history.tmdbid} 对应订阅记录不存在")
-                if self._debug:
-                    logger.debug(f"查询参数: tmdbid={download_history.tmdbid}, season={int(download_history.seasons.replace('S', '')) if download_history.seasons and download_history.seasons.count('-') == 0 else None}")
                 return
 
             logger.info(
-                f"获取到tmdbid {download_history.tmdbid} season {int(download_history.seasons.replace('S', '')) if download_history.seasons and download_history.seasons.count('-') == 0 else None} 订阅记录:{len(subscribes)} 个")
-
-            if self._debug:
-                logger.debug(f"找到 {len(subscribes)} 个订阅记录: {[s.name for s in subscribes]}")
+                f"获取到tmdbid {download_history.tmdbid} 订阅记录:{len(subscribes)} 个")
 
             for subscribe in subscribes:
                 if subscribe.type != '电视剧':
-                    logger.debug(f"订阅记录:{subscribe.name} 不是电视剧，不进行官组填充")
                     continue
 
                 if self._debug:
-                    logger.debug(f"处理订阅: {subscribe.name}, 当前配置: include={subscribe.include}, resolution={subscribe.resolution}, quality={subscribe.quality}, effect={subscribe.effect}, sites={subscribe.sites}")
+                    logger.info(f"处理订阅: {subscribe.name}, 当前include={subscribe.include}")
 
-                # 开始填充官组和站点
+                # 开始填充
                 context = event_data.get("context")
                 _torrent = context.torrent_info
                 _meta = context.meta_info
 
-                if self._debug:
-                    logger.debug(f"更新详情配置: {self._update_details}")
-
-                # 填充数据
+                # 规则匹配填充
                 update_dict = {}
                 
-                # 分辨率
-                if "分辨率" in self._update_details and not subscribe.resolution:
-                    resource_pix = _meta.resource_pix if _meta else None
-                    if self._debug:
-                        logger.debug(f"原始分辨率: {resource_pix}")
-                    if resource_pix:
-                        resource_pix = self.__parse_pix(resource_pix)
-                        if resource_pix:
-                            update_dict['resolution'] = resource_pix
-                            if self._debug:
-                                logger.debug(f"解析后分辨率: {resource_pix}")
-                        else:
-                            logger.warning(f"订阅记录:{subscribe.name} 未获取到分辨率信息")
-                
-                # 资源质量
-                if "资源质量" in self._update_details and not subscribe.quality:
-                    resource_type = _meta.resource_type if _meta else None
-                    video_encode = _meta.video_encode if _meta else None
-                    
-                    if self._debug:
-                        logger.debug(f"原始资源质量类型: {resource_type}")
-                        logger.debug(f"原始视频编码: {video_encode}")
-                    
-                    parsed_quality = self.__parse_type(resource_type, video_encode)
-                    
-                    if parsed_quality:
-                        update_dict['quality'] = parsed_quality
-                        if self._debug:
-                            logger.debug(f"解析后质量: {parsed_quality}")
-                    else:
-                        logger.warning(f"订阅记录:{subscribe.name} 未获取到资源质量信息 (type: {resource_type}, encode: {video_encode})")
-
-                # 特效
-                if "特效" in self._update_details and not subscribe.effect:
-                    resource_effect = _meta.resource_effect if _meta else None
-                    if self._debug:
-                        logger.debug(f"原始特效: {resource_effect}")
-                    if resource_effect:
-                        resource_effect = self.__parse_effect(resource_effect)
-                        if resource_effect:
-                            update_dict['effect'] = resource_effect
-                            if self._debug:
-                                logger.debug(f"解析后特效: {resource_effect}")
-                        else:
-                            logger.warning(f"订阅记录:{subscribe.name} 未获取到特效信息")
-
-                # Web源规则和副标题匹配（制作组填充）
-                # 优先级：副标题匹配 > Web源规则
                 if "制作组" in self._update_details and not subscribe.include:
-                    description = _torrent.description if _torrent else ""
+                    description = _torrent.description if _torrent and hasattr(_torrent, 'description') else ""
                     web_source = _meta.web_source if _meta else None
 
-                    if self._debug:
-                        logger.debug(f"Web源: {web_source}")
-                        logger.debug(f"Description: {description[:200] if description else 'None'}")  # 只显示前200字符
-
+                    # 输出详细信息用于调试
+                    logger.info(f"========== 规则匹配开始 ==========")
+                    logger.info(f"订阅名称: {subscribe.name}")
+                    logger.info(f"Web源: {web_source}")
+                    logger.info(f"Description原始内容: {description}")
+                    logger.info(f"副标题规则数量: {len(self._download_subtitle_rules)}")
+                    logger.info(f"Web源规则数量: {len(self._download_web_source_rules)}")
+                    
                     include_value = None
-                    match_source = None  # 记录匹配来源
+                    match_source = None
 
                     # 1. 优先副标题匹配规则
                     if self._download_subtitle_rules and description:
+                        logger.info(f"开始匹配副标题规则...")
                         for rule in self._download_subtitle_rules:
                             try:
+                                logger.info(f"测试规则: {rule}")
                                 if re.search(rule, description, re.IGNORECASE):
                                     include_value = rule
                                     match_source = "副标题匹配"
-                                    logger.info(f"订阅记录:{subscribe.name} 副标题匹配成功: 规则={rule}")
-                                    if self._debug:
-                                        logger.debug(f"副标题匹配: description中包含 '{rule}'")
+                                    logger.info(f"✅ 副标题匹配成功! 规则={rule}")
                                     break
+                                else:
+                                    logger.info(f"❌ 副标题匹配失败: {rule}")
                             except re.error as e:
                                 logger.error(f"副标题规则执行错误: {rule}, 错误: {e}")
+                    else:
+                        if not self._download_subtitle_rules:
+                            logger.info("未配置副标题规则")
+                        if not description:
+                            logger.info("Description为空")
 
                     # 2. 如果没有副标题匹配，再尝试Web源规则
                     if not include_value and web_source and web_source in self._download_web_source_rules:
                         include_value = self._download_web_source_rules.get(web_source)
                         match_source = "Web源规则"
-                        logger.info(f"订阅记录:{subscribe.name} 匹配到Web源规则:{web_source}，填充 include:{include_value}")
+                        logger.info(f"✅ Web源规则匹配成功! web_source={web_source}, 填充值={include_value}")
+                    elif not include_value and web_source:
+                        logger.info(f"❌ Web源规则匹配失败: web_source={web_source} 不在规则中")
                         if self._debug:
-                            logger.debug(f"Web源规则匹配: web_source={web_source}, 规则值={include_value}")
+                            logger.info(f"可用的Web源规则: {list(self._download_web_source_rules.keys())}")
+                    elif not include_value:
+                        logger.info("Web源为空")
 
                     if include_value:
                         update_dict['include'] = include_value
-                        if self._debug:
-                            logger.debug(f"最终include值: {include_value} (来源: {match_source})")
+                        logger.info(f"🎯 最终include值: {include_value} (来源: {match_source})")
                     else:
-                        if self._debug:
-                            logger.debug(f"未匹配到任何规则: web_source={web_source}, 副标题规则数={len(self._download_subtitle_rules)}")
-
-                # 站点
-                if "站点" in self._update_details and (
-                        not subscribe.sites or (subscribe.sites and len(subscribe.sites) == 0)):
-                    rss_sites = self.systemconfig.get(SystemConfigKey.RssSites) or []
-                    if self._debug:
-                        logger.debug(f"RSS站点列表: {rss_sites}")
-                        logger.debug(f"当前种子站点ID: {_torrent.site if _torrent else None}")
+                        logger.info(f"❌ 未匹配到任何规则")
                     
-                    if _torrent and _torrent.site and int(_torrent.site) in rss_sites:
-                        update_dict['sites'] = [_torrent.site]
-                        if self._debug:
-                            logger.debug(f"添加站点到订阅: {_torrent.site}")
+                    logger.info(f"========== 规则匹配结束 ==========")
 
-                if len(update_dict.keys()) == 0:
+                if update_dict:
+                    # 更新订阅记录
+                    self._subscribeoper.update(subscribe.id, update_dict)
+                    logger.info(f"订阅记录:{subscribe.name} 填充成功\n {update_dict}")
+
+                    # 读取历史记录
+                    history = self.get_data('history') or []
+                    history.append({
+                        'name': subscribe.name,
+                        'type': '种子下载自定义配置',
+                        'content': json.dumps(update_dict),
+                        "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
+                    })
+                    # 保存历史
+                    self.save_data(key="history", value=history)
+
+                    # 保存已处理历史
+                    history_handle.append(f"{download_history.type}:{download_history.tmdbid}")
+                    self.save_data('history_handle', history_handle)
+                    if self._debug:
+                        logger.info(f"已处理记录添加: {download_history.type}:{download_history.tmdbid}")
+                else:
                     logger.info(f"订阅记录:{subscribe.name} 无需填充")
-                    continue
-
-                if self._debug:
-                    logger.debug(f"最终更新字典: {update_dict}")
-
-                # 更新订阅记录
-                self._subscribeoper.update(subscribe.id, update_dict)
-                logger.info(f"订阅记录:{subscribe.name} 填充成功\n {update_dict}")
-
-                # 读取历史记录
-                history = self.get_data('history') or []
-                history.append({
-                    'name': subscribe.name,
-                    'type': '种子下载自定义配置',
-                    'content': json.dumps(update_dict),
-                    "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
-                })
-                # 保存历史
-                self.save_data(key="history", value=history)
-
-                # 保存已处理历史
-                history_handle.append(f"{download_history.type}:{download_history.tmdbid}")
-                self.save_data('history_handle', history_handle)
-                if self._debug:
-                    logger.debug(f"已处理记录添加: {download_history.type}:{download_history.tmdbid}")
-                    logger.debug(f"当前已处理记录列表: {history_handle}")
 
     def __parse_pix(self, resource_pix):
         # 识别1080或者4k或720
@@ -791,7 +728,7 @@ class SubscribeGroup(_PluginBase):
                                             'model': 'subtitle_confs',
                                             'label': '副标题匹配规则（优先级高）',
                                             'rows': 5,
-                                            'placeholder': '无.*水印\n国粤双语\nH.*265\n4K.*重制\n\n规则说明：\n每行一个正则表达式，匹配种子的description字段\n匹配成功时，将该正则表达式填入include字段\n支持正则表达式，如 .*水印 会匹配包含"水印"的内容'
+                                            'placeholder': '无.*水印\n国粤双语\nH.*265\n4K.*重制\n\n规则说明：\n每行一个正则表达式，匹配种子的description字段\n匹配成功时，将该正则表达式填入include字段'
                                         }
                                     }
                                 ]
@@ -814,9 +751,7 @@ class SubscribeGroup(_PluginBase):
                                                            'Disney:D+\n'
                                                            'Amazon:APV\n'
                                                            'HBO:MAX\n'
-                                                           'Apple:ATVP\n\n'
-                                                           '格式：Web源名称:填充值\n'
-                                                           '当副标题规则未匹配时使用'
+                                                           'Apple:ATVP'
                                         }
                                     }
                                 ]
@@ -838,8 +773,7 @@ class SubscribeGroup(_PluginBase):
                                             'model': 'update_confs',
                                             'label': '二级分类自定义填充',
                                             'rows': 3,
-                                            'placeholder': 'category:日番#include:.*(CR.*简繁|简繁英).RLWeb|ADWeb.#sites:观众,红叶PT\n'
-                                                           'category:港台剧,日韩剧#include:国粤'
+                                            'placeholder': 'category:日番#include:.*(CR.*简繁|简繁英).RLWeb|ADWeb.#sites:观众,红叶PT'
                                         }
                                     }
                                 ]
@@ -860,37 +794,9 @@ class SubscribeGroup(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '规则优先级说明：\n'
-                                                    '1. 副标题匹配规则（优先级高）：匹配种子的description字段，匹配成功则直接使用该规则作为include值\n'
-                                                    '2. Web源规则（优先级低）：仅当副标题规则未匹配时，才根据Web源名称匹配填充\n'
-                                                    '3. 两种规则互不冲突，副标题匹配优先'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'text': '副标题匹配示例：\n'
-                                                    '规则：无.*水印\n'
-                                                    'Description包含："[bilibili大陆] [无平台水印]"\n'
-                                                    '匹配成功，include = "无.*水印"\n\n'
-                                                    'Web源规则示例：\n'
-                                                    '规则：Netflix:NF\n'
-                                                    'Web源识别为Netflix且副标题未匹配时，include = "NF"'
+                                            'text': '规则优先级：副标题匹配 > Web源规则\n'
+                                                    '1. 副标题匹配：匹配种子的description字段，支持正则表达式\n'
+                                                    '2. Web源规则：匹配种子的web_source字段，仅当副标题未匹配时使用'
                                         }
                                     }
                                 ]
@@ -955,31 +861,7 @@ class SubscribeGroup(_PluginBase):
                                         'props': {
                                             'type': 'error',
                                             'variant': 'tonal',
-                                            'text': '二级分类自定义填充：添加订阅才会填充订阅属性，会强制覆盖！用于根据二级分类自定义订阅规则，具体属性明细请查看电视剧订阅设置页面。'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'text': 'category:二级分类名称（多个分类名称逗号拼接）,resolution:分辨率,quality:质量,effect:特效,include:包含关键词,'
-                                                    'exclude:排除关键词,sites:站点名称（多个站点用逗号拼接）,filter_groups:优先级规则组（多个规则组名称用逗号拼接）,savepath:保存路径/{name}（{name}为当前订阅的名称和年份）。'
-                                                    'category必填，多组属性用#分割。例如category:动漫#resolution:1080p'
-                                                    '（添加的动漫订阅，指定分辨率为1080p）。'
+                                            'text': '二级分类自定义填充：添加订阅才会填充订阅属性，会强制覆盖！用于根据二级分类自定义订阅规则。'
                                         }
                                     }
                                 ]
@@ -997,7 +879,7 @@ class SubscribeGroup(_PluginBase):
             "update_details": [],
             "update_confs": "",
             "web_source_confs": "",
-            "subtitle_confs": "",  # 副标题配置默认值
+            "subtitle_confs": "",
         }
 
     def get_page(self) -> List[dict]:
