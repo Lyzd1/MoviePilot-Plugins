@@ -20,7 +20,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.2.4.3"  # 版本号更新
+    plugin_version = "3.3.0"  # 版本号更新，简化制作组填充逻辑
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -37,7 +37,7 @@ class SubscribeGroup(_PluginBase):
     _category: bool = False
     _clear = False
     _clear_handle = False
-    _debug: bool = False  # 新增调试开关
+    _debug: bool = False
     _update_details = []
     _update_confs = None
     _web_source_confs = None
@@ -46,11 +46,6 @@ class SubscribeGroup(_PluginBase):
     _subscribeoper = None
     _downloadhistoryoper = None
     _siteoper = None
-
-    # 新增配置项
-    _disable_guoman_team: bool = False
-    _guoman_team_override: str = ""
-    _guoman_team_rules: List[str] = []
 
     def init_plugin(self, config: dict = None):
         self._downloadhistoryoper = DownloadHistoryOper()
@@ -62,14 +57,10 @@ class SubscribeGroup(_PluginBase):
             self._category = config.get("category")
             self._clear = config.get("clear")
             self._clear_handle = config.get("clear_handle")
-            self._debug = config.get("debug")  # 读取调试开关配置
+            self._debug = config.get("debug")
             self._update_details = config.get("update_details") or []
             self._update_confs = config.get("update_confs")
             self._web_source_confs = config.get("web_source_confs")
-
-            # 加载新增的国漫配置项
-            self._disable_guoman_team = config.get("disable_guoman_team")
-            self._guoman_team_override = config.get("guoman_team_override")
 
             # 调试模式日志：输出插件初始化配置
             if self._debug:
@@ -79,6 +70,7 @@ class SubscribeGroup(_PluginBase):
                 logger.debug("=" * 60)
 
             # 解析 web_source_confs
+            # 格式：Netflix:NF 或 Netflix:NF.*
             if self._web_source_confs:
                 self._download_web_source_rules = {}
                 for confs in str(self._web_source_confs).split("\n"):
@@ -92,16 +84,6 @@ class SubscribeGroup(_PluginBase):
                     logger.debug(f"Web源规则详情: {self._download_web_source_rules}")
             else:
                 self._download_web_source_rules = {}
-
-            # 解析 guoman_team_override
-            if self._guoman_team_override:
-                self._guoman_team_rules = [line.strip() for line in str(self._guoman_team_override).split("\n") if
-                                           line.strip()]
-                logger.info(f"获取到国漫制作组覆盖规则 {len(self._guoman_team_rules)} 个")
-                if self._debug:
-                    logger.debug(f"国漫覆盖规则详情: {self._guoman_team_rules}")
-            else:
-                self._guoman_team_rules = []
 
             if self._update_confs:
                 active_sites = self._siteoper.list_active()
@@ -186,13 +168,10 @@ class SubscribeGroup(_PluginBase):
             "category": self._category,
             "clear": self._clear,
             "clear_handle": self._clear_handle,
-            "debug": self._debug,  # 保存调试配置
+            "debug": self._debug,
             "update_details": self._update_details,
             "update_confs": self._update_confs,
             "web_source_confs": self._web_source_confs,
-            # 保存新配置项
-            "disable_guoman_team": self._disable_guoman_team,
-            "guoman_team_override": self._guoman_team_override,
         })
 
     @eventmanager.register(EventType.SubscribeAdded)
@@ -281,7 +260,7 @@ class SubscribeGroup(_PluginBase):
             if category_conf.get('resolution'):
                 update_dict['resolution'] = self.__parse_pix(category_conf.get('resolution'))
             if category_conf.get('quality'):
-                update_dict['quality'] = self.__parse_type(category_conf.get('quality'), None) # 保持兼容性
+                update_dict['quality'] = self.__parse_type(category_conf.get('quality'), None)
             if category_conf.get('effect'):
                 update_dict['effect'] = self.__parse_effect(category_conf.get('effect'))
             if category_conf.get('savepath'):
@@ -306,7 +285,7 @@ class SubscribeGroup(_PluginBase):
                 'name': subscribe.name,
                 'type': f'二级分类自定义配置 {category}',
                 'content': json.dumps(update_dict),
-                "time": time.strftime("%Y-%d-%m %H:%M:%S", time.localtime(time.time()))
+                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
             })
             # 保存历史
             self.save_data(key="history", value=history)
@@ -336,11 +315,9 @@ class SubscribeGroup(_PluginBase):
                     if hasattr(context, 'meta_info'):
                         logger.debug(f"Meta Info: {context.meta_info}")
                         if context.meta_info:
-                            logger.debug(f"  - resource_team: {context.meta_info.resource_team}")
                             logger.debug(f"  - resource_type: {context.meta_info.resource_type}")
                             logger.debug(f"  - resource_pix: {context.meta_info.resource_pix}")
                             logger.debug(f"  - resource_effect: {context.meta_info.resource_effect}")
-                            logger.debug(f"  - customization: {context.meta_info.customization}")
                             logger.debug(f"  - web_source: {context.meta_info.web_source}")
                             logger.debug(f"  - org_string: {context.meta_info.org_string}")
                             logger.debug(f"  - video_encode: {getattr(context.meta_info, 'video_encode', 'N/A')}")
@@ -423,17 +400,13 @@ class SubscribeGroup(_PluginBase):
                 context = event_data.get("context")
                 _torrent = context.torrent_info
                 _meta = context.meta_info
-                _media_info = context.media_info  # 获取 media_info
-                media_category = _media_info.category if _media_info else None  # 获取二级分类
 
                 if self._debug:
-                    logger.debug(f"媒体分类: {media_category}")
-                    logger.debug(f"是否为国漫: {media_category == '国漫'}")
-                    logger.debug(f"禁用国漫制作组填充: {self._disable_guoman_team}")
                     logger.debug(f"更新详情配置: {self._update_details}")
 
                 # 填充数据
                 update_dict = {}
+                
                 # 分辨率
                 if "分辨率" in self._update_details and not subscribe.resolution:
                     resource_pix = _meta.resource_pix if _meta else None
@@ -451,13 +424,12 @@ class SubscribeGroup(_PluginBase):
                 # 资源质量
                 if "资源质量" in self._update_details and not subscribe.quality:
                     resource_type = _meta.resource_type if _meta else None
-                    video_encode = _meta.video_encode if _meta else None  # 获取 video_encode
+                    video_encode = _meta.video_encode if _meta else None
                     
                     if self._debug:
                         logger.debug(f"原始资源质量类型: {resource_type}")
                         logger.debug(f"原始视频编码: {video_encode}")
                     
-                    # 同时传入 resource_type 和 video_encode
                     parsed_quality = self.__parse_type(resource_type, video_encode)
                     
                     if parsed_quality:
@@ -481,84 +453,33 @@ class SubscribeGroup(_PluginBase):
                         else:
                             logger.warning(f"订阅记录:{subscribe.name} 未获取到特效信息")
 
-                # 制作组 (*** MODIFIED LOGIC ***)
+                # Web源规则（制作组填充）- 简化版：只填入规则值，不拼接制作组
                 if "制作组" in self._update_details and not subscribe.include:
-                    # 官组
-                    resource_team = _meta.resource_team if _meta else None
-                    customization = _meta.customization if _meta else None
                     web_source = _meta.web_source if _meta else None
-                    torrent_title = _meta.org_string if _meta else ""  # 使用 org_string 进行标题匹配
 
                     if self._debug:
-                        logger.debug(f"原始制作组: {resource_team}")
-                        logger.debug(f"自定义: {customization}")
                         logger.debug(f"Web源: {web_source}")
-                        logger.debug(f"种子标题: {torrent_title}")
 
                     include_value = None
-                    is_guoman = media_category == "国漫"
-                    override_team_found = None
 
-                    # 1. 国漫覆盖规则 (Requirement 2)
-                    if is_guoman and self._guoman_team_rules:
-                        for rule in self._guoman_team_rules:
-                            if rule in torrent_title:
-                                override_team_found = rule
-                                break
-                        if override_team_found:
-                            include_value = override_team_found
-                            logger.info(f"订阅记录:{subscribe.name} 匹配到国漫制作组覆盖规则: {override_team_found}")
-                            if self._debug:
-                                logger.debug(f"国漫覆盖规则匹配成功: 规则={override_team_found}, 标题包含该规则")
-
-                    # 2. 国漫禁用规则 (Requirement 1) & 原有逻辑
-                    if not override_team_found:
-                        # 检查是否为国漫且开启了禁用
-                        if is_guoman and self._disable_guoman_team:
-                            logger.info(f"订阅记录:{subscribe.name} 类别为国漫且已开启制作组禁用，跳过填充。")
-                            if self._debug:
-                                logger.debug("由于国漫禁用开关开启且未匹配覆盖规则，跳过制作组填充")
-                        else:
-                            # 运行原有逻辑 (Web源 或 官组)
-                            if web_source and web_source in self._download_web_source_rules:
-                                # 匹配到 web_source 规则
-                                web_source_rule = self._download_web_source_rules.get(web_source)
-                                if resource_team:
-                                    # 规则 + resource_team
-                                    include_value = f"{web_source_rule}{resource_team}"
-                                    logger.info(
-                                        f"订阅记录:{subscribe.name} 匹配到Web源规则:{web_source}，填充 include:{include_value}")
-                                else:
-                                    # 仅规则 (如果制作组为空)
-                                    include_value = web_source_rule
-                                    logger.info(
-                                        f"订阅记录:{subscribe.name} 匹配到Web源规则:{web_source}，制作组为空，填充 include:{include_value}")
-                                if self._debug:
-                                    logger.debug(f"Web源规则匹配: web_source={web_source}, 规则={web_source_rule}, 制作组={resource_team}")
-                            else:
-                                # 未匹配到 web_source 规则，走原有逻辑
-                                if resource_team and customization:
-                                    include_value = f"{customization}.+{resource_team}"
-                                    if self._debug:
-                                        logger.debug(f"同时存在customization和resource_team: {customization}.+{resource_team}")
-                                elif customization:
-                                    include_value = customization
-                                    if self._debug:
-                                        logger.debug(f"仅存在customization: {customization}")
-                                elif resource_team:
-                                    include_value = resource_team
-                                    if self._debug:
-                                        logger.debug(f"仅存在resource_team: {resource_team}")
+                    # Web源规则匹配
+                    if web_source and web_source in self._download_web_source_rules:
+                        include_value = self._download_web_source_rules.get(web_source)
+                        logger.info(f"订阅记录:{subscribe.name} 匹配到Web源规则:{web_source}，填充 include:{include_value}")
+                        if self._debug:
+                            logger.debug(f"Web源规则匹配: web_source={web_source}, 规则值={include_value}")
+                    else:
+                        if self._debug:
+                            logger.debug(f"未匹配到Web源规则，web_source={web_source}")
 
                     if include_value:
                         update_dict['include'] = include_value
                         if self._debug:
-                            logger.debug(f"最终制作组include值: {include_value}")
+                            logger.debug(f"最终include值: {include_value}")
 
                 # 站点
                 if "站点" in self._update_details and (
                         not subscribe.sites or (subscribe.sites and len(subscribe.sites) == 0)):
-                    # 站点 判断是否在订阅站点范围内
                     rss_sites = self.systemconfig.get(SystemConfigKey.RssSites) or []
                     if self._debug:
                         logger.debug(f"RSS站点列表: {rss_sites}")
@@ -780,7 +701,7 @@ class SubscribeGroup(_PluginBase):
                                                     "vale": "特效"
                                                 },
                                                 {
-                                                    "title": "制作组",
+                                                    "title": "Web源规则",
                                                     "vale": "制作组"
                                                 },
                                                 {
@@ -788,22 +709,6 @@ class SubscribeGroup(_PluginBase):
                                                     "vale": "站点"
                                                 }
                                             ]
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 4
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'disable_guoman_team',
-                                            'label': '禁用国漫的制作组填充',
                                         }
                                     }
                                 ]
@@ -842,28 +747,16 @@ class SubscribeGroup(_PluginBase):
                                         'component': 'VTextarea',
                                         'props': {
                                             'model': 'web_source_confs',
-                                            'label': '种子下载Web源规则',
-                                            'rows': 3,
-                                            'placeholder': 'Netflix:.*NF.*\n'
-                                                           'KKTV:.*KKTV.*'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextarea',
-                                        'props': {
-                                            'model': 'guoman_team_override',
-                                            'label': '国漫制作组覆盖规则',
-                                            'rows': 3,
-                                            'placeholder': 'Pure-AilMWeb\nNC-Raws\n(每行一个识别词，仅当分类为国漫时生效)'
+                                            'label': 'Web源规则（制作组）',
+                                            'rows': 5,
+                                            'placeholder': 'Netflix:NF\n'
+                                                           'KKTV:KKTV\n'
+                                                           'Disney:D+\n'
+                                                           'Amazon:APV\n'
+                                                           'HBO:MAX\n'
+                                                           'Apple:ATVP\n\n'
+                                                           '格式：Web源名称:填充值\n'
+                                                           '当种子识别到对应的Web源时，会在订阅的include字段填入:后面的值'
                                         }
                                     }
                                 ]
@@ -887,6 +780,31 @@ class SubscribeGroup(_PluginBase):
                                             'rows': 3,
                                             'placeholder': 'category:日番#include:.*(CR.*简繁|简繁英).RLWeb|ADWeb.#sites:观众,红叶PT\n'
                                                            'category:港台剧,日韩剧#include:国粤'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'text': 'Web源规则说明：\n'
+                                                    '1. 格式为 "Web源名称:填充值"，例如 "Netflix:NF"\n'
+                                                    '2. 当下载的种子识别出Web源（如Netflix、KKTV等）时，会自动将填充值填入订阅的include字段\n'
+                                                    '3. 填充值可以是简单标识（如NF），也可以是正则表达式（如.*NF.*）\n'
+                                                    '4. 此功能需要勾选种子下载填充内容中的"Web源规则"'
                                         }
                                     }
                                 ]
@@ -929,55 +847,8 @@ class SubscribeGroup(_PluginBase):
                                             'type': 'info',
                                             'variant': 'tonal',
                                             'text': '电视剧订阅未配置包含关键词、订阅站点等配置时，订阅或搜索下载后，'
-                                                    '将下载种子的制作组、站点等信息填充到订阅信息中，以保证后续订阅资源的统一性。'
+                                                    '将下载种子的站点、Web源规则等信息填充到订阅信息中，以保证后续订阅资源的统一性。'
                                                     '（订阅新出的电视剧效果更佳。）'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'warning',
-                                            'variant': 'tonal',
-                                            'text': '国漫制作组规则：\n'
-                                                    '1. "禁用国漫的制作组填充" 开启时，分类为"国漫"的电视剧下载后，将不会自动填充制作组。\n'
-                                                    '2. "国漫制作组覆盖规则" 用于设置特例。如果"国漫"种子的标题包含此处的关键词（如Pure-AilMWeb），'
-                                                    '则无视"禁用"开关，强制将该关键词填充到include字段。'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'text': 'Web源规则：格式为 Web源名称:正则表达式。Web源名称需与种子识别结果中的Web源名称（如Netflix、KKTV等）一致。'
-                                                    '如果下载种子匹配到Web源规则，则include值为：正则表达式 + 制作组。例如：Netflix:.*NF.* 将填充 include 为：.*NF.*MWeb（如果制作组为MWeb）。'
-                                                    '如果没有匹配到Web源或Web源规则，则include填充逻辑不变。'
                                         }
                                     }
                                 ]
@@ -1020,7 +891,7 @@ class SubscribeGroup(_PluginBase):
                                             'type': 'info',
                                             'variant': 'tonal',
                                             'text': 'category:二级分类名称（多个分类名称逗号拼接）,resolution:分辨率,quality:质量,effect:特效,include:包含关键词,'
-                                                    'exclude:排除关键词,sites:站点名称（多个站点用逗Gau拼接）,filter_groups:优先级规则组（多个规则组名称用逗号拼接）,savepath:保存路径/{name}（{name}为当前订阅的名称和年份）。'
+                                                    'exclude:排除关键词,sites:站点名称（多个站点用逗号拼接）,filter_groups:优先级规则组（多个规则组名称用逗号拼接）,savepath:保存路径/{name}（{name}为当前订阅的名称和年份）。'
                                                     'category必填，多组属性用#分割。例如category:动漫#resolution:1080p'
                                                     '（添加的动漫订阅，指定分辨率为1080p）。'
                                         }
@@ -1036,13 +907,10 @@ class SubscribeGroup(_PluginBase):
             "category": False,
             "clear": False,
             "clear_handle": False,
-            "debug": False,  # 调试开关默认关闭
+            "debug": False,
             "update_details": [],
             "update_confs": "",
             "web_source_confs": "",
-            # 新增配置项的默认值
-            "disable_guoman_team": False,
-            "guoman_team_override": ""
         }
 
     def get_page(self) -> List[dict]:
