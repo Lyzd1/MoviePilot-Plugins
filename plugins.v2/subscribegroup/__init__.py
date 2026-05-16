@@ -20,7 +20,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.2.4"  # 版本号更新
+    plugin_version = "3.2.4.2"  # 版本号更新
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -37,12 +37,12 @@ class SubscribeGroup(_PluginBase):
     _category: bool = False
     _clear = False
     _clear_handle = False
-    _debug: bool = False  # 调试开关
     _update_details = []
     _update_confs = None
     _web_source_confs = None
     _subscribe_confs = {}
     _download_web_source_rules = {}
+   
     _subscribeoper = None
     _downloadhistoryoper = None
     _siteoper = None
@@ -51,6 +51,8 @@ class SubscribeGroup(_PluginBase):
     _disable_guoman_team: bool = False
     _guoman_team_override: str = ""
     _guoman_team_rules: List[str] = []
+    # 调试日志开关
+    _debug: bool = False
 
     def init_plugin(self, config: dict = None):
         self._downloadhistoryoper = DownloadHistoryOper()
@@ -62,7 +64,6 @@ class SubscribeGroup(_PluginBase):
             self._category = config.get("category")
             self._clear = config.get("clear")
             self._clear_handle = config.get("clear_handle")
-            self._debug = config.get("debug")  # 加载调试开关
             self._update_details = config.get("update_details") or []
             self._update_confs = config.get("update_confs")
             self._web_source_confs = config.get("web_source_confs")
@@ -70,6 +71,8 @@ class SubscribeGroup(_PluginBase):
             # 加载新增的国漫配置项
             self._disable_guoman_team = config.get("disable_guoman_team")
             self._guoman_team_override = config.get("guoman_team_override")
+            # 加载调试开关
+            self._debug = config.get("debug", False)
 
             # 解析 web_source_confs
             if self._web_source_confs:
@@ -108,6 +111,7 @@ class SubscribeGroup(_PluginBase):
                         if ":" in conf:
                             k = conf.split(":")[0]
                             v = ":".join(conf.split(":")[1:])
+                           
                             if k == "category":
                                 category = v
                             if k == "resolution":
@@ -150,7 +154,6 @@ class SubscribeGroup(_PluginBase):
             # 清理已处理历史
             if self._clear_handle:
                 self.del_data(key="history_handle")
-
                 self._clear_handle = False
                 self.__update_config()
                 logger.info("已处理历史清理完成")
@@ -158,7 +161,6 @@ class SubscribeGroup(_PluginBase):
             # 清理历史记录
             if self._clear:
                 self.del_data(key="history")
-
                 self._clear = False
                 self.__update_config()
                 logger.info("历史记录清理完成")
@@ -169,95 +171,27 @@ class SubscribeGroup(_PluginBase):
             "category": self._category,
             "clear": self._clear,
             "clear_handle": self._clear_handle,
-            "debug": self._debug,  # 保存调试开关
             "update_details": self._update_details,
             "update_confs": self._update_confs,
             "web_source_confs": self._web_source_confs,
             # 保存新配置项
             "disable_guoman_team": self._disable_guoman_team,
             "guoman_team_override": self._guoman_team_override,
+            "debug": self._debug,
         })
-
-    def _debug_event(self, event: Event, event_name: str):
-        """
-        调试模式下输出事件数据
-        """
-        if not self._debug:
-            return
-        
-        logger.debug("=" * 80)
-        logger.debug(f"【调试】收到事件: {event_name}")
-        logger.debug("=" * 80)
-        
-        if not event:
-            logger.debug("【调试】事件对象为空")
-            return
-        
-        event_data = event.event_data
-        if event_data is None:
-            logger.debug("【调试】event_data 为 None")
-            return
-        
-        logger.debug(f"【调试】event_data 类型: {type(event_data)}")
-        
-        # 尝试以不同方式输出数据
-        try:
-            if isinstance(event_data, dict):
-                logger.debug(f"【调试】event_data 键列表: {list(event_data.keys())}")
-                # 递归输出，处理嵌套对象
-                self._debug_dict(event_data, "event_data")
-            elif hasattr(event_data, '__dict__'):
-                logger.debug(f"【调试】event_data 对象类型: {event_data.__class__.__name__}")
-                logger.debug(f"【调试】event_data 属性: {json.dumps(event_data.__dict__, indent=2, ensure_ascii=False, default=str)}")
-            else:
-                logger.debug(f"【调试】event_data 值: {str(event_data)}")
-        except Exception as e:
-            logger.debug(f"【调试】输出 event_data 时出错: {str(e)}")
-            logger.debug(f"【调试】event_data 原始值: {str(event_data)}")
-        
-        logger.debug("=" * 80)
-
-    def _debug_dict(self, data: dict, prefix: str = "", depth: int = 0):
-        """
-        递归输出字典内容，处理嵌套对象
-        """
-        if depth > 5:  # 防止无限递归
-            logger.debug(f"{'  ' * depth}{prefix}: {str(data)}")
-            return
-        
-        for key, value in data.items():
-            full_key = f"{prefix}.{key}" if prefix else key
-            
-            if isinstance(value, dict):
-                logger.debug(f"{'  ' * depth}【调试】{full_key} (dict):")
-                self._debug_dict(value, full_key, depth + 1)
-            elif hasattr(value, '__dict__') and not isinstance(value, (str, int, float, bool, list, tuple)):
-                # 是一个对象
-                logger.debug(f"{'  ' * depth}【调试】{full_key} ({value.__class__.__name__}):")
-                obj_dict = value.__dict__
-                self._debug_dict(obj_dict, full_key, depth + 1)
-            elif isinstance(value, list):
-                logger.debug(f"{'  ' * depth}【调试】{full_key} (list, 长度={len(value)}):")
-                for i, item in enumerate(value):
-                    if hasattr(item, '__dict__') and not isinstance(item, (str, int, float, bool)):
-                        logger.debug(f"{'  ' * depth}  [{i}] ({item.__class__.__name__}):")
-                        self._debug_dict(item.__dict__, f"{full_key}[{i}]", depth + 1)
-                    else:
-                        logger.debug(f"{'  ' * depth}  [{i}]: {str(item)}")
-            else:
-                logger.debug(f"{'  ' * depth}【调试】{full_key}: {str(value)}")
 
     @eventmanager.register(EventType.SubscribeAdded)
     def subscribe_notice(self, event: Event = None):
         """
         添加订阅根据二级分类填充订阅
         """
-        # 调试输出
-        self._debug_event(event, "SubscribeAdded")
-        
         if not event:
             logger.error("订阅事件数据为空")
             return
+
+        # 调试开关：打印订阅事件的 event_data
+        if self._debug and event.event_data:
+            logger.debug(f"【调试】订阅事件数据 (SubscribeAdded): {json.dumps(event.event_data, ensure_ascii=False)}")
 
         if not self._category:
             logger.debug("二级分类自定义填充未开启")
@@ -277,7 +211,7 @@ class SubscribeGroup(_PluginBase):
             category = event_data.get("mediainfo").get("category")
             if not category:
                 media_info = self.chain.recognize_media(mtype=MediaType(event_data.get("mediainfo").get("type")),
-                                                        tmdbid=event_data.get("mediainfo").get("tmdb_id"))
+                                                       tmdbid=event_data.get("mediainfo").get("tmdb_id"))
                 logger.error(f"订阅ID:{sid} 未获取到二级分类，尝试通过媒体信息识别 {media_info}")
                 if media_info and media_info.category:
                     category = media_info.category
@@ -311,7 +245,7 @@ class SubscribeGroup(_PluginBase):
             if category_conf.get('resolution'):
                 update_dict['resolution'] = self.__parse_pix(category_conf.get('resolution'))
             if category_conf.get('quality'):
-                update_dict['quality'] = self.__parse_type(category_conf.get('quality'), None)
+                update_dict['quality'] = self.__parse_type(category_conf.get('quality'), None) # 保持兼容性
             if category_conf.get('effect'):
                 update_dict['effect'] = self.__parse_effect(category_conf.get('effect'))
             if category_conf.get('savepath'):
@@ -343,12 +277,13 @@ class SubscribeGroup(_PluginBase):
         """
         添加下载填充订阅制作组等信息
         """
-        # 调试输出
-        self._debug_event(event, "DownloadAdded")
-        
         if not event:
             logger.error("下载事件数据为空")
             return
+
+        # 调试开关：打印下载事件的 event_data
+        if self._debug and event.event_data:
+            logger.debug(f"【调试】下载事件数据 (DownloadAdded): {json.dumps(event.event_data, ensure_ascii=False)}")
 
         if not self._enabled:
             # logger.error("种子下载自定义填充未开启")
@@ -382,9 +317,9 @@ class SubscribeGroup(_PluginBase):
 
             # 根据下载历史查询订阅记录
             subscribes = self._subscribeoper.list_by_tmdbid(tmdbid=download_history.tmdbid,
-                                                            season=int(download_history.seasons.replace('S', ''))
-                                                            if download_history.seasons and
-                                                               download_history.seasons.count('-') == 0 else None)
+                                                           season=int(download_history.seasons.replace('S', ''))
+                                                           if download_history.seasons and
+                                                           download_history.seasons.count('-') == 0 else None)
             if not subscribes or len(subscribes) == 0:
                 logger.warning(f"下载历史:{download_history.title} tmdbid:{download_history.tmdbid} 对应订阅记录不存在")
                 return
@@ -457,9 +392,9 @@ class SubscribeGroup(_PluginBase):
                             if rule in torrent_title:
                                 override_team_found = rule
                                 break
-                        if override_team_found:
-                            include_value = override_team_found
-                            logger.info(f"订阅记录:{subscribe.name} 匹配到国漫制作组覆盖规则: {override_team_found}")
+                    if override_team_found:
+                        include_value = override_team_found
+                        logger.info(f"订阅记录:{subscribe.name} 匹配到国漫制作组覆盖规则: {override_team_found}")
 
                     # 2. 国漫禁用规则 & 原有逻辑
                     if not override_team_found:
@@ -549,7 +484,7 @@ class SubscribeGroup(_PluginBase):
             if re.match(r"Remux", resource_type, re.IGNORECASE):
                 return "Remux"
             if re.match(r"Blu-?Ray", resource_type, re.IGNORECASE):
-                return "Blu-?Ray"
+                return "Blu-Ray"
             if re.match(r"UHD|UltraHD", resource_type, re.IGNORECASE):
                 return "UHD|UltraHD"
 
@@ -566,7 +501,7 @@ class SubscribeGroup(_PluginBase):
                 return "WEB-?DL|WEB-?RIP"
             if re.match(r"HDTV", resource_type, re.IGNORECASE):
                 return "HDTV"
-        
+     
         # 4. 降级检查：如果 video_encode 为空，但编码信息在 resource_type 中
         if resource_type:
             if re.match(r"[Hx].?265|HEVC", resource_type, re.IGNORECASE):
@@ -574,7 +509,6 @@ class SubscribeGroup(_PluginBase):
             if re.match(r"[Hx].?264|AVC", resource_type, re.IGNORECASE):
                 return "[Hx].?264|AVC"
 
-        # 均未匹配
         return None
 
     def __parse_effect(self, resource_effect):
@@ -693,26 +627,11 @@ class SubscribeGroup(_PluginBase):
                                             'model': 'update_details',
                                             'label': '种子下载填充内容',
                                             'items': [
-                                                {
-                                                    "title": "资源质量",
-                                                    "vale": "资源质量"
-                                                },
-                                                {
-                                                    "title": "分辨率",
-                                                    "vale": "分辨率"
-                                                },
-                                                {
-                                                    "title": "特效",
-                                                    "vale": "特效"
-                                                },
-                                                {
-                                                    "title": "制作组",
-                                                    "vale": "制作组"
-                                                },
-                                                {
-                                                    "title": "站点",
-                                                    "vale": "站点"
-                                                }
+                                                {"title": "资源质量", "vale": "资源质量"},
+                                                {"title": "分辨率", "vale": "分辨率"},
+                                                {"title": "特效", "vale": "特效"},
+                                                {"title": "制作组", "vale": "制作组"},
+                                                {"title": "站点", "vale": "站点"}
                                             ]
                                         }
                                     }
@@ -745,7 +664,7 @@ class SubscribeGroup(_PluginBase):
                                         'component': 'VSwitch',
                                         'props': {
                                             'model': 'debug',
-                                            'label': '调试模式',
+                                            'label': '开启调试日志',
                                         }
                                     }
                                 ]
@@ -768,8 +687,7 @@ class SubscribeGroup(_PluginBase):
                                             'model': 'web_source_confs',
                                             'label': '种子下载Web源规则',
                                             'rows': 3,
-                                            'placeholder': 'Netflix:.*NF.*\n'
-                                                           'KKTV:.*KKTV.*'
+                                            'placeholder': 'Netflix:.*NF.*\nKKTV:.*KKTV.*'
                                         }
                                     }
                                 ]
@@ -809,8 +727,7 @@ class SubscribeGroup(_PluginBase):
                                             'model': 'update_confs',
                                             'label': '二级分类自定义填充',
                                             'rows': 3,
-                                            'placeholder': 'category:日番#include:.*(CR.*简繁|简繁英).RLWeb|ADWeb.#sites:观众,红叶PT\n'
-                                                           'category:港台剧,日韩剧#include:国粤'
+                                            'placeholder': 'category:日番#include:.*(CR.*简繁|简繁英).RLWeb|ADWeb.#sites:观众,红叶PT\ncategory:港台剧,日韩剧#include:国粤'
                                         }
                                     }
                                 ]
@@ -852,9 +769,7 @@ class SubscribeGroup(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '电视剧订阅未配置包含关键词、订阅站点等配置时，订阅或搜索下载后，'
-                                                    '将下载种子的制作组、站点等信息填充到订阅信息中，以保证后续订阅资源的统一性。'
-                                                    '（订阅新出的电视剧效果更佳。）'
+                                            'text': '电视剧订阅未配置包含关键词、订阅站点等配置时，订阅或搜索下载后，将下载种子的制作组、站点等信息填充到订阅信息中，以保证后续订阅资源的统一性。（订阅新出的电视剧效果更佳。）'
                                         }
                                     }
                                 ]
@@ -875,10 +790,7 @@ class SubscribeGroup(_PluginBase):
                                         'props': {
                                             'type': 'warning',
                                             'variant': 'tonal',
-                                            'text': '国漫制作组规则：\n'
-                                                    '1. "禁用国漫的制作组填充" 开启时，分类为"国漫"的电视剧下载后，将不会自动填充制作组。\n'
-                                                    '2. "国漫制作组覆盖规则" 用于设置特例。如果"国漫"种子的标题包含此处的关键词（如Pure-AilMWeb），'
-                                                    '则无视"禁用"开关，强制将该关键词填充到include字段。'
+                                            'text': '国漫制作组规则：\n1. "禁用国漫的制作组填充" 开启时，分类为"国漫"的电视剧下载后，将不会自动填充制作组。\n2. "国漫制作组覆盖规则" 用于设置特例。如果"国漫"种子的标题包含此处的关键词（如Pure-AilMWeb），则无视"禁用"开关，强制将该关键词填充到include字段。'
                                         }
                                     }
                                 ]
@@ -899,9 +811,7 @@ class SubscribeGroup(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': 'Web源规则：格式为 Web源名称:正则表达式。Web源名称需与种子识别结果中的Web源名称（如Netflix、KKTV等）一致。'
-                                                    '如果下载种子匹配到Web源规则，则include值为：正则表达式 + 制作组。例如：Netflix:.*NF.* 将填充 include 为：.*NF.*MWeb（如果制作组为MWeb）。'
-                                                    '如果没有匹配到Web源或Web源规则，则include填充逻辑不变。'
+                                            'text': 'Web源规则：格式为 Web源名称:正则表达式。Web源名称需与种子识别结果中的Web源名称（如Netflix、KKTV等）一致。如果下载种子匹配到Web源规则，则include值为：正则表达式 + 制作组。例如：Netflix:.*NF.* 将填充 include 为：.*NF.*MWeb（如果制作组为MWeb）。如果没有匹配到Web源或Web源规则，则include填充逻辑不变。'
                                         }
                                     }
                                 ]
@@ -943,32 +853,7 @@ class SubscribeGroup(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': 'category:二级分类名称（多个分类名称逗号拼接）,resolution:分辨率,quality:质量,effect:特效,include:包含关键词,'
-                                                    'exclude:排除关键词,sites:站点名称（多个站点用逗Gau拼接）,filter_groups:优先级规则组（多个规则组名称用逗号拼接）,savepath:保存路径/{name}（{name}为当前订阅的名称和年份）。'
-                                                    'category必填，多组属性用#分割。例如category:动漫#resolution:1080p'
-                                                    '（添加的动漫订阅，指定分辨率为1080p）。'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'success',
-                                            'variant': 'tonal',
-                                            'text': '调试模式：开启后，当收到下载/订阅事件时，将在DEBUG级别日志中输出完整的event_data数据结构，'
-                                                    '用于开发和问题排查。正常情况下请关闭此选项。'
+                                            'text': 'category:二级分类名称（多个分类名称逗号拼接）,resolution:分辨率,quality:质量,effect:特效,include:包含关键词,exclude:排除关键词,sites:站点名称（多个站点用逗Gau拼接）,filter_groups:优先级规则组（多个规则组名称用逗号拼接）,savepath:保存路径/{name}（{name}为当前订阅的名称 and 年份）。category必填，多组属性用#分割。例如category:动漫#resolution:1080p（添加的动漫订阅，指定分辨率为1080p）。'
                                         }
                                     }
                                 ]
@@ -982,13 +867,13 @@ class SubscribeGroup(_PluginBase):
             "category": False,
             "clear": False,
             "clear_handle": False,
-            "debug": False,  # 调试模式默认关闭
             "update_details": [],
             "update_confs": "",
             "web_source_confs": "",
             # 新增配置项的默认值
             "disable_guoman_team": False,
-            "guoman_team_override": ""
+            "guoman_team_override": "",
+            "debug": False
         }
 
     def get_page(self) -> List[dict]:
@@ -1107,3 +992,4 @@ class SubscribeGroup(_PluginBase):
         """
         退出插件
         """
+        pass
