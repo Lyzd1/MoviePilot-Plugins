@@ -20,7 +20,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.2.3"  # 版本号更新
+    plugin_version = "3.2.4"  # 版本号更新
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -37,6 +37,7 @@ class SubscribeGroup(_PluginBase):
     _category: bool = False
     _clear = False
     _clear_handle = False
+    _debug: bool = False  # 调试开关
     _update_details = []
     _update_confs = None
     _web_source_confs = None
@@ -61,6 +62,7 @@ class SubscribeGroup(_PluginBase):
             self._category = config.get("category")
             self._clear = config.get("clear")
             self._clear_handle = config.get("clear_handle")
+            self._debug = config.get("debug")  # 加载调试开关
             self._update_details = config.get("update_details") or []
             self._update_confs = config.get("update_confs")
             self._web_source_confs = config.get("web_source_confs")
@@ -167,6 +169,7 @@ class SubscribeGroup(_PluginBase):
             "category": self._category,
             "clear": self._clear,
             "clear_handle": self._clear_handle,
+            "debug": self._debug,  # 保存调试开关
             "update_details": self._update_details,
             "update_confs": self._update_confs,
             "web_source_confs": self._web_source_confs,
@@ -175,11 +178,83 @@ class SubscribeGroup(_PluginBase):
             "guoman_team_override": self._guoman_team_override,
         })
 
+    def _debug_event(self, event: Event, event_name: str):
+        """
+        调试模式下输出事件数据
+        """
+        if not self._debug:
+            return
+        
+        logger.debug("=" * 80)
+        logger.debug(f"【调试】收到事件: {event_name}")
+        logger.debug("=" * 80)
+        
+        if not event:
+            logger.debug("【调试】事件对象为空")
+            return
+        
+        event_data = event.event_data
+        if event_data is None:
+            logger.debug("【调试】event_data 为 None")
+            return
+        
+        logger.debug(f"【调试】event_data 类型: {type(event_data)}")
+        
+        # 尝试以不同方式输出数据
+        try:
+            if isinstance(event_data, dict):
+                logger.debug(f"【调试】event_data 键列表: {list(event_data.keys())}")
+                # 递归输出，处理嵌套对象
+                self._debug_dict(event_data, "event_data")
+            elif hasattr(event_data, '__dict__'):
+                logger.debug(f"【调试】event_data 对象类型: {event_data.__class__.__name__}")
+                logger.debug(f"【调试】event_data 属性: {json.dumps(event_data.__dict__, indent=2, ensure_ascii=False, default=str)}")
+            else:
+                logger.debug(f"【调试】event_data 值: {str(event_data)}")
+        except Exception as e:
+            logger.debug(f"【调试】输出 event_data 时出错: {str(e)}")
+            logger.debug(f"【调试】event_data 原始值: {str(event_data)}")
+        
+        logger.debug("=" * 80)
+
+    def _debug_dict(self, data: dict, prefix: str = "", depth: int = 0):
+        """
+        递归输出字典内容，处理嵌套对象
+        """
+        if depth > 5:  # 防止无限递归
+            logger.debug(f"{'  ' * depth}{prefix}: {str(data)}")
+            return
+        
+        for key, value in data.items():
+            full_key = f"{prefix}.{key}" if prefix else key
+            
+            if isinstance(value, dict):
+                logger.debug(f"{'  ' * depth}【调试】{full_key} (dict):")
+                self._debug_dict(value, full_key, depth + 1)
+            elif hasattr(value, '__dict__') and not isinstance(value, (str, int, float, bool, list, tuple)):
+                # 是一个对象
+                logger.debug(f"{'  ' * depth}【调试】{full_key} ({value.__class__.__name__}):")
+                obj_dict = value.__dict__
+                self._debug_dict(obj_dict, full_key, depth + 1)
+            elif isinstance(value, list):
+                logger.debug(f"{'  ' * depth}【调试】{full_key} (list, 长度={len(value)}):")
+                for i, item in enumerate(value):
+                    if hasattr(item, '__dict__') and not isinstance(item, (str, int, float, bool)):
+                        logger.debug(f"{'  ' * depth}  [{i}] ({item.__class__.__name__}):")
+                        self._debug_dict(item.__dict__, f"{full_key}[{i}]", depth + 1)
+                    else:
+                        logger.debug(f"{'  ' * depth}  [{i}]: {str(item)}")
+            else:
+                logger.debug(f"{'  ' * depth}【调试】{full_key}: {str(value)}")
+
     @eventmanager.register(EventType.SubscribeAdded)
     def subscribe_notice(self, event: Event = None):
         """
         添加订阅根据二级分类填充订阅
         """
+        # 调试输出
+        self._debug_event(event, "SubscribeAdded")
+        
         if not event:
             logger.error("订阅事件数据为空")
             return
@@ -236,7 +311,7 @@ class SubscribeGroup(_PluginBase):
             if category_conf.get('resolution'):
                 update_dict['resolution'] = self.__parse_pix(category_conf.get('resolution'))
             if category_conf.get('quality'):
-                update_dict['quality'] = self.__parse_type(category_conf.get('quality'), None) # 保持兼容性
+                update_dict['quality'] = self.__parse_type(category_conf.get('quality'), None)
             if category_conf.get('effect'):
                 update_dict['effect'] = self.__parse_effect(category_conf.get('effect'))
             if category_conf.get('savepath'):
@@ -268,6 +343,9 @@ class SubscribeGroup(_PluginBase):
         """
         添加下载填充订阅制作组等信息
         """
+        # 调试输出
+        self._debug_event(event, "DownloadAdded")
+        
         if not event:
             logger.error("下载事件数据为空")
             return
@@ -338,7 +416,6 @@ class SubscribeGroup(_PluginBase):
                         else:
                             logger.warning(f"订阅记录:{subscribe.name} 未获取到分辨率信息")
                 
-                # ----- 代码修改开始 (L363) -----
                 # 资源质量
                 if "资源质量" in self._update_details and not subscribe.quality:
                     resource_type = _meta.resource_type if _meta else None
@@ -351,7 +428,6 @@ class SubscribeGroup(_PluginBase):
                         update_dict['quality'] = parsed_quality
                     else:
                         logger.warning(f"订阅记录:{subscribe.name} 未获取到资源质量信息 (type: {resource_type}, encode: {video_encode})")
-                # ----- 代码修改结束 -----
 
                 # 特效
                 if "特效" in self._update_details and not subscribe.effect:
@@ -363,7 +439,7 @@ class SubscribeGroup(_PluginBase):
                         else:
                             logger.warning(f"订阅记录:{subscribe.name} 未获取到特效信息")
 
-                # 制作组 (*** MODIFIED LOGIC ***)
+                # 制作组
                 if "制作组" in self._update_details and not subscribe.include:
                     # 官组
                     resource_team = _meta.resource_team if _meta else None
@@ -375,7 +451,7 @@ class SubscribeGroup(_PluginBase):
                     is_guoman = media_category == "国漫"
                     override_team_found = None
 
-                    # 1. 国漫覆盖规则 (Requirement 2)
+                    # 1. 国漫覆盖规则
                     if is_guoman and self._guoman_team_rules:
                         for rule in self._guoman_team_rules:
                             if rule in torrent_title:
@@ -385,7 +461,7 @@ class SubscribeGroup(_PluginBase):
                             include_value = override_team_found
                             logger.info(f"订阅记录:{subscribe.name} 匹配到国漫制作组覆盖规则: {override_team_found}")
 
-                    # 2. 国漫禁用规则 (Requirement 1) & 原有逻辑
+                    # 2. 国漫禁用规则 & 原有逻辑
                     if not override_team_found:
                         # 检查是否为国漫且开启了禁用
                         if is_guoman and self._disable_guoman_team:
@@ -461,7 +537,6 @@ class SubscribeGroup(_PluginBase):
             return resource_pix
         return resource_pix
 
-    # ----- 代码修改开始 (L495) -----
     def __parse_type(self, resource_type, video_encode):
         """
         根据 resource_type (源) 和 video_encode (编码) 
@@ -501,7 +576,6 @@ class SubscribeGroup(_PluginBase):
 
         # 均未匹配
         return None
-    # ----- 代码修改结束 -----
 
     def __parse_effect(self, resource_effect):
         if re.match(r"Dolby[\\s.]+Vision|DOVI|[\\s.]+DV[\\s.]+", resource_effect, re.IGNORECASE):
@@ -648,7 +722,7 @@ class SubscribeGroup(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 6
+                                    'md': 3
                                 },
                                 'content': [
                                     {
@@ -656,6 +730,22 @@ class SubscribeGroup(_PluginBase):
                                         'props': {
                                             'model': 'disable_guoman_team',
                                             'label': '禁用国漫的制作组填充',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 3
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'debug',
+                                            'label': '调试模式',
                                         }
                                     }
                                 ]
@@ -862,6 +952,28 @@ class SubscribeGroup(_PluginBase):
                                 ]
                             }
                         ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'success',
+                                            'variant': 'tonal',
+                                            'text': '调试模式：开启后，当收到下载/订阅事件时，将在DEBUG级别日志中输出完整的event_data数据结构，'
+                                                    '用于开发和问题排查。正常情况下请关闭此选项。'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
                     }
                 ]
             }
@@ -870,6 +982,7 @@ class SubscribeGroup(_PluginBase):
             "category": False,
             "clear": False,
             "clear_handle": False,
+            "debug": False,  # 调试模式默认关闭
             "update_details": [],
             "update_confs": "",
             "web_source_confs": "",
