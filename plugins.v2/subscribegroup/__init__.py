@@ -20,7 +20,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.3.0"  # 版本号更新，简化制作组填充逻辑
+    plugin_version = "3.3.5"  # 版本号更新，添加副标题匹配功能
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -41,8 +41,10 @@ class SubscribeGroup(_PluginBase):
     _update_details = []
     _update_confs = None
     _web_source_confs = None
+    _subtitle_confs = None  # 新增副标题匹配配置
     _subscribe_confs = {}
     _download_web_source_rules = {}
+    _download_subtitle_rules = []  # 新增副标题规则列表
     _subscribeoper = None
     _downloadhistoryoper = None
     _siteoper = None
@@ -61,6 +63,7 @@ class SubscribeGroup(_PluginBase):
             self._update_details = config.get("update_details") or []
             self._update_confs = config.get("update_confs")
             self._web_source_confs = config.get("web_source_confs")
+            self._subtitle_confs = config.get("subtitle_confs")  # 读取副标题配置
 
             # 调试模式日志：输出插件初始化配置
             if self._debug:
@@ -84,6 +87,25 @@ class SubscribeGroup(_PluginBase):
                     logger.debug(f"Web源规则详情: {self._download_web_source_rules}")
             else:
                 self._download_web_source_rules = {}
+
+            # 解析副标题匹配规则
+            # 格式：每行一个正则表达式，匹配description字段
+            if self._subtitle_confs:
+                self._download_subtitle_rules = []
+                for rule in str(self._subtitle_confs).split("\n"):
+                    rule = rule.strip()
+                    if rule:
+                        try:
+                            # 验证正则表达式是否有效
+                            re.compile(rule)
+                            self._download_subtitle_rules.append(rule)
+                            if self._debug:
+                                logger.debug(f"添加副标题规则: {rule}")
+                        except re.error as e:
+                            logger.error(f"副标题规则无效: {rule}, 错误: {e}")
+                logger.info(f"获取到副标题匹配规则 {len(self._download_subtitle_rules)} 个")
+            else:
+                self._download_subtitle_rules = []
 
             if self._update_confs:
                 active_sites = self._siteoper.list_active()
@@ -172,6 +194,7 @@ class SubscribeGroup(_PluginBase):
             "update_details": self._update_details,
             "update_confs": self._update_confs,
             "web_source_confs": self._web_source_confs,
+            "subtitle_confs": self._subtitle_confs,  # 保存副标题配置
         })
 
     @eventmanager.register(EventType.SubscribeAdded)
@@ -453,29 +476,48 @@ class SubscribeGroup(_PluginBase):
                         else:
                             logger.warning(f"订阅记录:{subscribe.name} 未获取到特效信息")
 
-                # Web源规则（制作组填充）- 简化版：只填入规则值，不拼接制作组
+                # Web源规则和副标题匹配（制作组填充）
+                # 优先级：副标题匹配 > Web源规则
                 if "制作组" in self._update_details and not subscribe.include:
+                    description = _torrent.description if _torrent else ""
                     web_source = _meta.web_source if _meta else None
 
                     if self._debug:
                         logger.debug(f"Web源: {web_source}")
+                        logger.debug(f"Description: {description[:200] if description else 'None'}")  # 只显示前200字符
 
                     include_value = None
+                    match_source = None  # 记录匹配来源
 
-                    # Web源规则匹配
-                    if web_source and web_source in self._download_web_source_rules:
+                    # 1. 优先副标题匹配规则
+                    if self._download_subtitle_rules and description:
+                        for rule in self._download_subtitle_rules:
+                            try:
+                                if re.search(rule, description, re.IGNORECASE):
+                                    include_value = rule
+                                    match_source = "副标题匹配"
+                                    logger.info(f"订阅记录:{subscribe.name} 副标题匹配成功: 规则={rule}")
+                                    if self._debug:
+                                        logger.debug(f"副标题匹配: description中包含 '{rule}'")
+                                    break
+                            except re.error as e:
+                                logger.error(f"副标题规则执行错误: {rule}, 错误: {e}")
+
+                    # 2. 如果没有副标题匹配，再尝试Web源规则
+                    if not include_value and web_source and web_source in self._download_web_source_rules:
                         include_value = self._download_web_source_rules.get(web_source)
+                        match_source = "Web源规则"
                         logger.info(f"订阅记录:{subscribe.name} 匹配到Web源规则:{web_source}，填充 include:{include_value}")
                         if self._debug:
                             logger.debug(f"Web源规则匹配: web_source={web_source}, 规则值={include_value}")
-                    else:
-                        if self._debug:
-                            logger.debug(f"未匹配到Web源规则，web_source={web_source}")
 
                     if include_value:
                         update_dict['include'] = include_value
                         if self._debug:
-                            logger.debug(f"最终include值: {include_value}")
+                            logger.debug(f"最终include值: {include_value} (来源: {match_source})")
+                    else:
+                        if self._debug:
+                            logger.debug(f"未匹配到任何规则: web_source={web_source}, 副标题规则数={len(self._download_subtitle_rules)}")
 
                 # 站点
                 if "站点" in self._update_details and (
@@ -701,7 +743,7 @@ class SubscribeGroup(_PluginBase):
                                                     "vale": "特效"
                                                 },
                                                 {
-                                                    "title": "Web源规则",
+                                                    "title": "规则匹配",
                                                     "vale": "制作组"
                                                 },
                                                 {
@@ -746,8 +788,26 @@ class SubscribeGroup(_PluginBase):
                                     {
                                         'component': 'VTextarea',
                                         'props': {
+                                            'model': 'subtitle_confs',
+                                            'label': '副标题匹配规则（优先级高）',
+                                            'rows': 5,
+                                            'placeholder': '无.*水印\n国粤双语\nH.*265\n4K.*重制\n\n规则说明：\n每行一个正则表达式，匹配种子的description字段\n匹配成功时，将该正则表达式填入include字段\n支持正则表达式，如 .*水印 会匹配包含"水印"的内容'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextarea',
+                                        'props': {
                                             'model': 'web_source_confs',
-                                            'label': 'Web源规则（制作组）',
+                                            'label': 'Web源规则（优先级低）',
                                             'rows': 5,
                                             'placeholder': 'Netflix:NF\n'
                                                            'KKTV:KKTV\n'
@@ -756,7 +816,7 @@ class SubscribeGroup(_PluginBase):
                                                            'HBO:MAX\n'
                                                            'Apple:ATVP\n\n'
                                                            '格式：Web源名称:填充值\n'
-                                                           '当种子识别到对应的Web源时，会在订阅的include字段填入:后面的值'
+                                                           '当副标题规则未匹配时使用'
                                         }
                                     }
                                 ]
@@ -800,11 +860,37 @@ class SubscribeGroup(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': 'Web源规则说明：\n'
-                                                    '1. 格式为 "Web源名称:填充值"，例如 "Netflix:NF"\n'
-                                                    '2. 当下载的种子识别出Web源（如Netflix、KKTV等）时，会自动将填充值填入订阅的include字段\n'
-                                                    '3. 填充值可以是简单标识（如NF），也可以是正则表达式（如.*NF.*）\n'
-                                                    '4. 此功能需要勾选种子下载填充内容中的"Web源规则"'
+                                            'text': '规则优先级说明：\n'
+                                                    '1. 副标题匹配规则（优先级高）：匹配种子的description字段，匹配成功则直接使用该规则作为include值\n'
+                                                    '2. Web源规则（优先级低）：仅当副标题规则未匹配时，才根据Web源名称匹配填充\n'
+                                                    '3. 两种规则互不冲突，副标题匹配优先'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'text': '副标题匹配示例：\n'
+                                                    '规则：无.*水印\n'
+                                                    'Description包含："[bilibili大陆] [无平台水印]"\n'
+                                                    '匹配成功，include = "无.*水印"\n\n'
+                                                    'Web源规则示例：\n'
+                                                    '规则：Netflix:NF\n'
+                                                    'Web源识别为Netflix且副标题未匹配时，include = "NF"'
                                         }
                                     }
                                 ]
@@ -847,7 +933,7 @@ class SubscribeGroup(_PluginBase):
                                             'type': 'info',
                                             'variant': 'tonal',
                                             'text': '电视剧订阅未配置包含关键词、订阅站点等配置时，订阅或搜索下载后，'
-                                                    '将下载种子的站点、Web源规则等信息填充到订阅信息中，以保证后续订阅资源的统一性。'
+                                                    '将下载种子的站点、规则匹配等信息填充到订阅信息中，以保证后续订阅资源的统一性。'
                                                     '（订阅新出的电视剧效果更佳。）'
                                         }
                                     }
@@ -911,6 +997,7 @@ class SubscribeGroup(_PluginBase):
             "update_details": [],
             "update_confs": "",
             "web_source_confs": "",
+            "subtitle_confs": "",  # 副标题配置默认值
         }
 
     def get_page(self) -> List[dict]:
