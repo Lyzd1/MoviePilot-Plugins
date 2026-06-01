@@ -18,40 +18,73 @@ class Exchange001:
         self.exchange_url = f"{site_url}/mybonus.php?action=exchange"
         self.debug = debug  # Debug模式开关
 
-    def _format_debug_response(self, response, request_info: dict) -> str:
+    def _format_debug_response(self, response, request_info: dict, is_success: bool) -> str:
         """
         格式化Debug信息，返回详细的请求和响应数据
         """
-        debug_info = {
-            "请求信息": {
-                "URL": request_info.get("url", "未知"),
-                "方法": "POST",
-                "请求头": {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": self.ua[:50] + "..." if len(self.ua) > 50 else self.ua,
-                    "Cookie": self.cookie[:30] + "..." if len(self.cookie) > 30 else self.cookie
-                },
-                "请求参数": request_info.get("payload", {}),
-                "超时设置": "30秒"
-            },
-            "响应信息": {
-                "状态码": response.status_code,
-                "响应头": dict(response.headers),
-                "响应内容长度": len(response.text),
-                "响应编码": response.encoding if hasattr(response, 'encoding') else "未知",
-                "耗时": f"{response.elapsed.total_seconds():.2f}秒",
-                "重定向历史": [str(r) for r in response.history] if response.history else "无重定向"
-            }
-        }
+        status_emoji = "✅" if is_success else "❌"
+        status_text = "成功" if is_success else "失败"
         
-        # 如果响应内容不太长，包含前500字符
-        if len(response.text) <= 500:
-            debug_info["响应信息"]["完整响应内容"] = response.text
+        debug_info = f"{status_emoji} 兑换{status_text} - 详细调试信息\n"
+        debug_info += "=" * 50 + "\n\n"
+        
+        # 请求信息
+        debug_info += "📤 请求信息:\n"
+        debug_info += f"  ├─ URL: {request_info.get('url', '未知')}\n"
+        debug_info += f"  ├─ 方法: POST\n"
+        debug_info += f"  ├─ Content-Type: application/x-www-form-urlencoded\n"
+        debug_info += f"  ├─ User-Agent: {self.ua[:80]}...\n" if len(self.ua) > 80 else f"  ├─ User-Agent: {self.ua}\n"
+        debug_info += f"  ├─ Cookie: {self.cookie[:30]}...\n" if len(self.cookie) > 30 else f"  ├─ Cookie: {self.cookie}\n"
+        debug_info += f"  ├─ 请求参数: {json.dumps(request_info.get('payload', {}), ensure_ascii=False)}\n"
+        debug_info += f"  └─ 超时设置: 30秒\n\n"
+        
+        # 响应信息
+        debug_info += "📥 响应信息:\n"
+        debug_info += f"  ├─ 状态码: {response.status_code}\n"
+        debug_info += f"  ├─ 状态描述: {response.reason}\n"
+        debug_info += f"  ├─ 响应耗时: {response.elapsed.total_seconds():.3f}秒\n"
+        debug_info += f"  ├─ 响应大小: {len(response.text)} 字节\n"
+        debug_info += f"  ├─ 响应编码: {response.encoding}\n"
+        
+        # 重定向信息
+        if response.history:
+            debug_info += f"  ├─ 重定向次数: {len(response.history)}\n"
+            for i, redirect in enumerate(response.history, 1):
+                debug_info += f"  │  └─ 第{i}次重定向: {redirect.status_code} -> {redirect.url}\n"
         else:
-            debug_info["响应信息"]["响应内容前500字符"] = response.text[:500] + "..."
-            debug_info["响应信息"]["响应内容后200字符"] = "..." + response.text[-200:]
+            debug_info += f"  ├─ 重定向: 无\n"
         
-        return json.dumps(debug_info, indent=2, ensure_ascii=False)
+        # 重要响应头
+        important_headers = ['Content-Type', 'Content-Length', 'Set-Cookie', 'Location', 'Server', 'Date']
+        debug_info += f"  ├─ 关键响应头:\n"
+        for header in important_headers:
+            if header in response.headers:
+                value = response.headers[header]
+                if header == 'Set-Cookie':
+                    value = value[:50] + "..." if len(value) > 50 else value
+                debug_info += f"  │  ├─ {header}: {value}\n"
+        
+        # 完整响应头（可选）
+        if self.debug:
+            debug_info += f"  ├─ 完整响应头:\n"
+            for key, value in response.headers.items():
+                debug_info += f"  │  ├─ {key}: {value}\n"
+        
+        # 响应内容
+        debug_info += f"  └─ 响应内容:\n"
+        if len(response.text) <= 1000:
+            # 内容较短，完整显示
+            debug_info += f"     ├─ 长度: {len(response.text)} 字符\n"
+            debug_info += f"     └─ 完整内容:\n{response.text}\n"
+        else:
+            # 内容较长，显示前后部分
+            debug_info += f"     ├─ 总长度: {len(response.text)} 字符\n"
+            debug_info += f"     ├─ 前500字符:\n{response.text[:500]}\n"
+            debug_info += f"     │  ... (省略 {len(response.text) - 1000} 字符) ...\n"
+            debug_info += f"     └─ 后500字符:\n{response.text[-500:]}\n"
+        
+        debug_info += "=" * 50
+        return debug_info
 
     def execute_exchange(self, option: str = None, upload_amount: str = None, bonus_cost: str = None, **kwargs) -> Tuple[bool, str]:
         """
@@ -72,7 +105,7 @@ class Exchange001:
         if not self.cookie:
             error_msg = "Cookie为空，无法执行兑换"
             if request_debug:
-                error_msg = f"[DEBUG] {error_msg} | 站点: {self.site_name} | URL: {self.exchange_url}"
+                error_msg = f"❌ [DEBUG] {error_msg}\n站点: {self.site_name}\nURL: {self.exchange_url}"
             return False, error_msg
 
         # 准备请求数据
@@ -95,12 +128,10 @@ class Exchange001:
 
         try:
             if request_debug:
-                logger.info(f"[DEBUG模式] 开始执行站点 {self.site_name} 的魔力兑换")
-                logger.debug(f"[DEBUG] 兑换URL: {self.exchange_url}")
-                logger.debug(f"[DEBUG] 请求参数: option={option}")
-                logger.debug(f"[DEBUG] 完整Payload: {payload}")
-                logger.debug(f"[DEBUG] 请求头: User-Agent={self.ua[:80]}...")
-                logger.debug(f"[DEBUG] Cookie前30字符: {self.cookie[:30]}...")
+                logger.info(f"🔍 [DEBUG模式] 开始执行站点 {self.site_name} 的魔力兑换")
+                logger.debug(f"完整请求URL: {self.exchange_url}")
+                logger.debug(f"请求参数: option={option}")
+                logger.debug(f"完整Payload: {json.dumps(payload, ensure_ascii=False)}")
             else:
                 logger.info(f"执行站点 {self.site_name} 的魔力兑换")
                 logger.debug(f"兑换URL: {self.exchange_url}")
@@ -114,46 +145,46 @@ class Exchange001:
             # 检查响应状态码
             response.raise_for_status()
 
-            if request_debug:
-                logger.debug(f"[DEBUG] 请求完成，耗时: {response.elapsed.total_seconds():.2f}秒")
-                logger.debug(f"[DEBUG] 响应状态码: {response.status_code}")
-                logger.debug(f"[DEBUG] 响应头: {dict(response.headers)}")
-                if response.history:
-                    logger.debug(f"[DEBUG] 发生重定向: {[str(r) for r in response.history]}")
+            logger.debug(f"请求完成，状态码: {response.status_code}")
 
             # 检查兑换结果 - 只要返回200状态码就认为是成功
             if response.status_code == 200:
+                # 成功时的消息构建
                 if request_debug:
-                    # 尝试从响应中提取更多信息
-                    response_preview = response.text[:300].strip()
-                    debug_message = (
-                        f"[DEBUG] ✅ 兑换成功！\n"
+                    success_message = (
+                        f"✅ 兑换成功！\n"
                         f"├─ 消耗魔力: {bonus_cost}\n"
                         f"├─ 获得上传量: {upload_amount}\n"
                         f"├─ 站点: {self.site_name}\n"
-                        f"├─ 响应大小: {len(response.text)} bytes\n"
-                        f"└─ 响应预览: {response_preview}"
+                        f"├─ 响应时间: {response.elapsed.total_seconds():.3f}秒\n"
+                        f"└─ 响应大小: {len(response.text)} 字节"
                     )
-                    logger.info(debug_message)
-                    # 添加详细的Debug信息
-                    logger.debug(f"\n{self._format_debug_response(response, request_info)}")
-                    return True, debug_message
+                    logger.info(success_message)
+                    # 输出详细的调试信息（这就是您要的response信息）
+                    debug_detail = self._format_debug_response(response, request_info, is_success=True)
+                    logger.info(debug_detail)
+                    return True, success_message
                 else:
+                    # 非Debug模式也记录基本的响应信息
                     message = f"兑换成功！消耗 {bonus_cost} 魔力获得 {upload_amount} 上传量"
                     logger.info(message)
+                    # 即使在非Debug模式，也记录一些基本的响应信息
+                    logger.debug(f"响应状态: {response.status_code}, 大小: {len(response.text)}字节, 耗时: {response.elapsed.total_seconds():.2f}秒")
                     return True, message
             else:
                 if request_debug:
                     error_message = (
-                        f"[DEBUG] ❌ 兑换失败\n"
+                        f"❌ 兑换失败\n"
                         f"├─ HTTP状态码: {response.status_code}\n"
+                        f"├─ 状态描述: {response.reason}\n"
                         f"├─ 站点: {self.site_name}\n"
-                        f"├─ 响应大小: {len(response.text)} bytes\n"
+                        f"├─ 响应大小: {len(response.text)} 字节\n"
                         f"└─ 响应摘要: {response.text[:200]}"
                     )
                     logger.warning(error_message)
-                    # 添加详细的Debug信息
-                    logger.debug(f"\n{self._format_debug_response(response, request_info)}")
+                    # 输出详细的调试信息
+                    debug_detail = self._format_debug_response(response, request_info, is_success=False)
+                    logger.info(debug_detail)
                     return False, error_message
                 else:
                     message = f"兑换失败：HTTP状态码 {response.status_code}"
@@ -165,11 +196,11 @@ class Exchange001:
             error_msg = "兑换请求超时（30秒），请检查网络连接或站点是否正常"
             if request_debug:
                 error_msg = (
-                    f"[DEBUG] ⏱ {error_msg}\n"
+                    f"⏱ [DEBUG] {error_msg}\n"
                     f"├─ 站点: {self.site_name}\n"
                     f"├─ URL: {self.exchange_url}\n"
                     f"├─ 超时时间: 30秒\n"
-                    f"└─ 请求参数: {payload}"
+                    f"└─ 请求参数: {json.dumps(payload, ensure_ascii=False)}"
                 )
             logger.error(error_msg)
             return False, error_msg
@@ -178,9 +209,10 @@ class Exchange001:
             error_msg = f"连接错误: {str(e)}"
             if request_debug:
                 error_msg = (
-                    f"[DEBUG] 🔌 {error_msg}\n"
+                    f"🔌 [DEBUG] {error_msg}\n"
                     f"├─ 站点: {self.site_name}\n"
                     f"├─ URL: {self.exchange_url}\n"
+                    f"├─ 异常类型: {type(e).__name__}\n"
                     f"└─ 可能原因: DNS解析失败、网络不可达、目标服务器拒绝连接"
                 )
             logger.error(error_msg)
@@ -190,9 +222,10 @@ class Exchange001:
             error_msg = f"重定向次数过多: {str(e)}"
             if request_debug:
                 error_msg = (
-                    f"[DEBUG] 🔄 {error_msg}\n"
+                    f"🔄 [DEBUG] {error_msg}\n"
                     f"├─ 站点: {self.site_name}\n"
                     f"├─ URL: {self.exchange_url}\n"
+                    f"├─ 异常类型: {type(e).__name__}\n"
                     f"└─ 可能原因: Cookie失效导致反复重定向到登录页"
                 )
             logger.error(error_msg)
@@ -202,11 +235,11 @@ class Exchange001:
             error_msg = f"兑换请求网络错误: {str(e)}"
             if request_debug:
                 error_msg = (
-                    f"[DEBUG] 🌐 {error_msg}\n"
+                    f"🌐 [DEBUG] {error_msg}\n"
                     f"├─ 站点: {self.site_name}\n"
                     f"├─ URL: {self.exchange_url}\n"
                     f"├─ 异常类型: {type(e).__name__}\n"
-                    f"└─ 请求详情: {request_info}"
+                    f"└─ 请求详情: {json.dumps(request_info, ensure_ascii=False)}"
                 )
             logger.error(error_msg)
             return False, error_msg
@@ -215,12 +248,12 @@ class Exchange001:
             error_msg = f"兑换过程中发生未知错误: {str(e)}"
             if request_debug:
                 error_msg = (
-                    f"[DEBUG] 💥 {error_msg}\n"
+                    f"💥 [DEBUG] {error_msg}\n"
                     f"├─ 站点: {self.site_name}\n"
                     f"├─ URL: {self.exchange_url}\n"
                     f"├─ 异常类型: {type(e).__name__}\n"
                     f"├─ 异常详情: {str(e)}\n"
-                    f"└─ 请求参数: {payload}"
+                    f"└─ 请求参数: {json.dumps(payload, ensure_ascii=False)}"
                 )
             logger.error(error_msg)
             return False, error_msg
