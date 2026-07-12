@@ -1,5 +1,3 @@
-[file name]: __init.py
-[file content begin]
 import os
 import platform
 import threading
@@ -2594,4 +2592,3 @@ class RemoveLink(_PluginBase):
         else:
             logger.debug(f"未找到转移记录：{dest_path}")
             return False
-[file content end]
