@@ -1,3 +1,5 @@
+[file name]: __init.py
+[file content begin]
 import os
 import platform
 import threading
@@ -221,7 +223,7 @@ class RemoveLink(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "2.9"
+    plugin_version = "3.0"
     # 插件作者
     plugin_author = "Lyzd1,DzAvril"
     # 作者主页
@@ -261,6 +263,32 @@ class RemoveLink(_PluginBase):
         ".sbv",
         ".csf-bk",
         ".csf-tmp",
+    ]
+
+    # 音乐文件扩展名
+    MUSIC_EXTENSIONS = [
+        ".flac",
+        ".mp3",
+        ".wav",
+        ".aac",
+        ".m4a",
+        ".ogg",
+        ".wma",
+        ".alac",
+        ".ape",
+        ".dsd",
+        ".dff",
+        ".dsf",
+        ".aiff",
+        ".pcm",
+        ".opus",
+    ]
+
+    # 音乐歌词文件扩展名
+    LYRICS_EXTENSIONS = [
+        ".lrc",
+        ".lyric",
+        ".txt",
     ]
 
     # preivate property
@@ -856,7 +884,7 @@ class RemoveLink(_PluginBase):
                                             "model": "strm_path_mappings",
                                             "label": "STRM路径映射",
                                             "rows": 4,
-                                            "placeholder": "STRM目录:存储类型:网盘目录[:alistlocal:本地目录]，每行一个映射关系\n例如：/ssd/strm:u115:/media\n例如：/nas/strm:alipan:/阿里云盘/媒体:alistlocal:/mnt/local_media",
+                                            "placeholder": "STRM目录:存储类型:网盘目录[:alistlocal:本地目录]，每行一个映射关系\n例如：/ssd/strm:u115:/media\n例如：/nas/strm:alipan:/阿里云盘/媒体:alistlocal:/mnt/local_media\n例如：/strm:alist:/YP/Music:alistlocal:/mnt/music",
                                         },
                                     }
                                 ],
@@ -944,7 +972,7 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "STRM文件监控：启用后会自动监控映射中的STRM目录，当STRM文件删除时会查找并删除网盘上对应的视频文件。路径映射格式：STRM目录:存储类型:网盘目录[:本地存储类型:本地目录]，例如 /strm:alist:/remote:alistlocal:/local/media 表示 /strm/test.strm 对应 alist 上的 /remote/test 和本地的 /local/media/test。本地目录为可选配置，用于联动删除本地空目录。",
+                                            "text": "STRM文件监控：启用后会自动监控映射中的STRM目录，当STRM文件删除时会查找并删除网盘上对应的文件。路径映射格式：STRM目录:存储类型:网盘目录[:本地存储类型:本地目录]，例如 /strm:alist:/remote:alistlocal:/local/media 表示 /strm/test.strm 对应 alist 上的 /remote/test 和本地的 /local/media/test。本地目录为可选配置，用于联动删除本地空目录。",
                                         },
                                     }
                                 ],
@@ -963,7 +991,7 @@ class RemoveLink(_PluginBase):
                                         "props": {
                                             "type": "success",
                                             "variant": "tonal",
-                                            "text": "支持的存储类型：local（本地存储）、alipan（阿里云盘）、u115（115网盘）、rclone（Rclone挂载）、alist（Alist挂载）。",
+                                            "text": "支持的存储类型：local（本地存储）、alipan（阿里云盘）、u115（115网盘）、rclone（Rclone挂载）、alist（Alist挂载）。\n音乐文件支持：当STRM文件路径包含 /Music/ 或 /music/ 时，自动匹配并删除 .flac、.mp3、.wav、.aac、.m4a、.ogg、.wma、.alac、.ape、.dsd、.dff、.dsf、.aiff、.pcm、.opus 以及 .lrc、.lyric、.txt 歌词文件。",
                                         },
                                     }
                                 ],
@@ -1663,6 +1691,67 @@ class RemoveLink(_PluginBase):
 
         return None, None, None, None
 
+    def _is_music_strm(self, strm_file_path: Path) -> bool:
+        """
+        检查 STRM 文件是否属于音乐目录
+        检查路径是否包含 /Music/ 或 /music/（不区分大小写）
+        """
+        strm_path_str = str(strm_file_path)
+        # 检查路径中是否包含 /Music/ 或 /music/
+        if "/music/" in strm_path_str.lower():
+            return True
+        return False
+
+    def _find_storage_music_files(
+        self, storage_type: str, base_path: str
+    ) -> List[schemas.FileItem]:
+        """
+        在网盘中查找以指定路径为前缀的音乐文件（flac, mp3）和歌词文件（lrc）
+        """
+        # 获取父目录
+        parent_path = str(Path(base_path).parent)
+        parent_item = schemas.FileItem(
+            storage=storage_type,
+            path=parent_path if parent_path.endswith("/") else parent_path + "/",
+            type="dir",
+        )
+
+        # 检查父目录是否存在
+        if not self._storagechain.exists(parent_item):
+            logger.debug(f"父目录不存在: [{storage_type}] {parent_path}")
+            return []
+
+        # 列出父目录中的文件
+        files = self._storagechain.list_files(parent_item, recursion=False)
+        if not files:
+            logger.debug(f"父目录为空: [{storage_type}] {parent_path}")
+            return []
+
+        # 查找以 base_path 为前缀的音乐文件和歌词文件
+        base_name = Path(base_path).name
+        matched_files = []
+        for file_item in files:
+            if file_item.type == "file":
+                file_name = file_item.name
+                # 检查文件是否以 base_name 开头
+                if file_name.startswith(base_name):
+                    ext_lower = file_item.extension.lower() if file_item.extension else ""
+                    # 检查是否为音乐文件
+                    if f".{ext_lower}" in self.MUSIC_EXTENSIONS:
+                        logger.info(f"找到音乐文件: [{storage_type}] {file_item.path}")
+                        matched_files.append(file_item)
+                    # 检查是否为歌词文件
+                    elif f".{ext_lower}" in self.LYRICS_EXTENSIONS:
+                        logger.info(f"找到歌词文件: [{storage_type}] {file_item.path}")
+                        matched_files.append(file_item)
+
+        if matched_files:
+            logger.info(f"共找到 {len(matched_files)} 个音乐/歌词文件: [{storage_type}] {base_path}")
+        else:
+            logger.debug(f"未找到匹配的音乐/歌词文件: [{storage_type}] {base_path}")
+
+        return matched_files
+
     def _find_storage_media_file(
         self, storage_type: str, base_path: str
     ) -> schemas.FileItem:
@@ -2127,51 +2216,111 @@ class RemoveLink(_PluginBase):
                 )
                 return result
 
-            # 查找网盘中的视频文件
-            storage_file_item = self._find_storage_media_file(
-                storage_type, storage_path
-            )
+            # 检查是否为音乐 STRM
+            is_music = self._is_music_strm(strm_file_path)
 
-            if not storage_file_item:
-                logger.info(
-                    f"网盘中未找到对应的视频文件: [{storage_type}] {storage_path}"
-                )
-                return result
-
-            logger.info(f"准备删除网盘文件: [{storage_type}] {storage_file_item.path}")
-
-            # 删除网盘文件
-            if self._storagechain.delete_file(storage_file_item):
-                logger.info(
-                    f"成功删除网盘文件: [{storage_type}] {storage_file_item.path}"
-                )
-                result.success = True
-                result.storage_type = storage_type
-                result.storage_path = storage_file_item.path
-
-                # 清理网盘上的刮削文件
-                if self._delete_scrap_infos:
-                    result.scrap_deleted = self._delete_storage_scrap_files(
-                        storage_type, storage_file_item
+            if is_music:
+                # 音乐模式：查找所有匹配的音乐文件和歌词文件
+                music_files = self._find_storage_music_files(storage_type, storage_path)
+                if not music_files:
+                    logger.info(
+                        f"网盘中未找到对应的音乐/歌词文件: [{storage_type}] {storage_path}"
                     )
+                    return result
+
+                logger.info(
+                    f"准备删除网盘中的 {len(music_files)} 个音乐/歌词文件: [{storage_type}]"
+                )
+
+                # 删除所有匹配的文件
+                deleted_count = 0
+                for file_item in music_files:
+                    if self._storagechain.delete_file(file_item):
+                        logger.info(
+                            f"成功删除网盘文件: [{storage_type}] {file_item.path}"
+                        )
+                        deleted_count += 1
+                    else:
+                        logger.error(
+                            f"删除网盘文件失败: [{storage_type}] {file_item.path}"
+                        )
+
+                if deleted_count > 0:
+                    result.success = True
+                    result.storage_type = storage_type
+                    result.storage_path = storage_path
+                    # 对于音乐文件，将删除的文件数量记录到 scrap_deleted 字段
+                    result.scrap_deleted = deleted_count
+
                     # 清理网盘空目录
-                    result.dirs_deleted = self._delete_storage_empty_folders(
-                        storage_type, storage_file_item
-                    )
+                    if self._delete_scrap_infos:
+                        # 使用第一个文件作为基准来删除空目录
+                        if music_files:
+                            result.dirs_deleted = self._delete_storage_empty_folders(
+                                storage_type, music_files[0]
+                            )
 
-                # 删除转移记录（通过网盘文件路径查询）
-                if self._delete_history:
-                    result.history_deleted = self.delete_history_by_dest(
-                        storage_file_item.path
-                    )
+                    # 删除转移记录（通过网盘文件路径查询）
+                    if self._delete_history:
+                        result.history_deleted = self.delete_history_by_dest(
+                            storage_path
+                        )
 
-                # 发送通知（仅立即删除模式）
-                if send_notify and self._notify:
-                    self._send_single_strm_notification(result)
+                    # 发送通知（仅立即删除模式）
+                    if send_notify and self._notify:
+                        self._send_single_music_strm_notification(result, deleted_count)
+                else:
+                    logger.error(
+                        f"删除网盘音乐文件失败: [{storage_type}] {storage_path}"
+                    )
             else:
-                logger.error(
-                    f"删除网盘文件失败: [{storage_type}] {storage_file_item.path}"
+                # 视频模式：查找单个视频文件
+                storage_file_item = self._find_storage_media_file(
+                    storage_type, storage_path
                 )
+
+                if not storage_file_item:
+                    logger.info(
+                        f"网盘中未找到对应的视频文件: [{storage_type}] {storage_path}"
+                    )
+                    return result
+
+                logger.info(
+                    f"准备删除网盘文件: [{storage_type}] {storage_file_item.path}"
+                )
+
+                # 删除网盘文件
+                if self._storagechain.delete_file(storage_file_item):
+                    logger.info(
+                        f"成功删除网盘文件: [{storage_type}] {storage_file_item.path}"
+                    )
+                    result.success = True
+                    result.storage_type = storage_type
+                    result.storage_path = storage_file_item.path
+
+                    # 清理网盘上的刮削文件
+                    if self._delete_scrap_infos:
+                        result.scrap_deleted = self._delete_storage_scrap_files(
+                            storage_type, storage_file_item
+                        )
+                        # 清理网盘空目录
+                        result.dirs_deleted = self._delete_storage_empty_folders(
+                            storage_type, storage_file_item
+                        )
+
+                    # 删除转移记录（通过网盘文件路径查询）
+                    if self._delete_history:
+                        result.history_deleted = self.delete_history_by_dest(
+                            storage_file_item.path
+                        )
+
+                    # 发送通知（仅立即删除模式）
+                    if send_notify and self._notify:
+                        self._send_single_strm_notification(result)
+                else:
+                    logger.error(
+                        f"删除网盘文件失败: [{storage_type}] {storage_file_item.path}"
+                    )
 
         except Exception as e:
             logger.error(
@@ -2179,6 +2328,30 @@ class RemoveLink(_PluginBase):
             )
 
         return result
+
+    def _send_single_music_strm_notification(self, result: DeletionResult, file_count: int):
+        """
+        发送单个音乐 STRM 删除通知
+        """
+        notification_parts = [f"🎵 STRM 文件：{result.file_path}"]
+        notification_parts.append(
+            f"🗑️ 已删除网盘文件：{file_count} 个 (音乐/歌词文件)"
+        )
+
+        if self._delete_history:
+            if result.history_deleted:
+                notification_parts.append("📝 已清理转移记录")
+            else:
+                notification_parts.append("📝 无转移记录")
+        if self._delete_scrap_infos:
+            if result.dirs_deleted > 0:
+                notification_parts.append(f"📁 清理空目录 {result.dirs_deleted} 个")
+
+        self.post_message(
+            mtype=NotificationType.SiteMessage,
+            title="🧹 媒体文件清理",
+            text="⚡ 立即删除完成 (音乐 STRM)\n\n" + "\n".join(notification_parts),
+        )
 
     def _send_single_strm_notification(self, result: DeletionResult):
         """发送单个 STRM 删除通知（用于立即删除模式）"""
@@ -2421,3 +2594,4 @@ class RemoveLink(_PluginBase):
         else:
             logger.debug(f"未找到转移记录：{dest_path}")
             return False
+[file content end]
