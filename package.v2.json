@@ -129,12 +129,12 @@
         "name": "站点刷流",
         "description": "多站点独立任务刷流插件，支持独立调度、统计与诊断。",
         "labels": "刷流,仪表板",
-        "version": "6.1.1",
+        "version": "6.1.2",
         "icon": "brush-flow.png",
         "author": "jxxghp,InfinityPacer,Seed680",
         "level": 2,
         "history": {
-          "v6.1.1": "修复端点获取双协议头问题，移除硬编码回退",
+          "v6.1.2": "修复 qbc.host 已含协议前缀导致双协议头",
           "v6.1": "新增新种子定时重新宣告功能",
           "v5.0.1": "增加站点独立配置"
          }
