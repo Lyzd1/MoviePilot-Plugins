@@ -255,23 +255,23 @@ class BrushConfig:
         return self.__str__()
 
 
-class BrushFlow(_PluginBase):
+class BrushFlowMod(_PluginBase):
     # region 全局定义
 
     # 插件名称
-    plugin_name = "站点刷流"
+    plugin_name = "站点刷流(修改版)"
     # 插件描述
     plugin_desc = "自动托管刷流，将会提高对应站点的访问频率。"
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.4.2"
+    plugin_version = "4.4.2-mod"
     # 插件作者
     plugin_author = "Lyzd1,jxxghp,InfinityPacer"
     # 作者主页
     author_url = "https://github.com/Lyzd1"
     # 插件配置项ID前缀
-    plugin_config_prefix = "brushflow_"
+    plugin_config_prefix = "brushflowmod_"
     # 加载顺序
     plugin_order = 21
     # 可使用的用户级别
@@ -300,7 +300,7 @@ class BrushFlow(_PluginBase):
         self._task_brush_enable = False
 
         if not config:
-            logger.info("站点刷流任务出错，无法获取插件配置")
+            logger.info("站点刷流(修改版)任务出错，无法获取插件配置")
             return False
 
         self._tabs = config.get("_tabs", None)
@@ -341,7 +341,7 @@ class BrushFlow(_PluginBase):
 
         # 如果站点都没有配置，则不开启定时刷流服务
         if not brush_config.brushsites:
-            logger.info(f"站点刷流定时服务停止，没有配置站点")
+            logger.info(f"站点刷流(修改版)定时服务停止，没有配置站点")
 
         # 如果开启&存在站点时，才需要启用后台任务
         self._task_brush_enable = brush_config.enabled and brush_config.brushsites
@@ -350,7 +350,7 @@ class BrushFlow(_PluginBase):
         if not brush_config.downloader:
             brush_config.enabled = False
             self.__update_config()
-            logger.info(f"站点刷流服务停止，没有配置下载器")
+            logger.info(f"站点刷流(修改版)服务停止，没有配置下载器")
             return
 
         if not self.service_info:
@@ -360,19 +360,19 @@ class BrushFlow(_PluginBase):
         if brush_config.onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
 
-            logger.info(f"站点刷流服务启动，立即运行一次")
+            logger.info(f"站点刷流(修改版)服务启动，立即运行一次")
             self._scheduler.add_job(self.brush, "date",
                                     run_date=datetime.now(
                                         tz=pytz.timezone(settings.TZ)
                                     ) + timedelta(seconds=3),
-                                    name="站点刷流服务")
+                                    name="站点刷流(修改版)服务")
 
-            logger.info(f"站点刷流检查服务启动，立即运行一次")
+            logger.info(f"站点刷流(修改版)检查服务启动，立即运行一次")
             self._scheduler.add_job(self.check, "date",
                                     run_date=datetime.now(
                                         tz=pytz.timezone(settings.TZ)
                                     ) + timedelta(seconds=3),
-                                    name="站点刷流检查服务")
+                                    name="站点刷流(修改版)检查服务")
 
             # 关闭一次性开关
             brush_config.onlyonce = False
@@ -392,11 +392,11 @@ class BrushFlow(_PluginBase):
         brush_config = self.__get_brush_config()
         service = DownloaderHelper().get_service(name=brush_config.downloader)
         if not service:
-            self.__log_and_notify_error("站点刷流任务出错，获取下载器实例失败，请检查配置")
+            self.__log_and_notify_error("站点刷流(修改版)任务出错，获取下载器实例失败，请检查配置")
             return None
 
         if service.instance.is_inactive():
-            self.__log_and_notify_error("站点刷流任务出错，下载器未连接")
+            self.__log_and_notify_error("站点刷流(修改版)任务出错，下载器未连接")
             return None
 
         return service
@@ -442,36 +442,36 @@ class BrushFlow(_PluginBase):
                 # 修改部分
                 # values[0] = f"{datetime.now().minute % 10}/10"
                 cron = " ".join(values)
-                logger.info(f"站点刷流定时服务启动，执行周期 {cron}")
+                logger.info(f"站点刷流(修改版)定时服务启动，执行周期 {cron}")
                 cron_trigger = CronTrigger.from_crontab(cron)
                 services.append({
-                    "id": "BrushFlow",
-                    "name": "站点刷流服务",
+                    "id": "BrushFlowMod",
+                    "name": "站点刷流(修改版)服务",
                     "trigger": cron_trigger,
                     "func": self.brush
                 })
             else:
-                logger.info(f"站点刷流定时服务启动，时间间隔 {self._brush_interval} 分钟")
+                logger.info(f"站点刷流(修改版)定时服务启动，时间间隔 {self._brush_interval} 分钟")
                 services.append({
-                    "id": "BrushFlow",
-                    "name": "站点刷流服务",
+                    "id": "BrushFlowMod",
+                    "name": "站点刷流(修改版)服务",
                     "trigger": "interval",
                     "func": self.brush,
                     "kwargs": {"minutes": self._brush_interval}
                 })
 
         if brush_config.enabled:
-            logger.info(f"站点刷流检查定时服务启动，时间间隔 {self._check_interval} 分钟")
+            logger.info(f"站点刷流(修改版)检查定时服务启动，时间间隔 {self._check_interval} 分钟")
             services.append({
-                "id": "BrushFlowCheck",
-                "name": "站点刷流检查服务",
+                "id": "BrushFlowModCheck",
+                "name": "站点刷流(修改版)检查服务",
                 "trigger": "interval",
                 "func": self.check,
                 "kwargs": {"minutes": self._check_interval}
             })
 
         if not services:
-            logger.info("站点刷流服务未开启")
+            logger.info("站点刷流(修改版)服务未开启")
 
         return services
 
@@ -1983,7 +1983,7 @@ class BrushFlow(_PluginBase):
 
             # 处理所有站点
             for site in site_infos:
-                # 如果站点刷流没有正确响应，说明没有通过前置条件，其他站点也不需要继续刷流了
+                # 如果站点刷流(修改版)没有正确响应，说明没有通过前置条件，其他站点也不需要继续刷流了
                 if not self.__brush_site_torrents(siteid=site.id, torrent_tasks=torrent_tasks,
                                                   statistic_info=statistic_info,
                                                   subscribe_titles=subscribe_titles):
@@ -2098,7 +2098,7 @@ class BrushFlow(_PluginBase):
 
             self.eventmanager.send_event(etype=EventType.PluginTriggered, data={
                 "plugin_id": self.__class__.__name__,
-                "event_name": "brushflow_download_added",
+                "event_name": "brushflowmod_download_added",
                 "hash": hash_string,
                 "data": torrent_task,
                 "downloader": self.service_info.name
@@ -2982,7 +2982,7 @@ class BrushFlow(_PluginBase):
         for attr, desc in config_number_attr_to_desc.items():
             value = config.get(attr)
             if value and not self.__is_number(value):
-                self.__log_and_notify_error(f"站点刷流任务出错，{desc}设置错误：{value}")
+                self.__log_and_notify_error(f"站点刷流(修改版)任务出错，{desc}设置错误：{value}")
                 config[attr] = None
                 found_error = True  # 更新错误标志
 
@@ -2990,13 +2990,13 @@ class BrushFlow(_PluginBase):
             value = config.get(attr)
             # 检查 value 是否存在且是否符合数字或数字-数字的模式
             if value and not self.__is_number_or_range(str(value)):
-                self.__log_and_notify_error(f"站点刷流任务出错，{desc}设置错误：{value}")
+                self.__log_and_notify_error(f"站点刷流(修改版)任务出错，{desc}设置错误：{value}")
                 config[attr] = None
                 found_error = True  # 更新错误标志
 
         active_time_range = config.get("active_time_range")
         if active_time_range and not self.__is_valid_time_range(time_range=active_time_range):
-            self.__log_and_notify_error(f"站点刷流任务出错，开启时间段设置错误：{active_time_range}")
+            self.__log_and_notify_error(f"站点刷流(修改版)任务出错，开启时间段设置错误：{active_time_range}")
             config["active_time_range"] = None
             found_error = True  # 更新错误标志
 
@@ -3510,7 +3510,7 @@ class BrushFlow(_PluginBase):
         记录错误日志并发送系统通知
         """
         logger.error(message)
-        self.systemmessage.put(message, title="站点刷流")
+        self.systemmessage.put(message, title="站点刷流(修改版)")
 
     def __send_delete_message(self, site_name: str, torrent_title: str, torrent_desc: str, reason: str,
                               title: str = "【刷流任务种子删除】"):

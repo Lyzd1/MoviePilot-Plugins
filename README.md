@@ -39,10 +39,10 @@ This repository contains plugins for MoviePilot.
 * Description: 电视剧下载后自动添加官组等信息到订阅；添加订阅后根据二级分类名称自定义订阅规则。
 * Version: 3.2.3
 
-### BrushFlow
-* Name: 站点刷流
-* Description: 自动托管刷流，将会提高对应站点的访问频率。
-* Version: 4.4.2
+### BrushFlowMod
+* Name: 站点刷流(修改版)
+* Description: 自动托管刷流，将会提高对应站点的访问频率。(基于v4.4.2修改)
+* Version: 4.4.2-mod
 
 ### DownloaderHelper
 * Name: 下载器助手
