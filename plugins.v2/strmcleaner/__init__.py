@@ -117,7 +117,7 @@ class StrmCleaner(_PluginBase):
     plugin_name = "StrmCleaner"
     plugin_desc = "监控STRM文件及文件夹删除，联动清理openlist/local云盘文件及元数据"
     plugin_icon = "Ombi_A.png"
-    plugin_version = "1.2"
+    plugin_version = "1.3"
     plugin_author = "Lyzd1"
     author_url = "https://github.com/Lyzd1"
     plugin_config_prefix = "strmcleaner_"
@@ -350,6 +350,11 @@ class StrmCleaner(_PluginBase):
             return "alist"
         return storage_type
 
+    def _display_storage_type(self, storage_type: str) -> str:
+        if storage_type == "alist":
+            return "openlist"
+        return storage_type
+
     def _is_music_path(self, path: str) -> bool:
         if not self.music_prefixes:
             return False
@@ -455,6 +460,8 @@ class StrmCleaner(_PluginBase):
                 self._record_flood_event(file_only_count)
 
             tasks: List[DeletionTask] = []
+            folder_candidates: List[dict] = []
+
             for parent_dir, group in groups.items():
                 is_folder_deletion = group.has_folder_event or not os.path.exists(parent_dir)
 
@@ -476,21 +483,16 @@ class StrmCleaner(_PluginBase):
                         continue
 
                     strm_count = len([e for e in group.entries if not e.is_directory and e.path.suffix.lower() == ".strm"])
-                    logger.info(
-                        f"[StrmCleaner] 检测到文件夹删除: {parent_dir} ({strm_count}个STRM)"
-                        f" → [{storage_type}] {storage_path}"
-                    )
-
-                    task = DeletionTask(
-                        task_type="folder",
-                        is_music=ref_entry.is_music,
-                        folder_path=folder_path,
-                        storage_type=storage_type,
-                        storage_path=storage_path,
-                        local_storage_type=local_type,
-                        local_storage_path=local_path,
-                    )
-                    tasks.append(task)
+                    folder_candidates.append({
+                        "parent_dir": parent_dir,
+                        "strm_count": strm_count,
+                        "ref_entry": ref_entry,
+                        "folder_path": folder_path,
+                        "storage_type": storage_type,
+                        "storage_path": storage_path,
+                        "local_type": local_type,
+                        "local_path": local_path,
+                    })
                 else:
                     strm_entries = [e for e in group.entries if not e.is_directory]
                     if strm_entries:
@@ -515,6 +517,37 @@ class StrmCleaner(_PluginBase):
                             local_storage_path=entry.local_storage_path,
                         )
                         tasks.append(task)
+
+            if folder_candidates:
+                folder_candidates.sort(key=lambda c: c["parent_dir"])
+                top_folders: List[dict] = []
+                for fc in folder_candidates:
+                    if not any(
+                        fc["parent_dir"].startswith(t["parent_dir"] + os.sep)
+                        for t in top_folders
+                    ):
+                        top_folders.append(fc)
+                    else:
+                        logger.info(
+                            f"[StrmCleaner] 跳过子文件夹删除: {fc['parent_dir']}"
+                            f" (父文件夹 {fc['parent_dir'].split(os.sep)[-2]} 将被整体删除)"
+                        )
+
+                for fc in top_folders:
+                    logger.info(
+                        f"[StrmCleaner] 检测到文件夹删除: {fc['parent_dir']} ({fc['strm_count']}个STRM)"
+                        f" → [{self._display_storage_type(fc['storage_type'])}] {fc['storage_path']}"
+                    )
+                    task = DeletionTask(
+                        task_type="folder",
+                        is_music=fc["ref_entry"].is_music,
+                        folder_path=fc["folder_path"],
+                        storage_type=fc["storage_type"],
+                        storage_path=fc["storage_path"],
+                        local_storage_type=fc["local_type"],
+                        local_storage_path=fc["local_path"],
+                    )
+                    tasks.append(task)
 
             for task in tasks:
                 self.deletion_queue.append(task)
@@ -639,7 +672,7 @@ class StrmCleaner(_PluginBase):
 
             if deleted:
                 result.success = True
-                logger.info(f"[StrmCleaner] 已删除云盘文件夹: [{task.storage_type}] {task.storage_path}")
+                logger.info(f"[StrmCleaner] 已删除云盘文件夹: [{self._display_storage_type(task.storage_type)}] {task.storage_path}")
 
                 if task.local_storage_type == "openlistlocal" and task.local_storage_path:
                     if self._api_url and self._api_token:
@@ -655,7 +688,7 @@ class StrmCleaner(_PluginBase):
                             logger.info(f"[StrmCleaner] 同步删除本地目录: {task.local_storage_path}")
 
             else:
-                logger.error(f"[StrmCleaner] 删除云盘文件夹失败: [{task.storage_type}] {task.storage_path}")
+                logger.error(f"[StrmCleaner] 删除云盘文件夹失败: [{self._display_storage_type(task.storage_type)}] {task.storage_path}")
 
         except Exception as e:
             logger.error(f"[StrmCleaner] 文件夹删除异常: {e} - {traceback.format_exc()}")
@@ -688,7 +721,7 @@ class StrmCleaner(_PluginBase):
 
             files = self._storagechain.list_files(parent_item, recursion=False)
             if not files:
-                logger.info(f"[StrmCleaner] 云盘目录为空或不存在: [{task.storage_type}] {parent_dir}")
+                logger.info(f"[StrmCleaner] 云盘目录为空或不存在: [{self._display_storage_type(task.storage_type)}] {parent_dir}")
                 return result
 
             base_name = Path(cloud_path).name
@@ -700,15 +733,15 @@ class StrmCleaner(_PluginBase):
                         break
 
             if not found_video:
-                logger.info(f"[StrmCleaner] 未找到云盘视频文件: [{task.storage_type}] {cloud_path}")
+                logger.info(f"[StrmCleaner] 未找到云盘视频文件: [{self._display_storage_type(task.storage_type)}] {cloud_path}")
                 return result
 
             if self._storagechain.delete_file(found_video):
                 result.success = True
                 result.files_deleted = 1
-                logger.info(f"[StrmCleaner] 已删除云盘视频: [{task.storage_type}] {found_video.path}")
+                logger.info(f"[StrmCleaner] 已删除云盘视频: [{self._display_storage_type(task.storage_type)}] {found_video.path}")
             else:
-                logger.error(f"[StrmCleaner] 删除云盘视频失败: [{task.storage_type}] {found_video.path}")
+                logger.error(f"[StrmCleaner] 删除云盘视频失败: [{self._display_storage_type(task.storage_type)}] {found_video.path}")
                 return result
 
             if self._delete_metadata:
@@ -743,7 +776,7 @@ class StrmCleaner(_PluginBase):
 
             files = self._storagechain.list_files(parent_item, recursion=False)
             if not files:
-                logger.info(f"[StrmCleaner] 云盘目录为空或不存在: [{task.storage_type}] {parent_dir}")
+                logger.info(f"[StrmCleaner] 云盘目录为空或不存在: [{self._display_storage_type(task.storage_type)}] {parent_dir}")
                 return result
 
             base_stem = Path(cloud_path).stem
@@ -755,7 +788,7 @@ class StrmCleaner(_PluginBase):
                         matched.append(f)
 
             if not matched:
-                logger.info(f"[StrmCleaner] 未找到云盘音乐文件: [{task.storage_type}] {cloud_path}")
+                logger.info(f"[StrmCleaner] 未找到云盘音乐文件: [{self._display_storage_type(task.storage_type)}] {cloud_path}")
                 return result
 
             logger.info(f"[StrmCleaner] 找到 {len(matched)} 个关联音乐/歌词文件")
@@ -764,7 +797,7 @@ class StrmCleaner(_PluginBase):
             for f in matched:
                 if self._storagechain.delete_file(f):
                     deleted_count += 1
-                    logger.info(f"[StrmCleaner] 已删除: [{task.storage_type}] {f.path}")
+                    logger.info(f"[StrmCleaner] 已删除: [{self._display_storage_type(task.storage_type)}] {f.path}")
 
             if deleted_count > 0:
                 result.success = True
@@ -866,21 +899,21 @@ class StrmCleaner(_PluginBase):
         if folder_results:
             parts.append(f"文件夹: {len(folder_results)} 个")
             for r in folder_results[:5]:
-                parts.append(f"  - {r.file_path.name} → [{r.storage_type}]")
+                parts.append(f"  - {r.file_path.name} → [{self._display_storage_type(r.storage_type)}]")
             if len(folder_results) > 5:
                 parts.append(f"  ... 等 {len(folder_results) - 5} 个")
 
         if video_results:
             parts.append(f"视频文件: {len(video_results)} 个")
             for r in video_results[:5]:
-                parts.append(f"  - {r.file_path.name} → [{r.storage_type}]")
+                parts.append(f"  - {r.file_path.name} → [{self._display_storage_type(r.storage_type)}]")
             if len(video_results) > 5:
                 parts.append(f"  ... 等 {len(video_results) - 5} 个")
 
         if music_results:
             parts.append(f"音乐文件: {len(music_results)} 个")
             for r in music_results[:5]:
-                parts.append(f"  - {r.file_path.name} → [{r.storage_type}] {r.files_deleted} 个关联文件")
+                parts.append(f"  - {r.file_path.name} → [{self._display_storage_type(r.storage_type)}] {r.files_deleted} 个关联文件")
             if len(music_results) > 5:
                 parts.append(f"  ... 等 {len(music_results) - 5} 个")
 
