@@ -14,7 +14,6 @@ from datetime import datetime
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 
-from app.db.transferhistory_oper import TransferHistoryOper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
@@ -74,7 +73,6 @@ class DeletionResult:
     storage_path: Optional[str] = None
     metadata_deleted: int = 0
     files_deleted: int = 0
-    history_deleted: bool = False
 
 
 class FileMonitorHandler(FileSystemEventHandler):
@@ -119,8 +117,8 @@ class StrmCleaner(_PluginBase):
     plugin_name = "StrmCleaner"
     plugin_desc = "监控STRM文件及文件夹删除，联动清理openlist/local云盘文件及元数据"
     plugin_icon = "Ombi_A.png"
-    plugin_version = "1.0"
-    plugin_author = "Lyzd1,DzAvril"
+    plugin_version = "1.1"
+    plugin_author = "Lyzd1"
     author_url = "https://github.com/Lyzd1"
     plugin_config_prefix = "strmcleaner_"
     plugin_order = 0
@@ -146,19 +144,16 @@ class StrmCleaner(_PluginBase):
     _delayed_deletion = True
     _delay_seconds = 30
     _delete_metadata = False
-    _delete_history = False
     _flood_protection_enabled = True
     _flood_threshold = 50
     _flood_window_seconds = 60
 
     path_mappings = ""
     music_prefixes = ""
-    exclude_keywords = ""
 
     _api_url = ""
     _api_token = ""
 
-    _transferhistory = None
     _storagechain = None
     _observer = None
     _batch_timer: Optional[threading.Timer] = None
@@ -188,7 +183,6 @@ class StrmCleaner(_PluginBase):
     def init_plugin(self, config: dict = None):
         logger.info("[StrmCleaner] 正在初始化")
 
-        self._transferhistory = TransferHistoryOper()
         self._storagechain = StorageChain()
 
         if config:
@@ -196,13 +190,11 @@ class StrmCleaner(_PluginBase):
             self._notify = config.get("notify", False)
             self._delayed_deletion = config.get("delayed_deletion", True)
             self._delete_metadata = config.get("delete_metadata", False)
-            self._delete_history = config.get("delete_history", False)
             self._flood_protection_enabled = config.get("flood_protection_enabled", True)
             self._flood_threshold = int(config.get("flood_threshold", 50))
             self._flood_window_seconds = int(config.get("flood_window_seconds", 60))
             self.path_mappings = config.get("path_mappings") or ""
             self.music_prefixes = config.get("music_prefixes") or ""
-            self.exclude_keywords = config.get("exclude_keywords") or ""
 
             delay_seconds = config.get("delay_seconds", 30)
             self._delay_seconds = max(10, min(300, int(delay_seconds))) if delay_seconds else 30
@@ -358,15 +350,6 @@ class StrmCleaner(_PluginBase):
                 return True
         return False
 
-    def _is_excluded(self, path: str) -> bool:
-        if not self.exclude_keywords:
-            return False
-        for kw in self.exclude_keywords.split("\n"):
-            kw = kw.strip()
-            if kw and kw in path:
-                return True
-        return False
-
     def _on_strm_created(self, file_path: Path):
         self._file_state[str(file_path)] = datetime.now()
 
@@ -397,10 +380,6 @@ class StrmCleaner(_PluginBase):
         self._add_to_batch(entry)
 
     def _handle_file_deleted(self, file_path: Path):
-        if self._is_excluded(str(file_path)):
-            logger.info(f"[StrmCleaner] 命中排除关键词，忽略: {file_path}")
-            return
-
         storage_type, storage_path, local_type, local_path = self._parse_path_mapping(str(file_path))
 
         if not storage_type or not storage_path:
@@ -698,13 +677,9 @@ class StrmCleaner(_PluginBase):
                 type="dir",
             )
 
-            if not self._storagechain.exists(parent_item):
-                logger.info(f"[StrmCleaner] 云盘父目录不存在: [{task.storage_type}] {parent_dir}")
-                return result
-
             files = self._storagechain.list_files(parent_item, recursion=False)
             if not files:
-                logger.info(f"[StrmCleaner] 云盘目录为空: [{task.storage_type}] {parent_dir}")
+                logger.info(f"[StrmCleaner] 云盘目录为空或不存在: [{task.storage_type}] {parent_dir}")
                 return result
 
             base_name = Path(cloud_path).name
@@ -729,9 +704,6 @@ class StrmCleaner(_PluginBase):
 
             if self._delete_metadata:
                 result.metadata_deleted = self._delete_cloud_metadata(task.storage_type, parent_item, Path(cloud_path))
-
-            if self._delete_history:
-                result.history_deleted = self._delete_history_by_dest(cloud_path)
 
         except Exception as e:
             logger.error(f"[StrmCleaner] 视频文件删除异常: {e} - {traceback.format_exc()}")
@@ -760,13 +732,9 @@ class StrmCleaner(_PluginBase):
                 type="dir",
             )
 
-            if not self._storagechain.exists(parent_item):
-                logger.info(f"[StrmCleaner] 云盘父目录不存在: [{task.storage_type}] {parent_dir}")
-                return result
-
             files = self._storagechain.list_files(parent_item, recursion=False)
             if not files:
-                logger.info(f"[StrmCleaner] 云盘目录为空: [{task.storage_type}] {parent_dir}")
+                logger.info(f"[StrmCleaner] 云盘目录为空或不存在: [{task.storage_type}] {parent_dir}")
                 return result
 
             base_stem = Path(cloud_path).stem
@@ -792,9 +760,6 @@ class StrmCleaner(_PluginBase):
             if deleted_count > 0:
                 result.success = True
                 result.files_deleted = deleted_count
-
-            if self._delete_history:
-                result.history_deleted = self._delete_history_by_dest(cloud_path)
 
         except Exception as e:
             logger.error(f"[StrmCleaner] 音乐文件删除异常: {e} - {traceback.format_exc()}")
@@ -835,19 +800,6 @@ class StrmCleaner(_PluginBase):
             logger.error(f"[StrmCleaner] 清理元数据异常: {e}")
 
         return deleted
-
-    def _delete_history_by_dest(self, dest_path: str) -> bool:
-        if not self._delete_history:
-            return False
-        try:
-            history = self._transferhistory.get_by_dest(dest_path)
-            if history:
-                self._transferhistory.delete(history.id)
-                logger.info(f"[StrmCleaner] 已删除转移记录: {history.id} - {dest_path}")
-                return True
-        except Exception as e:
-            logger.debug(f"[StrmCleaner] 删除转移记录失败: {e}")
-        return False
 
     def _call_openlist_api_delete_dir(self, dir_path: str) -> bool:
         try:
@@ -899,7 +851,6 @@ class StrmCleaner(_PluginBase):
 
         total_metadata = sum(r.metadata_deleted for r in results)
         total_files = sum(r.files_deleted for r in video_results) + sum(r.files_deleted for r in music_results)
-        history_deleted = any(r.history_deleted for r in results)
 
         parts = []
 
@@ -927,8 +878,6 @@ class StrmCleaner(_PluginBase):
         summary = []
         if self._delete_metadata and total_metadata > 0:
             summary.append(f"已清理元数据 {total_metadata} 个")
-        if self._delete_history and history_deleted:
-            summary.append("已清理转移记录")
 
         if summary:
             parts.append("")
@@ -1094,16 +1043,6 @@ class StrmCleaner(_PluginBase):
                                     }
                                 ],
                             },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {"model": "delete_history", "label": "删除转移记录"},
-                                    }
-                                ],
-                            },
                         ],
                     },
                     {
@@ -1155,26 +1094,6 @@ class StrmCleaner(_PluginBase):
                                             "label": "音乐目录前缀",
                                             "rows": 2,
                                             "placeholder": "每行一个前缀，匹配到则走音乐删除逻辑\n例如: /strm/music\n/strm/音乐",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "exclude_keywords",
-                                            "label": "排除关键词",
-                                            "rows": 2,
-                                            "placeholder": "每行一个关键词，命中则忽略删除",
                                         },
                                     }
                                 ],
@@ -1269,10 +1188,8 @@ class StrmCleaner(_PluginBase):
             "delayed_deletion": True,
             "delay_seconds": 30,
             "delete_metadata": False,
-            "delete_history": False,
             "path_mappings": "",
             "music_prefixes": "",
-            "exclude_keywords": "",
             "flood_protection_enabled": True,
             "flood_threshold": 50,
             "flood_window_seconds": 60,
