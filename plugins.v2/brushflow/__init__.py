@@ -40,7 +40,7 @@ from .models import BrushFlowSettingsPayload, BrushTaskPayload, BrushTaskStatePa
 try:
     from .Reannounce import trigger_reannounce_task, DEFAULT_INTERVAL, DEFAULT_ANNOUNCE_TIMES
 except ImportError as e:
-    logger.error(f"[Brush] 无法导入 Reannounce 模块: {e}，汇报功能将不可用。", exc_info=True)
+    logger.error(f"[BrushFlow] 无法导入 Reannounce 模块: {e}，新种子重新宣告功能将不可用。", exc_info=True)
     trigger_reannounce_task = None
 
 
@@ -209,7 +209,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.5.1"
+    plugin_version = "6.1"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -1092,23 +1092,6 @@ class BrushFlow(_PluginBase):
             )
             logger.info(f"刷流任务 [{task.name}] 新增种子：{torrent.title}|{torrent.description}")
             self.__send_add_message(torrent)
-            if trigger_reannounce_task and hash_string:
-                try:
-                    from app.helper.downloader import DownloaderHelper
-                    downloader_helper = DownloaderHelper()
-                    if downloader_helper.is_downloader("qbittorrent", service=self.service_info):
-                        base_url = downloader_helper.get_base_url(service=self.service_info)
-                        if base_url:
-                            reannounce_thread = threading.Thread(
-                                target=trigger_reannounce_task,
-                                args=(base_url, hash_string),
-                                kwargs={"interval": DEFAULT_INTERVAL,
-                                       "announce_times": DEFAULT_ANNOUNCE_TIMES}
-                            )
-                            reannounce_thread.daemon = True
-                            reannounce_thread.start()
-                except Exception as e:
-                    logger.error(f"触发自动汇报失败: {e}")
         report["filtered_count"] = max(report["candidate_count"] - report["added_count"], 0)
         report["result"] = "completed"
 
@@ -1784,6 +1767,8 @@ class BrushFlow(_PluginBase):
             torrent_hash = downloader.get_torrent_id_by_tag(tags=random_tag)
             if not torrent_hash:
                 logger.error(f"刷流任务 [{task.name}] 获取种子 Hash 失败")
+            else:
+                self.__start_reannounce_task(service, torrent_hash, task)
             return torrent_hash
         if downloader_helper.is_downloader("transmission", service=service):
             if isinstance(torrent_content, str) and not torrent_content.startswith("magnet"):
@@ -1808,6 +1793,44 @@ class BrushFlow(_PluginBase):
                 )
             return added_torrent.hashString
         return None
+
+    def __start_reannounce_task(self, service: ServiceInfo, torrent_hash: str, task: BrushTaskConfig) -> None:
+        """为新添加的种子启动定时重新宣告线程"""
+        if not trigger_reannounce_task:
+            logger.warning("Reannounce 模块未正确导入，跳过新种子定时重新宣告")
+            return
+        try:
+            base_url = None
+            config = getattr(service, "config", None)
+            if config and isinstance(config, dict):
+                host = config.get("host", "127.0.0.1")
+                port = config.get("port", 8080)
+                ssl = bool(config.get("ssl", False))
+                protocol = "https" if ssl else "http"
+                base_url = f"{protocol}://{host}:{port}"
+            if not base_url:
+                downloader = self.downloader
+                qbc = getattr(downloader, "qbc", None) if downloader else None
+                if qbc:
+                    host = getattr(qbc, "host", "127.0.0.1")
+                    port = getattr(qbc, "port", 8080)
+                    base_url = f"http://{host}:{port}"
+                else:
+                    base_url = "http://127.0.0.1:8080"
+            reannounce_thread = threading.Thread(
+                target=trigger_reannounce_task,
+                args=(base_url, torrent_hash),
+                kwargs={
+                    'tags': task.brush_tag,
+                    'interval': DEFAULT_INTERVAL,
+                    'announce_times': DEFAULT_ANNOUNCE_TIMES
+                },
+                daemon=True
+            )
+            reannounce_thread.start()
+            logger.info(f"刷流任务 [{task.name}] 已启动新种子定时重新宣告，Hash: {torrent_hash}")
+        except Exception as err:
+            logger.error(f"刷流任务 [{task.name}] 启动新种子重新宣告失败: {err}")
 
     def __qb_torrents_reannounce(self, torrent_hashes: List[str]) -> None:
         """删除 qBittorrent 种子前强制重新汇报 Tracker"""
