@@ -89,11 +89,12 @@
         "name": "StrmCleaner",
         "description": "监控STRM文件及文件夹删除，联动清理openlist/local云盘文件及元数据。支持视频/音乐自动识别、防雪崩保护。",
         "labels": "云盘同步",
-        "version": "1.4",
+        "version": "1.5",
         "icon": "Ombi_A.png",
         "author": "Lyzd1",
         "level": 1,
         "history": {
+            "v1.5": "修复防雪崩触发后update_config覆盖全部配置的问题",
             "v1.4": "修复防雪崩不统计文件夹内STRM文件的问题",
             "v1.3": "文件夹删除去重嵌套目录，只删除最外层；日志展示openlist替代alist",
             "v1.2": "修复openlist存储类型导致云盘目录识别失败的问题",

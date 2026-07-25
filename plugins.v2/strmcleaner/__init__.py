@@ -117,7 +117,7 @@ class StrmCleaner(_PluginBase):
     plugin_name = "StrmCleaner"
     plugin_desc = "监控STRM文件及文件夹删除，联动清理openlist/local云盘文件及元数据"
     plugin_icon = "Ombi_A.png"
-    plugin_version = "1.4"
+    plugin_version = "1.5"
     plugin_author = "Lyzd1"
     author_url = "https://github.com/Lyzd1"
     plugin_config_prefix = "strmcleaner_"
@@ -585,11 +585,6 @@ class StrmCleaner(_PluginBase):
 
             self.stop_service()
             self._enabled = False
-
-            try:
-                self.update_config({"enabled": False})
-            except Exception:
-                pass
 
             if self._notify:
                 self.post_message(
