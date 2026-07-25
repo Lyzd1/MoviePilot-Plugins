@@ -115,7 +115,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.4.1" 
+    plugin_version = "4.4.2" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -139,6 +139,9 @@ class OpenlistMover(_PluginBase):
     _observer = []
     _scheduler: Optional[BackgroundScheduler] = None
     
+    # === 新增移动延迟配置 ===
+    _move_delay_seconds = 0
+
     # === 新增洗版配置 ===
     _wash_mode_enabled = False
     _wash_delay_seconds = 60
@@ -215,6 +218,12 @@ class OpenlistMover(_PluginBase):
                         if not ext.startswith('.'):
                             ext = '.' + ext
                         self._strm_copy_extensions_set.add(ext)
+
+            # === 加载移动延迟配置 ===
+            try:
+                self._move_delay_seconds = int(config.get("move_delay_seconds", 0))
+            except ValueError:
+                self._move_delay_seconds = 0
 
             # === 加载洗版配置 ===
             self._wash_mode_enabled = config.get("wash_mode_enabled", False)
@@ -520,7 +529,7 @@ class OpenlistMover(_PluginBase):
                             }
                         ]
                     },
-                    # STRM 复制配置 (新增)
+                    # STRM 复制配置
                     {
                         "component": "VRow",
                         "content": [
@@ -535,6 +544,47 @@ class OpenlistMover(_PluginBase):
                                             "label": "STRM 复制路径映射 (Openlist目标:Strm源:Strm本地目标)",
                                             "rows": 4,
                                             "placeholder": "格式：Openlist目标目录前缀:Strm驱动源目录前缀:Strm本地目标目录前缀\n每行一条规则\n\n例如：\n/YP/Video:/strm139:/strm\n\n说明：\n当文件成功移动到 /YP/Video/... 后，\n1. 插件将 list /strm139/... 触发 .strm 文件生成。\n2. 插件将 .strm 文件从 /strm139/... 复制到 /strm/...",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # 视频文件后缀配置
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "title": "视频文件后缀配置",
+                                            "text": "定义哪些文件扩展名被视为视频文件。用于文件监控和洗版模式的文件识别。",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "video_extensions",
+                                            "label": "视频文件后缀",
+                                            "rows": 3,
+                                            "placeholder": "每行一个后缀，例如：\n.mkv\n.mp4\n.ts\n.avi\n.rmvb\n.wmv\n.mov\n.flv\n.mpg\n.mpeg\n.iso\n.bdmv\n.m2ts",
                                         },
                                     }
                                 ]
@@ -577,7 +627,49 @@ class OpenlistMover(_PluginBase):
                             }
                         ]
                     },
-                    # === 新增洗版配置 ===
+                    # === 移动延迟配置 ===
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "title": "移动延迟配置",
+                                            "text": "探测到新文件后，等待指定秒数再开始移动和后续操作，用于等待文件写入完成或避免频繁操作。",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "move_delay_seconds",
+                                            "label": "移动延迟 (秒)",
+                                            "type": "number",
+                                            "min": 0,
+                                            "placeholder": "默认 0 (不延迟)",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # === 洗版配置 ===
                     {
                         "component": "VRow",
                         "content": [
@@ -630,7 +722,7 @@ class OpenlistMover(_PluginBase):
                         ]
                     },
                     # =================================
-                    # === 新增任务清空配置 ===
+                    # === 任务清空配置 ===
                     {
                         "component": "VRow",
                         "content": [
@@ -689,49 +781,7 @@ class OpenlistMover(_PluginBase):
                         ]
                     },
                     # =================================
-                    # === 新增视频文件后缀配置 ===
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VAlert",
-                                        "props": {
-                                            "type": "info",
-                                            "variant": "tonal",
-                                            "title": "视频文件后缀配置",
-                                            "text": "定义哪些文件扩展名被视为视频文件。用于文件监控和洗版模式的文件识别。",
-                                        },
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "video_extensions",
-                                            "label": "视频文件后缀",
-                                            "rows": 3,
-                                            "placeholder": "每行一个后缀，例如：\n.mkv\n.mp4\n.ts\n.avi\n.rmvb\n.wmv\n.mov\n.flv\n.mpg\n.mpeg\n.iso\n.bdmv\n.m2ts",
-                                        },
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    # =================================
-                    # === 新增全局扫描配置 ===
+                    # === 全局扫描配置 ===
                     {
                         "component": "VRow",
                         "content": [
@@ -802,6 +852,7 @@ class OpenlistMover(_PluginBase):
             "strm_path_mappings": "", # 新增默认值
             "strm_copy_extensions": "", # 额外后缀默认值
             # === 新增配置默认值 ===
+            "move_delay_seconds": 0,
             "wash_mode_enabled": False,
             "wash_delay_seconds": 60,
             "clear_panel_threshold": 30,
@@ -1464,6 +1515,11 @@ class OpenlistMover(_PluginBase):
             if not file_ready:
                 logger.warning(f"文件 {file_path} 在 {max_wait_time} 秒后仍不稳定或大小为0，放弃处理。")
                 return # 最终会进入 finally
+
+            # 移动延迟
+            if self._move_delay_seconds > 0:
+                logger.debug(f"移动延迟 {self._move_delay_seconds} 秒...")
+                time.sleep(self._move_delay_seconds)
 
             # 1. 查找路径映射
             src_dir, dst_dir, name, error = self._find_mapping(file_path)
