@@ -209,7 +209,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.1"
+    plugin_version = "6.1.1"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -1800,23 +1800,15 @@ class BrushFlow(_PluginBase):
             logger.warning("Reannounce 模块未正确导入，跳过新种子定时重新宣告")
             return
         try:
-            base_url = None
-            config = getattr(service, "config", None)
-            if config and isinstance(config, dict):
-                host = config.get("host", "127.0.0.1")
-                port = config.get("port", 8080)
-                ssl = bool(config.get("ssl", False))
-                protocol = "https" if ssl else "http"
-                base_url = f"{protocol}://{host}:{port}"
-            if not base_url:
-                downloader = self.downloader
-                qbc = getattr(downloader, "qbc", None) if downloader else None
-                if qbc:
-                    host = getattr(qbc, "host", "127.0.0.1")
-                    port = getattr(qbc, "port", 8080)
-                    base_url = f"http://{host}:{port}"
-                else:
-                    base_url = "http://127.0.0.1:8080"
+            downloader = self.downloader
+            qbc = getattr(downloader, "qbc", None) if downloader else None
+            if qbc:
+                host = getattr(qbc, "host", "127.0.0.1")
+                port = getattr(qbc, "port", 8080)
+                base_url = f"http://{host}:{port}"
+            else:
+                logger.warning(f"刷流任务 [{task.name}] 无法获取 qBittorrent 客户端，跳过新种子重新宣告")
+                return
             logger.info(f"刷流任务 [{task.name}] 获取 qBittorrent Web API 端点: {base_url}")
             reannounce_thread = threading.Thread(
                 target=trigger_reannounce_task,
