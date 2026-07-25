@@ -115,7 +115,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.4.0" 
+    plugin_version = "4.4.1" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -1591,6 +1591,7 @@ class OpenlistMover(_PluginBase):
         """
         将已移动到Openlist目标的文件复制到strm本地目标目录
         用于额外后缀文件（如封面、nfo等），直接在Openlist服务端执行复制
+        如果目标文件已存在，先删除再复制以实现覆盖
         """
         dst_dir = task['dst_dir']
         file_name = task['file']
@@ -1616,8 +1617,15 @@ class OpenlistMover(_PluginBase):
             relative_dir = relative_dir_str.replace(os.path.sep, '/')
 
             copy_dst_dir = f"{strm_dst_prefix.rstrip('/')}/{relative_dir}"
+            copy_dst_path = f"{copy_dst_dir}/{file_name}"
 
-            logger.debug(f"复制文件到strm本地目标: {dst_dir}/{file_name} -> {copy_dst_dir}/{file_name}")
+            logger.debug(f"复制文件到strm本地目标: {dst_dir}/{file_name} -> {copy_dst_path}")
+
+            # 检查目标文件是否已存在，若存在则先删除（实现覆盖）
+            exists, _ = self._call_openlist_get_api(copy_dst_path)
+            if exists:
+                logger.debug(f"目标文件已存在，先删除再复制: {copy_dst_path}")
+                self._call_openlist_remove_api(copy_dst_dir, [file_name])
 
             return self._call_openlist_copy_api(
                 src_dir=dst_dir,
