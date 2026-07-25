@@ -117,7 +117,7 @@ class StrmCleaner(_PluginBase):
     plugin_name = "StrmCleaner"
     plugin_desc = "监控STRM文件及文件夹删除，联动清理openlist/local云盘文件及元数据"
     plugin_icon = "Ombi_A.png"
-    plugin_version = "1.3"
+    plugin_version = "1.4"
     plugin_author = "Lyzd1"
     author_url = "https://github.com/Lyzd1"
     plugin_config_prefix = "strmcleaner_"
@@ -446,18 +446,17 @@ class StrmCleaner(_PluginBase):
                 groups = dict(self.batch)
                 self.batch.clear()
 
-            file_only_count = 0
-            for group in groups.values():
-                is_folder = group.has_folder_event or not os.path.exists(group.parent_dir)
-                if not is_folder:
-                    file_only_count += len([e for e in group.entries if not e.is_directory])
+            strm_count = sum(
+                len([e for e in group.entries if not e.is_directory and e.path.suffix.lower() == ".strm"])
+                for group in groups.values()
+            )
 
-            if self._check_flood_protection(file_only_count):
+            if self._check_flood_protection(strm_count):
                 logger.warning("[StrmCleaner] 防雪崩触发，放弃本次批次")
                 return
 
-            if file_only_count > 0:
-                self._record_flood_event(file_only_count)
+            if strm_count > 0:
+                self._record_flood_event(strm_count)
 
             tasks: List[DeletionTask] = []
             folder_candidates: List[dict] = []
