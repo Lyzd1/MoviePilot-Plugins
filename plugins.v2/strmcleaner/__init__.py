@@ -250,7 +250,11 @@ class StrmCleaner(_PluginBase):
         )
 
     def _auto_fetch_openlist_config(self):
-        has_openlist = any("openlist" in line for line in self.path_mappings.split("\n") if line.strip())
+        has_openlist = any(
+            seg in line
+            for line in self.path_mappings.split("\n") if line.strip()
+            for seg in (":openlist:", ":alist:")
+        )
         if not has_openlist:
             return
         if self._api_url and self._api_token:
@@ -332,7 +336,7 @@ class StrmCleaner(_PluginBase):
                     logger.warning(f"[StrmCleaner] 无效路径映射: {line}")
                     continue
                 result[strm_path.strip()] = (
-                    storage_type.strip(),
+                    self._normalize_storage_type(storage_type.strip()),
                     storage_path.strip(),
                     local_type.strip() if local_type else None,
                     local_prefix.strip() if local_prefix else None,
@@ -340,6 +344,11 @@ class StrmCleaner(_PluginBase):
             except Exception:
                 logger.warning(f"[StrmCleaner] 解析路径映射失败: {line}")
         return result
+
+    def _normalize_storage_type(self, storage_type: str) -> str:
+        if storage_type == "openlist":
+            return "alist"
+        return storage_type
 
     def _is_music_path(self, path: str) -> bool:
         if not self.music_prefixes:
@@ -618,7 +627,7 @@ class StrmCleaner(_PluginBase):
             return None
 
         try:
-            if task.storage_type == "openlist" and self._api_url and self._api_token:
+            if task.storage_type == "alist" and self._api_url and self._api_token:
                 deleted = self._call_openlist_api_delete_dir(task.storage_path)
             else:
                 folder_item = schemas.FileItem(
