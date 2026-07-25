@@ -191,5 +191,17 @@
         "history": {
             "v2.18": "将原始种子添加进入success缓存中，方便自动转移做种不重复添加"
         }
+    },
+    "TrafficAssistant": {
+        "name": "站点流量管理",
+        "description": "自动管理流量，保障站点分享率。",
+        "labels": "流量管理",
+        "version": "2.0",
+        "icon": "https://raw.githubusercontent.com/InfinityPacer/MoviePilot-Plugins/main/icons/trafficassistant.png",
+        "author": "InfinityPacer",
+        "level": 2,
+        "history": {
+            "v2.0": "支持新版BrushFlow任务架构（tasks），兼容BrushFlowLowFreq旧版"
+        }
     }
 }
