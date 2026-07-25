@@ -85,6 +85,18 @@
             "v1.6": "提升插件性能"
         }
     },
+    "StrmCleaner": {
+        "name": "StrmCleaner",
+        "description": "监控STRM文件及文件夹删除，联动清理openlist/local云盘文件及元数据。支持视频/音乐自动识别、防雪崩保护。",
+        "labels": "云盘同步",
+        "version": "1.0",
+        "icon": "Ombi_A.png",
+        "author": "Lyzd1,DzAvril",
+        "level": 1,
+        "history": {
+            "v1.0": "从RemoveLink独立，专注STRM联动删除，支持文件/文件夹主动识别、视频/音乐分类、防雪崩保护"
+        }
+    },
     "OpenlistMover": {
         "name": "Openlist 视频文件同步",
         "description": "监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录",
