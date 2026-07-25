@@ -125,6 +125,19 @@
           "v1.2": "修复订阅已存在包含关键词和订阅站点"
         }
     },
+    "BrushFlow": {
+        "name": "站点刷流",
+        "description": "多站点独立任务刷流插件，支持独立调度、统计与诊断。",
+        "labels": "刷流,仪表板",
+        "version": "6.5",
+        "icon": "brush-flow.png",
+        "author": "jxxghp,InfinityPacer,Seed680",
+        "level": 2,
+        "history": {
+          "v6.5": "重构任务架构，每站独立任务；注入 Reannounce 自动汇报模块",
+          "v5.0.1": "增加站点独立配置"
+         }
+    },
     "BrushFlowMod": {
         "name": "站点刷流(修改版)",
         "description": "自动托管刷流，将会提高对应站点的访问频率。",
