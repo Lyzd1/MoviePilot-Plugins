@@ -1,55 +1,88 @@
 # MoviePilot-Plugins
 
-This repository contains plugins for MoviePilot.
+MoviePilot 插件集，包含自用及第三方适配的各类功能插件，涵盖下载管理、刷流、订阅、云盘同步等多个领域。
 
-## Main Plugins
+## 安装方式
 
-### PromptEditor
-* Name: AI提示词编辑器
-* Description: 编辑AI助手的提示词并清空缓存使其立即生效。
-* Version: 1.2
+将本仓库的 `package.v2.json` 地址添加到 MoviePilot 的插件仓库中即可自动获取所有插件。
 
-### TorrentRemoverSeparated
-* Name: 自动删除(主辅分离)
-* Description: 自动删除下载器中的下载任务，支持主辅种分离处理。
-* Version: 2.3.1
+```
+https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/package.v2.json
+```
 
-### MoviePilotRankSubscribe
-* Name: MoviePilot榜单订阅
-* Description: 定期获取MoviePilot内置榜单，根据评分和过滤条件自动订阅内容。
-* Version: 1.7
+## 插件列表
 
-### BonusExchangePlugin
-* Name: 魔力兑换助手
-* Description: 自动监控分享率，在低于阈值时执行魔力兑换操作
-* Version: 1.9.1
+### 下载管理
 
-### RemoveLink
-* Name: 清理媒体文件
-* Description: 媒体文件清理工具：支持硬链接文件清理、STRM文件清理、刮削文件清理（元数据、图片、字幕）、转移记录清理、种子联动删除等功能
-* Version: 2.7.3
+#### TorrentRemoverSeparated — 自动删除(主辅分离)
+- **版本**: v2.3.1
+- **功能**: 自动删除下载器中的下载任务，支持主辅种分离处理。可将多个下载器按顺序配置，开启辅种联动删除后，删除主下载器种子时会自动查找后续下载器中的同名辅种一并处理。
+- **标签**: `下载管理`
 
-### OpenlistMover
-* Name: Openlist 视频文件同步
-* Description: 监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录
-* Version: 4.3.2
+#### DownloaderHelper — 下载器助手
+- **版本**: v5.0
+- **功能**: 自动标签、自动做种、自动删种。提供下载器自动化管理能力。
+- **标签**: `下载管理` `仪表板`
 
-### SubscribeGroup
-* Name: 订阅规则自动填充
-* Description: 电视剧下载后自动添加官组等信息到订阅；添加订阅后根据二级分类名称自定义订阅规则。
-* Version: 3.2.3
+#### AutoTorrentTransfer — 自动转移做种(站点plus)
+- **版本**: v1.10.9
+- **功能**: 定期转移下载器中的做种任务到另一个下载器，支持基于站点分享率的自动标签管理（高于阈值添加标签、低于阈值移除标签）。
+- **标签**: `分享率`
 
-### BrushFlowMod
-* Name: 站点刷流(修改版)
-* Description: 自动托管刷流，将会提高对应站点的访问频率。(基于v4.4.2修改)
-* Version: 4.4.2-mod
+### 刷流
 
-### DownloaderHelper
-* Name: 下载器助手
-* Description: 自动标签、自动做种、自动删种。
-* Version: 5.0
+#### BrushFlowMod — 站点刷流(修改版)
+- **版本**: v4.4.2-mod
+- **功能**: 自动托管刷流。支持站点独立配置、促销过滤、HR排除、动态删种阈值、自动归档、带宽采样、多站点顺序/随机刷流、联动自动宣告等丰富功能。
+- **标签**: `刷流` `仪表板`
+- **说明**: 基于 `BrushFlow v4.4.2` 修改，重命名避免与原版冲突。
 
-### AutoTorrentTransfer
-* Name: 自动转移做种(站点plus)
-* Description: 定期转移下载器中的做种任务到另一个下载器，支持基于分享率的自动标签管理。
-* Version: 1.10.8
+### 订阅
+
+#### MoviePilotRankSubscribe — MoviePilot榜单订阅
+- **版本**: v1.7
+- **功能**: 定期获取 MoviePilot 内置榜单，根据评分和过滤条件自动订阅内容。支持关键词排除、电视剧和电影分别设置最低评分。
+- **标签**: `订阅`
+
+#### SubscribeGroup — 订阅规则自动填充
+- **版本**: v3.3.5
+- **功能**: 电视剧下载后自动添加官组等信息到订阅；添加订阅后根据二级分类名称自定义订阅规则。支持副标题匹配、视频来源识别、保存路径变量等高级功能。
+- **标签**: `订阅`
+
+### 云盘同步
+
+#### OpenlistMover — Openlist 视频文件同步
+- **版本**: v4.4.2
+- **功能**: 监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录。支持洗版模式、移动延迟配置、额外文件复制到 STRM 目录、失败重传等。
+- **标签**: `云盘同步`
+
+#### RemoveLink — 清理媒体文件
+- **版本**: v3.1
+- **功能**: 媒体文件清理工具，支持硬链接文件清理、STRM 文件清理、刮削文件清理（元数据/图片/字幕）、转移记录清理、种子联动删除、空目录清理、延迟删除防误删等功能。
+- **标签**: `云盘同步`
+
+#### StrmCleaner — StrmCleaner
+- **版本**: v1.5
+- **功能**: 监控 STRM 文件及文件夹删除，联动清理 openlist/local 云盘文件及元数据。支持视频/音乐自动识别、防雪崩保护。
+- **标签**: `云盘同步`
+
+### 分享率
+
+#### BonusExchangePlugin — 魔力兑换助手
+- **版本**: v2.2
+- **功能**: 自动监控分享率，在低于阈值时执行魔力兑换操作。支持馒头等站点。
+- **标签**: `分享率`
+
+### IYUU
+
+#### IYUUAutoSeed — IYUU自动辅种
+- **版本**: v2.18
+- **功能**: 基于 IYUU 官方 API 实现自动辅种，配合自动转移做种插件使用效果更佳。
+- **标签**: `IYUU`
+
+### AI
+
+#### PromptEditor — AI提示词编辑器
+- **版本**: v1.2
+- **功能**: 编辑 AI 助手的提示词并清空缓存使其立即生效。
+- **标签**: `AI`
