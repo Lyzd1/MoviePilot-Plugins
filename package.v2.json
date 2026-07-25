@@ -89,11 +89,12 @@
         "name": "StrmCleaner",
         "description": "监控STRM文件及文件夹删除，联动清理openlist/local云盘文件及元数据。支持视频/音乐自动识别、防雪崩保护。",
         "labels": "云盘同步",
-        "version": "1.1",
+        "version": "1.2",
         "icon": "Ombi_A.png",
         "author": "Lyzd1",
         "level": 1,
         "history": {
+            "v1.2": "修复openlist存储类型导致云盘目录识别失败的问题",
             "v1.1": "精简功能，移除排除关键词和转移记录删除；修复云盘exists检测问题",
             "v1.0": "从RemoveLink独立，专注STRM联动删除，支持文件/文件夹主动识别、视频/音乐分类、防雪崩保护"
         }
