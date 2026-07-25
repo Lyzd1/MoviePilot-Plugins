@@ -1817,6 +1817,7 @@ class BrushFlow(_PluginBase):
                     base_url = f"http://{host}:{port}"
                 else:
                     base_url = "http://127.0.0.1:8080"
+            logger.info(f"刷流任务 [{task.name}] 获取 qBittorrent Web API 端点: {base_url}")
             reannounce_thread = threading.Thread(
                 target=trigger_reannounce_task,
                 args=(base_url, torrent_hash),
