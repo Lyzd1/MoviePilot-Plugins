@@ -1095,8 +1095,9 @@ class BrushFlow(_PluginBase):
             if trigger_reannounce_task and hash_string:
                 try:
                     from app.helper.downloader import DownloaderHelper
-                    if DownloaderHelper().is_downloader("qbittorrent", service=self.service_info):
-                        base_url = str(self.service_info.config.get("host") or "").rstrip("/")
+                    downloader_helper = DownloaderHelper()
+                    if downloader_helper.is_downloader("qbittorrent", service=self.service_info):
+                        base_url = downloader_helper.get_base_url(service=self.service_info)
                         if base_url:
                             reannounce_thread = threading.Thread(
                                 target=trigger_reannounce_task,
