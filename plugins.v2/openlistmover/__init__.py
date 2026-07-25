@@ -63,7 +63,7 @@ class NewFileMonitorHandler(FileSystemEventHandler):
         self.sync = sync  # sync 是 OpenlistMover 插件实例
 
     def _is_target_file(self, file_path: Path) -> bool:
-        """检查文件是否是目标视频文件，且不是临时文件"""
+        """检查文件是否是目标文件（视频文件或配置的额外后缀文件），且不是临时文件"""
         file_suffix = file_path.suffix.lower()
         
         # 1. 检查是否为临时文件
@@ -73,6 +73,11 @@ class NewFileMonitorHandler(FileSystemEventHandler):
         # 2. 检查是否为视频文件
         if file_suffix in VIDEO_EXTENSIONS:
             return True
+        
+        # 3. 检查是否为配置的额外后缀（如 .jpg, .nfo 等）
+        if hasattr(self.sync, '_strm_copy_extensions_set'):
+            if file_suffix in self.sync._strm_copy_extensions_set:
+                return True
             
         return False
 
@@ -110,7 +115,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.3.2" 
+    plugin_version = "4.4.0" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -127,9 +132,10 @@ class OpenlistMover(_PluginBase):
     _notify = False
     _openlist_url = ""
     _openlist_token = ""
-    _monitor_paths = ""
     _path_mappings = ""
     _strm_path_mappings = "" # 新增 strm 映射配置
+    _strm_copy_extensions = "" # 新增：额外复制到strm本地目标的后缀
+    _strm_copy_extensions_set = set() # 解析后的后缀集合
     _observer = []
     _scheduler: Optional[BackgroundScheduler] = None
     
@@ -196,9 +202,19 @@ class OpenlistMover(_PluginBase):
             self._notify = config.get("notify", False)
             self._openlist_url = config.get("openlist_url", "").rstrip('/')
             self._openlist_token = config.get("openlist_token", "")
-            self._monitor_paths = config.get("monitor_paths", "")
             self._path_mappings = config.get("path_mappings", "")
             self._strm_path_mappings = config.get("strm_path_mappings", "") # 加载 strm 映射
+            self._strm_copy_extensions = config.get("strm_copy_extensions", "") # 加载额外后缀
+
+            # 解析额外后缀为 set
+            self._strm_copy_extensions_set = set()
+            if self._strm_copy_extensions:
+                for ext in self._strm_copy_extensions.split("\n"):
+                    ext = ext.strip().lower()
+                    if ext:
+                        if not ext.startswith('.'):
+                            ext = '.' + ext
+                        self._strm_copy_extensions_set.add(ext)
 
             # === 加载洗版配置 ===
             self._wash_mode_enabled = config.get("wash_mode_enabled", False)
@@ -300,18 +316,14 @@ class OpenlistMover(_PluginBase):
                 )
                 return
 
-            if not self._monitor_paths or not self._path_mappings:
-                logger.error("Openlist Mover 已启用，但监控目录或路径映射未配置！")
-                self.systemmessage.put(
-                    "Openlist Mover 启动失败：监控目录或路径映射未配置",
-                    title="Openlist 视频文件移动",
-                )
-                return
-                
             # 解析本地移动映射
             self._parsed_mappings = self._parse_path_mappings()
             if not self._parsed_mappings:
                 logger.error("Openlist Mover 路径映射配置无效")
+                self.systemmessage.put(
+                    "Openlist Mover 启动失败：路径映射未配置",
+                    title="Openlist 视频文件移动",
+                )
                 return
                 
             # 解析 STRM 复制映射
@@ -322,10 +334,8 @@ class OpenlistMover(_PluginBase):
             logger.info(f"Openlist Mover 洗版模式: {'已启用' if self._wash_mode_enabled else '已禁用'}, 洗版延迟: {self._wash_delay_seconds} 秒")
 
 
-            # 读取监控目录配置
-            monitor_dirs = [
-                d.strip() for d in self._monitor_paths.split("\n") if d.strip()
-            ]
+            # 从路径映射第一部分提取本地监控目录
+            monitor_dirs = list(self._parsed_mappings.keys())
             logger.info(f"Openlist Mover 本地监控目录：{monitor_dirs}")
 
             # 启动监控
@@ -483,12 +493,12 @@ class OpenlistMover(_PluginBase):
                                 "props": {"cols": 12},
                                 "content": [
                                     {
-                                        "component": "VTextarea",
+                                        "component": "VAlert",
                                         "props": {
-                                            "model": "monitor_paths",
-                                            "label": "本地监控目录",
-                                            "rows": 4,
-                                            "placeholder": "填写 MoviePilot 可以访问到的绝对路径，每行一个\n例如：/downloads/watch",
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "title": "路径映射说明",
+                                            "text": "插件自动从文件移动路径映射的第一部分提取本地监控目录，无需单独配置。",
                                         },
                                     }
                                 ]
@@ -501,9 +511,9 @@ class OpenlistMover(_PluginBase):
                                         "component": "VTextarea",
                                         "props": {
                                             "model": "path_mappings",
-                                            "label": "文件移动路径映射 (本地:Openlist源:Openlist目标)",
+                                            "label": "文件移动路径映射 (本地目录:Openlist源:Openlist目标)",
                                             "rows": 6,
-                                            "placeholder": "格式：本地监控目录:Openlist源目录:Openlist目标目录\n每行一条规则\n\n例如：\n/downloads/watch:/Local/watch:/YP/Video\n\n说明：\n当本地监控到 /downloads/watch/电影/S01/E01.mkv\nOpenlist 将会执行移动：\n源：/Local/watch/电影/S01/E01.mkv\n目标：/YP/Video/电影/S01/E01.mkv",
+                                            "placeholder": "格式：本地监控目录:Openlist源目录:Openlist目标目录\n每行一条规则\n\n例如：\n/downloads/watch:/Local/watch:/YP/Video\n\n说明：\n插件自动将本地监控目录设为 /downloads/watch\n当监控到 /downloads/watch/电影/S01/E01.mkv\nOpenlist 将会执行移动：\n源：/Local/watch/电影/S01/E01.mkv\n目标：/YP/Video/电影/S01/E01.mkv",
                                         },
                                     }
                                 ]
@@ -525,6 +535,42 @@ class OpenlistMover(_PluginBase):
                                             "label": "STRM 复制路径映射 (Openlist目标:Strm源:Strm本地目标)",
                                             "rows": 4,
                                             "placeholder": "格式：Openlist目标目录前缀:Strm驱动源目录前缀:Strm本地目标目录前缀\n每行一条规则\n\n例如：\n/YP/Video:/strm139:/strm\n\n说明：\n当文件成功移动到 /YP/Video/... 后，\n1. 插件将 list /strm139/... 触发 .strm 文件生成。\n2. 插件将 .strm 文件从 /strm139/... 复制到 /strm/...",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # 额外后缀复制配置
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "title": "额外文件复制到 STRM 目录",
+                                            "text": "配置额外的文件后缀（如 .jpg, .nfo, .png 等）。当匹配的文件被移动到 Openlist 目标后，会自动再从该位置复制一份到 STRM 本地目标目录。每行一个后缀。",
+                                        },
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "strm_copy_extensions",
+                                            "label": "额外复制到 STRM 本地目标的文件后缀",
+                                            "rows": 4,
+                                            "placeholder": "每行一个后缀，例如：\n.jpg\n.png\n.nfo\n.srt\n.ass\n\n说明：\n匹配的文件会先移动到 Openlist 目标，\n再从 Openlist 目标复制到 Strm 本地目标。",
                                         },
                                     }
                                 ]
@@ -752,9 +798,9 @@ class OpenlistMover(_PluginBase):
             "notify": False,
             "openlist_url": "",
             "openlist_token": "",
-            "monitor_paths": "",
             "path_mappings": "",
             "strm_path_mappings": "", # 新增默认值
+            "strm_copy_extensions": "", # 额外后缀默认值
             # === 新增配置默认值 ===
             "wash_mode_enabled": False,
             "wash_delay_seconds": 60,
@@ -1035,18 +1081,27 @@ class OpenlistMover(_PluginBase):
                 with task_lock:
                     if new_status == TASK_STATUS_SUCCESS and task['status'] != TASK_STATUS_SUCCESS:
                         task['status'] = new_status
-                        task['strm_status'] = '开始处理' # 标记开始 STRM 流程
+                        task['strm_status'] = '开始处理' # 标记开始后续流程
                         self._save_move_tasks()  # 保存任务状态变更
 
                         # 增加成功计数
                         self._successful_moves_count += 1
                         self._save_plugin_state()  # 保存状态计数器
 
-                        # 任务成功后，启动一个新的线程来处理 STRM
-                        threading.Thread(
-                            target=self._process_strm_creation,
-                            args=(task,)
-                        ).start()
+                        # 判断文件后缀，选择处理方式
+                        file_ext = Path(task['file']).suffix.lower()
+                        if self._strm_copy_extensions_set and file_ext in self._strm_copy_extensions_set:
+                            # 额外后缀文件：移动后复制到 strm 本地目标
+                            threading.Thread(
+                                target=self._handle_extra_file_copy,
+                                args=(task,)
+                            ).start()
+                        else:
+                            # 视频文件：执行 STRM 生成和复制流程
+                            threading.Thread(
+                                target=self._process_strm_creation,
+                                args=(task,)
+                            ).start()
                         
                     elif new_status == TASK_STATUS_FAILED and task['status'] != TASK_STATUS_FAILED:
                         task['status'] = new_status
@@ -1513,6 +1568,66 @@ class OpenlistMover(_PluginBase):
             logger.debug(f"文件 {file_path} 处理完毕，已移出处理队列。")
             # ========================
 
+    def _handle_extra_file_copy(self, task: Dict[str, Any]):
+        """
+        处理额外后缀文件：移动成功后复制到 strm 本地目标
+        """
+        task_id = task['id']
+        self._update_task_strm_status(task_id, '开始复制到 STRM 本地目录')
+
+        try:
+            success = self._copy_file_to_strm_local(task)
+            if success:
+                self._update_task_strm_status(task_id, '成功', is_final=True)
+                logger.debug(f"任务 {task_id} 额外文件复制到 STRM 本地目录成功：{task['file']}")
+            else:
+                self._update_task_strm_status(task_id, '失败 (Copy API 失败)', is_final=True)
+                logger.error(f"任务 {task_id} 额外文件复制到 STRM 本地目录失败：{task['file']}")
+        except Exception as e:
+            self._update_task_strm_status(task_id, f'失败 (异常: {str(e)})', is_final=True)
+            logger.error(f"任务 {task_id} 额外文件复制时发生异常: {e} - {traceback.format_exc()}")
+
+    def _copy_file_to_strm_local(self, task: Dict[str, Any]) -> bool:
+        """
+        将已移动到Openlist目标的文件复制到strm本地目标目录
+        用于额外后缀文件（如封面、nfo等），直接在Openlist服务端执行复制
+        """
+        dst_dir = task['dst_dir']
+        file_name = task['file']
+
+        # 查找最匹配的Openlist目标前缀
+        best_match = ""
+        for dst_prefix in self._parsed_strm_mappings.keys():
+            normalized_dst = os.path.normpath(dst_prefix)
+            normalized_task_dir = os.path.normpath(dst_dir)
+            if normalized_task_dir.startswith(normalized_dst):
+                if len(dst_prefix) > len(best_match):
+                    best_match = dst_prefix
+
+        if not best_match:
+            logger.debug(f"文件 {file_name} 未找到匹配的STRM映射规则，跳过复制到strm本地目标")
+            return False
+
+        try:
+            dst_prefix = best_match
+            _, strm_dst_prefix = self._parsed_strm_mappings[dst_prefix]
+
+            relative_dir_str = os.path.relpath(dst_dir, dst_prefix)
+            relative_dir = relative_dir_str.replace(os.path.sep, '/')
+
+            copy_dst_dir = f"{strm_dst_prefix.rstrip('/')}/{relative_dir}"
+
+            logger.debug(f"复制文件到strm本地目标: {dst_dir}/{file_name} -> {copy_dst_dir}/{file_name}")
+
+            return self._call_openlist_copy_api(
+                src_dir=dst_dir,
+                dst_dir=copy_dst_dir,
+                names=[file_name]
+            )
+        except Exception as e:
+            logger.error(f"复制文件到strm本地目标时出错: {e} - {traceback.format_exc()}")
+            return False
+
     def _call_openlist_move_api(self, payload: dict, is_wash: bool = False) -> Tuple[Optional[str], Optional[int], Optional[str], bool]:
         """
         调用 Openlist API /api/fs/move。
@@ -1965,13 +2080,11 @@ class OpenlistMover(_PluginBase):
 
         logger.info("开始全局扫描本地监控目录...")
 
-        # 获取监控目录列表
-        monitor_dirs = [
-            d.strip() for d in self._monitor_paths.split("\n") if d.strip()
-        ]
+        # 从路径映射第一部分获取本地监控目录
+        monitor_dirs = list(self._parsed_mappings.keys())
 
         if not monitor_dirs:
-            logger.warning("全局扫描：未配置监控目录")
+            logger.warning("全局扫描：未配置路径映射，无法获取监控目录")
             return
 
         total_files_found = 0
