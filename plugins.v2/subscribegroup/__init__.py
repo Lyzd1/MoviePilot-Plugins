@@ -20,7 +20,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.3.5"
+    plugin_version = "3.4"
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -270,6 +270,8 @@ class SubscribeGroup(_PluginBase):
             logger.info(f"订阅记录:{subscribe.name} 填充成功\n{update_dict}")
 
             history = self.get_data('history') or []
+            # 移除同名订阅的旧记录，避免重复
+            history = [h for h in history if h.get('name') != subscribe.name]
             history.append({
                 'name': subscribe.name,
                 'type': f'二级分类自定义配置 {category}',
@@ -330,9 +332,11 @@ class SubscribeGroup(_PluginBase):
 
             history_handle: List[str] = self.get_data('history_handle') or []
 
-            if f"{download_history.type}:{download_history.tmdbid}" in history_handle:
-                logger.info(f"下载历史:{download_history.title} 已处理过，不再重复处理")
-                return
+            exist_key = f"{download_history.type}:{download_history.tmdbid}"
+            if exist_key in history_handle:
+                logger.info(f"下载历史:{download_history.title} 已有处理记录，清除旧记录后重新填充")
+                history_handle.remove(exist_key)
+                self.save_data('history_handle', history_handle)
 
             if download_history.type != '电视剧':
                 if self._debug:
@@ -448,6 +452,8 @@ class SubscribeGroup(_PluginBase):
                     logger.info(f"订阅记录:{subscribe.name} 填充成功\n {update_dict}")
 
                     history = self.get_data('history') or []
+                    # 移除同名订阅的旧记录，避免重复
+                    history = [h for h in history if h.get('name') != subscribe.name]
                     history.append({
                         'name': subscribe.name,
                         'type': '种子下载自定义配置',
