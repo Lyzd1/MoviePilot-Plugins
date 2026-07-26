@@ -207,6 +207,18 @@ class SubscribeGroup(_PluginBase):
                 logger.info(f"事件数据内容: {event.event_data}")
             logger.info("=" * 60)
 
+            # 新增订阅时，清除 history_handle 记录，允许后续下载重新填充规则
+            event_data = event.event_data
+            if event_data and event_data.get("subscribe_id"):
+                sid = event_data.get("subscribe_id")
+                subscribe = self._subscribeoper.get(sid)
+                if subscribe:
+                    history_handle: List[str] = self.get_data('history_handle') or []
+                    exist_key = f"{subscribe.type}:{subscribe.tmdbid}"
+                    if exist_key in history_handle:
+                        history_handle.remove(exist_key)
+                        self.save_data('history_handle', history_handle)
+                        logger.info(f"新增订阅'{subscribe.name}'，已清除历史处理记录，允许下载后重新填充规则")
         if not self._category:
             if self._debug:
                 logger.info("二级分类自定义填充未开启")
@@ -332,11 +344,9 @@ class SubscribeGroup(_PluginBase):
 
             history_handle: List[str] = self.get_data('history_handle') or []
 
-            exist_key = f"{download_history.type}:{download_history.tmdbid}"
-            if exist_key in history_handle:
-                logger.info(f"下载历史:{download_history.title} 已有处理记录，清除旧记录后重新填充")
-                history_handle.remove(exist_key)
-                self.save_data('history_handle', history_handle)
+            if f"{download_history.type}:{download_history.tmdbid}" in history_handle:
+                logger.info(f"下载历史:{download_history.title} 已处理过，不再重复处理")
+                return
 
             if download_history.type != '电视剧':
                 if self._debug:
