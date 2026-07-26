@@ -170,3 +170,4 @@ __federation_shared_vuetify/
 index-*
 date-*
 runtime-*
+.reasonix/
