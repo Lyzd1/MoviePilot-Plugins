@@ -46,7 +46,20 @@ TEMP_EXTENSIONS = [".!qB", ".part", ".mp", ".tmp", ".temp", ".download"]
 # Global lock for task list access
 task_lock = Lock()
 
-# Task status definitions (simplified, aligned with AList state: 0-等待中, 1-进行中, 2-成功, 3-失败)
+# OpenList/AList 任务原始状态 (基于 tache 库枚举)
+# 0-等待中, 1-进行中, 2-成功, 3-取消中, 4-已取消, 5-出错(将重试), 6-失败中, 7-已失败(终态), 8-等待重试, 9-重试前
+TACHE_STATE_WAITING = 0
+TACHE_STATE_RUNNING = 1
+TACHE_STATE_SUCCEEDED = 2
+TACHE_STATE_CANCELING = 3
+TACHE_STATE_CANCELED = 4
+TACHE_STATE_ERRORED = 5
+TACHE_STATE_FAILING = 6
+TACHE_STATE_FAILED = 7
+TACHE_STATE_WAITING_RETRY = 8
+TACHE_STATE_BEFORE_RETRY = 9
+
+# 插件内部归一化任务状态 (兼容旧持久化数据；取消/出错/失败等一律归一化为失败)
 TASK_STATUS_WAITING = 0
 TASK_STATUS_RUNNING = 1
 TASK_STATUS_SUCCESS = 2
@@ -115,7 +128,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.4.2" 
+    plugin_version = "4.5.0" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -159,10 +172,15 @@ class OpenlistMover(_PluginBase):
     # ==========================
     
     # Task tracking list
-    # Format: [{"id": str, "file": str, "src_dir": str, "dst_dir": str, "start_time": datetime, "status": int, "error": str, "strm_status": str, "is_wash": bool}]
+    # Format: [{"id": str, "file": str, "src_dir": str, "dst_dir": str, "start_time": datetime, "status": int,
+    #           "error": str, "strm_status": str, "is_wash": bool, "progress": float, "api_status": str,
+    #           "last_activity": datetime}]
     _move_tasks: List[Dict[str, Any]] = []
-    _max_task_duration = 60 * 60 # 60 minutes in seconds (最长 60min)
-    _task_check_interval = 60 # 1 minute in seconds (每隔 1min)
+    # 总时长兜底超时（秒），0 = 不限制（默认）。
+    # 参考 taosync：任务成功/失败以 OpenList 返回状态为准，不再按固定墙钟时间误判（taosync 超时仅为作业级兜底，默认 72h）
+    _max_task_duration = 0  # seconds, 0 = disabled
+    _task_check_interval = 60 # 轮询间隔（秒，每隔 N 秒检查一次任务状态）
+    _task_stuck_minutes = 0  # 无进度卡死检测（分钟），0 = 关闭
 
     # === 新增属性用于任务计数和清空配置 ===
     _successful_moves_count = 0  # 累计成功移动次数
@@ -270,6 +288,30 @@ class OpenlistMover(_PluginBase):
             self._global_scan_time = config.get("global_scan_time", "02:00")
             # =======================
 
+            # === 加载任务监控配置 ===
+            try:
+                self._task_check_interval = int(config.get("task_check_interval", 60))
+                if self._task_check_interval < 10:
+                    self._task_check_interval = 10  # 最小 10 秒，避免轮询过于频繁
+            except ValueError:
+                self._task_check_interval = 60
+
+            try:
+                # 总时长兜底超时（分钟），0 = 不限制；任务成功/失败以 OpenList 状态为准
+                timeout_minutes = int(config.get("task_timeout_minutes", 0))
+                self._max_task_duration = max(0, timeout_minutes * 60)
+            except ValueError:
+                self._max_task_duration = 0
+
+            try:
+                # 无进度卡死检测（分钟），0 = 关闭；开启后若任务状态与进度长时间无变化则判定卡死
+                self._task_stuck_minutes = int(config.get("task_stuck_minutes", 0))
+                if self._task_stuck_minutes < 0:
+                    self._task_stuck_minutes = 0
+            except ValueError:
+                self._task_stuck_minutes = 0
+            # ==========================
+
         # === 加载持久化状态 ===
         # 加载任务列表
         saved_tasks = self.get_data('move_tasks') or []
@@ -279,6 +321,8 @@ class OpenlistMover(_PluginBase):
                 # 反序列化 datetime 对象
                 if 'start_time' in task and isinstance(task['start_time'], str):
                     task['start_time'] = datetime.fromisoformat(task['start_time'])
+                if 'last_activity' in task and isinstance(task['last_activity'], str):
+                    task['last_activity'] = datetime.fromisoformat(task['last_activity'])
                 self._move_tasks.append(task)
             except Exception as e:
                 logger.warning(f"加载任务时出错，跳过该任务: {task.get('id', 'unknown')} - {e}")
@@ -722,6 +766,76 @@ class OpenlistMover(_PluginBase):
                         ]
                     },
                     # =================================
+                    # === 任务监控配置 ===
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "title": "任务监控配置",
+                                            "text": "任务成功/失败以 OpenList 返回的状态为准（2-成功；取消/出错/失败等终态判为失败），不再按固定 60 分钟墙钟时间误判，大文件长时间上传不会被中途打断。面板会实时展示每个任务的上传进度。总时长兜底超时与无进度卡死检测为可选的安全网，默认关闭。",
+                                        },
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "task_check_interval",
+                                            "label": "任务状态轮询间隔 (秒)",
+                                            "type": "number",
+                                            "min": 10,
+                                            "placeholder": "默认 60 (每 60 秒查询一次任务状态)",
+                                        },
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "task_timeout_minutes",
+                                            "label": "总时长兜底超时 (分钟)",
+                                            "type": "number",
+                                            "min": 0,
+                                            "placeholder": "默认 0 = 不限制 (推荐)，以 OpenList 状态为准",
+                                        },
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "task_stuck_minutes",
+                                            "label": "无进度卡死检测 (分钟)",
+                                            "type": "number",
+                                            "min": 0,
+                                            "placeholder": "默认 0 = 关闭；开启后进度长时间不变则判为卡死 (大文件慢速传输可能误判，慎用)",
+                                        },
+                                    }
+                                ]
+                            },
+                        ]
+                    },
+                    # =================================
                     # === 任务清空配置 ===
                     {
                         "component": "VRow",
@@ -859,7 +973,10 @@ class OpenlistMover(_PluginBase):
             "keep_successful_tasks": 3,
             "video_extensions": "",
             "global_scan_enabled": False,
-            "global_scan_time": "02:00"
+            "global_scan_time": "02:00",
+            "task_check_interval": 60,
+            "task_timeout_minutes": 0,
+            "task_stuck_minutes": 0
             # ======================
         }
 
@@ -902,6 +1019,26 @@ class OpenlistMover(_PluginBase):
                 return 'text-error'
             return ''
 
+        def get_progress_text(task: Dict[str, Any]) -> str:
+            """展示任务上传/移动进度 (参考 taosync 实时展示每个任务进度)"""
+            if task['status'] == TASK_STATUS_SUCCESS:
+                base = '100%'
+            elif task['status'] == TASK_STATUS_FAILED:
+                base = '-'
+            else:
+                progress = task.get('progress')
+                if progress is None:
+                    base = '等待中...'
+                else:
+                    try:
+                        base = f"{max(0, min(100, int(float(progress) * 100)))}%"
+                    except (TypeError, ValueError):
+                        base = '未知'
+            api_status = task.get('api_status', '')
+            if api_status:
+                return f"{base}\n{api_status}"
+            return base
+
         def task_to_tr(task: Dict[str, Any]) -> dict:
             strm_status = task.get('strm_status', '未执行')
             strm_color = 'text-warning' if strm_status.startswith('失败') else ('text-success' if strm_status == '成功' else 'text-muted')
@@ -924,6 +1061,11 @@ class OpenlistMover(_PluginBase):
                         'text': get_status_text(task['status'])
                     },
                     {
+                        'component': 'td',
+                        'props': {'class': 'text-muted' if task.get('api_status') else ''},
+                        'text': get_progress_text(task)
+                    },
+                    {
                         'component': 'td', 
                         'props': {'class': strm_color},
                         'text': strm_status
@@ -938,6 +1080,7 @@ class OpenlistMover(_PluginBase):
             {'text': '目标目录', 'class': 'text-start ps-4'},
             {'text': '开始时间', 'class': 'text-start ps-4'},
             {'text': '移动状态', 'class': 'text-start ps-4'},
+            {'text': '进度', 'class': 'text-start ps-4'}, # 新增 进度 列
             {'text': 'STRM状态', 'class': 'text-start ps-4'}, # 新增 STRM 状态列
             {'text': '错误信息', 'class': 'text-start ps-4'},
         ]
@@ -1028,6 +1171,8 @@ class OpenlistMover(_PluginBase):
                 serializable_task = task.copy()
                 if 'start_time' in serializable_task and isinstance(serializable_task['start_time'], datetime):
                     serializable_task['start_time'] = serializable_task['start_time'].isoformat()
+                if 'last_activity' in serializable_task and isinstance(serializable_task['last_activity'], datetime):
+                    serializable_task['last_activity'] = serializable_task['last_activity'].isoformat()
                 serializable_tasks.append(serializable_task)
 
             self.save_data('move_tasks', serializable_tasks)
@@ -1062,7 +1207,7 @@ class OpenlistMover(_PluginBase):
             self._scheduler.add_job(
                 self._check_move_tasks, 
                 "interval",
-                seconds=self._task_check_interval, # 1 minute interval
+                seconds=self._task_check_interval, # 轮询间隔 (可配置)
                 name="Openlist 移动任务监控"
             )
             self._scheduler.start()
@@ -1096,6 +1241,12 @@ class OpenlistMover(_PluginBase):
     def _check_move_tasks(self):
         """
         定期检查 Openlist 移动任务的状态，并处理清空逻辑
+
+        监控策略参考 taosync：
+        - 任务成功/失败以 OpenList 返回状态为准（2-成功，取消/出错/失败等终态归一化为失败），
+          不再按固定墙钟时间误判，避免大文件上传未完成就被判为超时；
+        - 记录并展示每个任务的实时进度 (progress/status)；
+        - 总时长兜底超时与无进度卡死检测均为可配置项，默认关闭。
         """
         logger.debug("开始检查 Openlist 移动任务状态...")
         
@@ -1110,61 +1261,104 @@ class OpenlistMover(_PluginBase):
         
         # 在锁外执行网络请求和耗时操作
         for task in tasks_to_update:
-            # 检查超时 (需要在锁内更新状态，但我们现在只是检查时间)
-            if (datetime.now() - task['start_time']).total_seconds() > self._max_task_duration:
-                # 再次获取锁并更新状态
-                with task_lock:
-                    task['status'] = TASK_STATUS_FAILED
-                    task['error'] = f"任务超时 ({int(self._max_task_duration / 60)} 分钟)"
-                    logger.error(f"Openlist 移动任务 {task['id']} 超时")
-                    self._save_move_tasks()  # 保存超时状态变更
-                self._send_task_notification(task, "Openlist 移动超时", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：任务超时")
-                continue
+            # 1. 可选：总时长兜底超时 (默认 0 = 不限制，避免大文件上传被误判)
+            if self._max_task_duration > 0:
+                if (datetime.now() - task['start_time']).total_seconds() > self._max_task_duration:
+                    with task_lock:
+                        task['status'] = TASK_STATUS_FAILED
+                        task['error'] = f"任务总时长超时 ({int(self._max_task_duration / 60)} 分钟)"
+                        logger.error(f"Openlist 移动任务 {task['id']} 总时长超时")
+                        self._save_move_tasks()  # 保存超时状态变更
+                    self._send_task_notification(task, "Openlist 移动超时", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：任务总时长超时")
+                    continue
 
-            # 查询状态 (网络请求，在锁外)
+            # 2. 查询状态 (网络请求，在锁外)
             try:
                 task_info = self._call_openlist_task_api(task['id'])
-                
-                new_status = task_info.get('state') # state: 0-等待中, 1-进行中, 2-成功, 3-失败
-                error_msg = task_info.get('error')
-                
-                # 在锁内更新状态
-                with task_lock:
-                    if new_status == TASK_STATUS_SUCCESS and task['status'] != TASK_STATUS_SUCCESS:
-                        task['status'] = new_status
-                        task['strm_status'] = '开始处理' # 标记开始后续流程
-                        self._save_move_tasks()  # 保存任务状态变更
-
-                        # 增加成功计数
-                        self._successful_moves_count += 1
-                        self._save_plugin_state()  # 保存状态计数器
-
-                        # 判断文件后缀，选择处理方式
-                        file_ext = Path(task['file']).suffix.lower()
-                        if self._strm_copy_extensions_set and file_ext in self._strm_copy_extensions_set:
-                            # 额外后缀文件：移动后复制到 strm 本地目标
-                            threading.Thread(
-                                target=self._handle_extra_file_copy,
-                                args=(task,)
-                            ).start()
-                        else:
-                            # 视频文件：执行 STRM 生成和复制流程
-                            threading.Thread(
-                                target=self._process_strm_creation,
-                                args=(task,)
-                            ).start()
-                        
-                    elif new_status == TASK_STATUS_FAILED and task['status'] != TASK_STATUS_FAILED:
-                        task['status'] = new_status
-                        task['error'] = error_msg if error_msg else "Openlist 报告失败"
-                        self._send_task_notification(task, "Openlist 移动失败", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：{task['error']}")
-                        self._save_move_tasks()  # 保存任务状态变更
-                    elif new_status == TASK_STATUS_RUNNING:
-                        task['status'] = new_status
-                        self._save_move_tasks()  # 保存任务状态变更
-                        
             except Exception as e:
                 logger.error(f"查询 Openlist 任务 {task['id']} 状态失败: {e}")
+                task_info = {'state': TASK_STATUS_RUNNING, 'raw_state': None, 'progress': None,
+                             'status': '', 'error': str(e), 'ok': False, 'not_found': False}
+
+            new_status = task_info.get('state', TASK_STATUS_RUNNING)
+            progress = task_info.get('progress')
+            status_text = task_info.get('status') or ''
+            error_msg = task_info.get('error') or ''
+            not_found = task_info.get('not_found', False)
+
+            # 3. 任务记录不存在时，通过目标文件是否已存在来确认结果
+            #    (taosync 直接视为失败；这里更稳妥：若目标文件已存在则视为成功)
+            if not_found:
+                dst_check_path = f"{task['dst_dir'].rstrip('/')}/{task['file']}"
+                exists, _ = self._call_openlist_get_api(dst_check_path)
+                if exists:
+                    logger.info(f"任务 {task['id']} 记录不存在但目标文件已存在，判定为成功")
+                    new_status = TASK_STATUS_SUCCESS
+                    progress = 1.0
+                elif exists is None:
+                    logger.warning(f"任务 {task['id']} 记录不存在，目标文件存在性检查结果不明确，继续观察")
+                    new_status = TASK_STATUS_RUNNING
+                else:
+                    new_status = TASK_STATUS_FAILED
+                    error_msg = error_msg or "任务记录不存在，且目标文件不存在"
+
+            # 4. 在锁内更新状态
+            with task_lock:
+                if new_status == TASK_STATUS_SUCCESS and task['status'] != TASK_STATUS_SUCCESS:
+                    task['status'] = TASK_STATUS_SUCCESS
+                    task['progress'] = 1.0
+                    task['api_status'] = ''
+                    task['strm_status'] = '开始处理' # 标记开始后续流程
+                    self._save_move_tasks()  # 保存任务状态变更
+
+                    # 增加成功计数
+                    self._successful_moves_count += 1
+                    self._save_plugin_state()  # 保存状态计数器
+
+                    # 判断文件后缀，选择处理方式
+                    file_ext = Path(task['file']).suffix.lower()
+                    if self._strm_copy_extensions_set and file_ext in self._strm_copy_extensions_set:
+                        # 额外后缀文件：移动后复制到 strm 本地目标
+                        threading.Thread(
+                            target=self._handle_extra_file_copy,
+                            args=(task,)
+                        ).start()
+                    else:
+                        # 视频文件：执行 STRM 生成和复制流程
+                        threading.Thread(
+                            target=self._process_strm_creation,
+                            args=(task,)
+                        ).start()
+                    
+                elif new_status == TASK_STATUS_FAILED and task['status'] != TASK_STATUS_FAILED:
+                    task['status'] = TASK_STATUS_FAILED
+                    task['error'] = error_msg if error_msg else "Openlist 报告失败"
+                    self._send_task_notification(task, "Openlist 移动失败", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：{task['error']}")
+                    self._save_move_tasks()  # 保存任务状态变更
+                elif new_status in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]:
+                    task['status'] = TASK_STATUS_RUNNING
+                    # 更新进度与状态文本 (参考 taosync 实时展示每个任务的进度)
+                    activity_changed = False
+                    if progress is not None and progress != task.get('progress'):
+                        task['progress'] = progress
+                        activity_changed = True
+                    if status_text and status_text != task.get('api_status', ''):
+                        task['api_status'] = status_text
+                        activity_changed = True
+                    if activity_changed:
+                        task['last_activity'] = datetime.now()
+                    else:
+                        # 可选：无进度卡死检测 (默认关闭，避免大文件慢速传输被误判)
+                        if self._task_stuck_minutes > 0:
+                            last_activity = task.get('last_activity') or task['start_time']
+                            if (datetime.now() - last_activity).total_seconds() > self._task_stuck_minutes * 60:
+                                task['status'] = TASK_STATUS_FAILED
+                                task['error'] = f"任务长时间无进度 ({self._task_stuck_minutes} 分钟)，疑似卡死"
+                                logger.error(f"Openlist 移动任务 {task['id']} 长时间无进度，判定卡死")
+                                self._save_move_tasks()  # 保存状态变更
+                                self._send_task_notification(task, "Openlist 移动失败", f"文件：{task['file']}\n源：{task['src_dir']}\n目标：{task['dst_dir']}\n错误：{task['error']}")
+                                continue
+                    self._save_move_tasks()  # 保存任务状态变更
         
         
         # 任务清空逻辑 (在锁内执行)
@@ -1589,7 +1783,10 @@ class OpenlistMover(_PluginBase):
                     "status": TASK_STATUS_RUNNING,
                     "error": "",
                     "strm_status": "未执行",
-                    "is_wash": is_wash_applied # 记录这是否是一个洗版任务
+                    "is_wash": is_wash_applied, # 记录这是否是一个洗版任务
+                    "progress": 0.0,            # 上传/移动进度 (0~1)，由任务监控轮询更新
+                    "api_status": "",           # OpenList 返回的状态文本 (如 "getting src object")
+                    "last_activity": datetime.now(),  # 最近一次进度/状态变化时间，用于卡死检测
                 }
                 with task_lock:
                     self._move_tasks.append(new_task)
@@ -1778,24 +1975,86 @@ class OpenlistMover(_PluginBase):
             logger.error(f"调用 Openlist API 时出错: {e} - {traceback.format_exc()}")
             return None, 500, str(e), is_wash
             
+    @staticmethod
+    def _normalize_task_state(raw_state) -> Tuple[int, str]:
+        """
+        将 OpenList/AList 任务原始状态 (tache 库枚举) 归一化为插件内部状态。
+        返回 (内部状态, 状态说明)
+        tache 枚举: 0-等待中, 1-进行中, 2-成功, 3-取消中, 4-已取消, 5-出错(将重试),
+                    6-失败中, 7-已失败(终态), 8-等待重试, 9-重试前
+        参考: taosync 中任务仅以 AList 返回的终态 (成功/失败/取消) 结束，不做墙钟超时误判
+        """
+        # 兼容新版 AList 返回的字符串状态 (e.g. "succeeded"/"failed")
+        if isinstance(raw_state, str):
+            state_map = {
+                'pending': (TASK_STATUS_RUNNING, '等待中'),
+                'running': (TASK_STATUS_RUNNING, '进行中'),
+                'succeeded': (TASK_STATUS_SUCCESS, ''),
+                'canceling': (TASK_STATUS_FAILED, '任务被取消'),
+                'canceled': (TASK_STATUS_FAILED, '任务被取消'),
+                'errored': (TASK_STATUS_FAILED, '任务出错'),
+                'failing': (TASK_STATUS_FAILED, '任务失败'),
+                'failed': (TASK_STATUS_FAILED, '任务失败'),
+                'waiting_retry': (TASK_STATUS_RUNNING, '等待重试'),
+                'before_retry': (TASK_STATUS_RUNNING, '重试准备中'),
+            }
+            return state_map.get(raw_state.lower(), (TASK_STATUS_RUNNING, ''))
+
+        try:
+            raw_state = int(raw_state)
+        except (TypeError, ValueError):
+            return TASK_STATUS_RUNNING, ''
+
+        if raw_state == TACHE_STATE_SUCCEEDED:
+            return TASK_STATUS_SUCCESS, ''
+        if raw_state in (TACHE_STATE_WAITING, TACHE_STATE_RUNNING,
+                         TACHE_STATE_WAITING_RETRY, TACHE_STATE_BEFORE_RETRY):
+            return TASK_STATUS_RUNNING, ''
+        # 取消中/已取消/出错/失败中/已失败 一律归一化为失败
+        if raw_state in (TACHE_STATE_CANCELING, TACHE_STATE_CANCELED,
+                         TACHE_STATE_ERRORED, TACHE_STATE_FAILING, TACHE_STATE_FAILED):
+            return TASK_STATUS_FAILED, '任务失败'
+        return TASK_STATUS_RUNNING, ''
+
+    @staticmethod
+    def _normalize_progress(progress) -> Optional[float]:
+        """将 OpenList 返回的进度 (0~100 百分比) 归一化为 0~1 的小数"""
+        if progress is None:
+            return None
+        try:
+            p = float(progress)
+        except (TypeError, ValueError):
+            return None
+        if p > 1:
+            p = p / 100.0
+        return max(0.0, min(1.0, p))
+
     def _call_openlist_task_api(self, task_id: str) -> Dict[str, Any]:
         """
-        调用 Openlist API 检查任务状态 (模拟 AList /api/admin/task/copy/info)
-        返回: {'state': int, 'error': str}
+        调用 Openlist API 检查任务状态 (AList /api/admin/task/{type}/info)
+        返回: {'state': 内部归一化状态, 'raw_state': 原始状态, 'progress': 0~1, 'status': 状态文本,
+               'error': str, 'ok': bool, 'not_found': bool}
+        ok=True 表示 API 返回了明确结果；not_found=True 表示任务记录不存在
         """
         
         # 针对模拟的任务ID进行特殊处理，以避免频繁失败
         if task_id.startswith('sim_task_'):
-             # 模拟任务运行一段时间后成功
+             # 模拟任务运行一段时间后成功，并模拟进度避免卡死检测误判
              with task_lock:
                 for task in self._move_tasks:
                     if task['id'] == task_id:
-                        if (datetime.now() - task['start_time']).total_seconds() > 120:
-                            return {'state': TASK_STATUS_SUCCESS, 'error': ''}
-                        break
-             return {'state': TASK_STATUS_RUNNING, 'error': ''}
+                        elapsed = (datetime.now() - task['start_time']).total_seconds()
+                        if elapsed > 120:
+                            return {'state': TASK_STATUS_SUCCESS, 'raw_state': TACHE_STATE_SUCCEEDED,
+                                    'progress': 1.0, 'status': '模拟任务完成', 'error': '',
+                                    'ok': True, 'not_found': False}
+                        return {'state': TASK_STATUS_RUNNING, 'raw_state': TACHE_STATE_RUNNING,
+                                'progress': min(0.99, elapsed / 120.0), 'status': '模拟任务执行中',
+                                'error': '', 'ok': True, 'not_found': False}
+             return {'state': TASK_STATUS_RUNNING, 'raw_state': TACHE_STATE_RUNNING,
+                     'progress': None, 'status': '', 'error': '', 'ok': True, 'not_found': False}
 
-        # 假设 Openlist 支持 AList 风格的任务查询 API
+        # Openlist/AList 任务查询 API
         api_url = f"{self._openlist_url}/api/admin/task/move/info?tid={task_id}" 
         
         headers = {
@@ -1814,22 +2073,43 @@ class OpenlistMover(_PluginBase):
                     response_data = json.loads(response_body)
                     if response_data.get("code") == 200:
                         task_info = response_data.get('data', {})
-                        state = task_info.get('state', TASK_STATUS_RUNNING)
-                        error = task_info.get('error', '')
-                        return {'state': state, 'error': error}
+                        raw_state = task_info.get('state', TACHE_STATE_RUNNING)
+                        state, _ = self._normalize_task_state(raw_state)
+                        progress = self._normalize_progress(task_info.get('progress'))
+                        error = task_info.get('error') or ''
+                        return {'state': state, 'raw_state': raw_state,
+                                'progress': progress,
+                                'status': task_info.get('status') or '',
+                                'error': error, 'ok': True, 'not_found': False}
                     else:
-                        logger.warning(f"Openlist Task API 报告失败: {response_data.get('message')} - {task_id}")
-                        return {'state': TASK_STATUS_RUNNING, 'error': ''} 
+                        # 业务错误码：404 / not found 说明任务记录已不存在
+                        message = response_data.get('message', '') or ''
+                        not_found = ('not found' in message.lower()) or response_data.get('code') == 404
+                        logger.warning(f"Openlist Task API 报告失败: {message} - {task_id}")
+                        return {'state': TASK_STATUS_RUNNING, 'raw_state': None, 'progress': None,
+                                'status': '', 'error': message, 'ok': False, 'not_found': not_found}
                 else:
                     logger.warning(f"Openlist Task API 返回非 200 状态码 {response_code}: {response_body}")
-                    return {'state': TASK_STATUS_RUNNING, 'error': ''}
+                    return {'state': TASK_STATUS_RUNNING, 'raw_state': None, 'progress': None,
+                            'status': '', 'error': '', 'ok': False, 'not_found': False}
 
+        except urllib.error.HTTPError as e:
+            # 404：任务记录不存在（可能已被清理、服务重启丢失，或任务早已完成）
+            if e.code == 404:
+                logger.warning(f"Openlist Task API 任务记录不存在 (404): {task_id}")
+                return {'state': TASK_STATUS_RUNNING, 'raw_state': None, 'progress': None,
+                        'status': '', 'error': 'task not found', 'ok': False, 'not_found': True}
+            logger.error(f"Openlist Task API 调用失败 (HTTPError {e.code}): {e}")
+            return {'state': TASK_STATUS_RUNNING, 'raw_state': None, 'progress': None,
+                    'status': '', 'error': str(e), 'ok': False, 'not_found': False}
         except urllib.error.URLError as e:
             logger.error(f"Openlist Task API 调用失败 (URLError): {e}")
-            return {'state': TASK_STATUS_RUNNING, 'error': ''} 
+            return {'state': TASK_STATUS_RUNNING, 'raw_state': None, 'progress': None,
+                    'status': '', 'error': str(e), 'ok': False, 'not_found': False}
         except Exception as e:
             logger.error(f"调用 Openlist Task API 时出错: {e}")
-            return {'state': TASK_STATUS_RUNNING, 'error': ''}
+            return {'state': TASK_STATUS_RUNNING, 'raw_state': None, 'progress': None,
+                    'status': '', 'error': str(e), 'ok': False, 'not_found': False}
 
     def _call_openlist_list_api(self, path: str) -> bool:
         """
