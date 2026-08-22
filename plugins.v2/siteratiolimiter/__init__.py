@@ -34,7 +34,9 @@
    - 支持「立即扫描一次」按钮（保存配置后执行，随后自动复位）；
 6. 详情面板：展示每个配置站点的账号分享率、阈值（下限-上限）与档位状态（供下载时判定），
    以及该站已限速种子数，不再展示种子级明细；
-7. 停用/卸载时自动将本插件限速过的种子恢复为不限速（跨会话持久化 + 失败兜底重试）。
+7. 停用插件时（用户主动停用/禁用）：自动将本插件限速过的种子恢复为不限速
+   （跨会话持久化 + 失败兜底重试）；升级/热重载插件不会误触发恢复
+   （stop_service 不再无条件恢复，避免升级后限速被误取消）。
 """
 
 import datetime
@@ -72,7 +74,7 @@ class SiteRatioLimiter(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.5.0"
+    plugin_version = "1.5.1"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -326,14 +328,14 @@ class SiteRatioLimiter(_PluginBase):
         return []
 
     def stop_service(self):
-        """停止插件；停用或卸载插件时自动将已限速种子恢复为不限速。"""
+        """
+        停止插件（升级/热重载/卸载时由 MoviePilot 调用）。
+
+        注意：不在 stop_service 中恢复限速！升级插件时 MoviePilot 会先调用旧实例的
+        stop_service 再加载新实例，若在此恢复会将种子误恢复为不限速；恢复限速仅由
+        init_plugin 在检测到「插件从启用变为停用」（用户主动停用/禁用）时执行。
+        """
         self._stop_scan_scheduler()
-        try:
-            self._restore_limits()
-        except Exception as err:
-            logger.error(f"{self.LOG_TAG}恢复上传不限速失败：{err}")
-        self._save_set_map(self._RESTORE_DATA_KEY, self._restore_hashes)
-        self._start_restore_retry()
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
