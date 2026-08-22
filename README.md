@@ -56,13 +56,6 @@ https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/package.v2.json
 - **功能**: 自动监控分享率，在低于阈值时执行魔力兑换操作。支持馒头等站点。
 - **标签**: `分享率`
 
-### IYUU
-
-#### IYUUAutoSeed — IYUU自动辅种
-- **版本**: v2.18
-- **功能**: 基于 IYUU 官方 API 实现自动辅种，配合自动转移做种插件使用效果更佳。
-- **标签**: `IYUU`
-
 ### AI
 
 #### PromptEditor — AI提示词编辑器
