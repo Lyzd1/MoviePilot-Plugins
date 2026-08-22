@@ -12,6 +12,7 @@
 - [x] [T20] 站点阈值恢复双值格式（站点=下限,上限），兼容旧版单值（上限继承全局）；表单/通知/面板/配置签名同步恢复上限 @done
 - [x] [T21] 作者改为 Lyzd1（插件类与 package.v2.json） @done
 - [x] [T22] 版本号 v1.2.0 -> v1.3.0（插件类/package.v2.json/description/history/README/TODOLIST 同步）、py_compile/JSON/版本一致性校验 @done
+- [x] [T23] 发布：git commit `c8aabd8` 并 push 到 github（origin main） @done
 
 ## 任务清单（v1.2.0 迭代）
 
@@ -42,5 +43,5 @@
 
 ## 进度统计
 
-完成：22 / 22（v1.0.0 / v1.1.0 / v1.2.0 已发布，v1.3.0 待发布）
+完成：23 / 23（v1.0.0 / v1.1.0 / v1.2.0 / v1.3.0 均已发布）
 更新时间：2026-08-22
