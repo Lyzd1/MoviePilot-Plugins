@@ -64,7 +64,7 @@ class SiteRatioLimiter(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.3.0"
+    plugin_version = "1.3.1"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -85,9 +85,9 @@ class SiteRatioLimiter(_PluginBase):
     _STATE_UNKNOWN = "unknown"  # 无分享率数据
 
     _STATE_LABELS = {
-        "low": "🔻 低于下限",
-        "normal": "⏸ 中间区间",
-        "high": "🔺 达到上限",
+        "low": "🔻 不限速保持（曾低于下限）",
+        "normal": "⏸ 中间区间（保持现状）",
+        "high": "🔺 限速保持（达到上限）",
         "unknown": "⚪ 无数据",
     }
 
