@@ -14,7 +14,7 @@
 功能：
 1. 全局设置分享率下限/上限，并可对每个站点单独设置（未配置的站点回退全局值）；
 2. 插件内部维护每个站点的档位状态，由「站点数据统计」插件的分享率刷新事件
-   （SiteRefreshed，全站刷新完成 site_id == *）更新，启用插件时做一次静默基线（不通知）；
+   （SiteRefreshed，全站刷新完成 site_id == *）更新，启用插件时做一次静默基线；
 3. 监听下载种子事件（DownloadAdded）：直接从插件内部维护的站点状态读取当前档位，
    仅当站点档位为「达到上限」时立即限制该种子上传速度（KB/s），否则不做任何操作
    （不在下载时实时查询 MoviePilot 站点数据，数据来源为插件维护的站点状态）；
@@ -22,7 +22,6 @@
    - 档位变化到「低于下限」 -> 取消该站种子的上传速度上限；
    - 档位变化到「达到上限」 -> 将该站当前未限速的种子批量设置上传限速；
    - 档位在中间区间 -> 保持现状，不调用限速接口；
-   - 站点档位发生变化时才发送通知（分享率过低 / 达到上限）；
    - 保存配置时：仅当修改了上传限速大小、或修改阈值导致档位变化、或站点/下载器范围变化时
      才调用接口调整限速，否则只刷新状态与统计，不产生限速 API 调用；
 5. 详情面板：展示每个配置站点的账号分享率、阈值（下限-上限）与档位状态（供下载时判定），
@@ -45,7 +44,7 @@ from app.helper.service import ServiceConfigHelper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import ServiceInfo
-from app.schemas.types import EventType, MessageChannel
+from app.schemas.types import EventType
 
 
 class SiteRatioLimiter(_PluginBase):
@@ -60,11 +59,11 @@ class SiteRatioLimiter(_PluginBase):
     # 插件名称
     plugin_name = "站点分享率上传限速"
     # 插件描述
-    plugin_desc = "基于站点账号分享率与分享率上下限自动管理 qBittorrent 种子上传限速：低于下限取消限速并保持到达到上限，达到上限恢复限速并保持到低于下限，中间区间保持现状防波动；下载种子时按插件维护的站点档位状态限速；档位变化时通知。"
+    plugin_desc = "基于站点账号分享率与分享率上下限自动管理 qBittorrent 种子上传限速：低于下限取消限速并保持到达到上限，达到上限恢复限速并保持到低于下限，中间区间保持现状防波动；下载种子时按插件维护的站点档位状态限速。"
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.3.2"
+    plugin_version = "1.4.0"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -93,8 +92,6 @@ class SiteRatioLimiter(_PluginBase):
 
     # ---- 配置项默认值 ----
     _enabled = False
-    # 已选择的通知渠道类型（如 telegram / wechat），空表示不发送通知
-    _notify_channel: List[str] = []
     # 已选择的下载器名称（仅 qBittorrent）
     _downloaders: List[str] = []
     # 已选择的站点名称，为空表示管理所有活动站点
@@ -132,20 +129,6 @@ class SiteRatioLimiter(_PluginBase):
     _SITE_STATES_KEY = "site_states"
     _SIG_KEY = "config_signature"
 
-    # 通知渠道类型（MoviePilot 通知配置的 type）-> MessageChannel 枚举
-    _NOTIFY_TYPE_MAP = {
-        "telegram": MessageChannel.Telegram,
-        "wechat": MessageChannel.Wechat,
-        "feishu": MessageChannel.Feishu,
-        "wechatclawbot": MessageChannel.WechatClawBot,
-        "slack": MessageChannel.Slack,
-        "discord": MessageChannel.Discord,
-        "synologychat": MessageChannel.SynologyChat,
-        "vocechat": MessageChannel.VoceChat,
-        "webpush": MessageChannel.WebPush,
-        "qqbot": MessageChannel.QQ,
-    }
-
     # ---------------------------------------------------------------- 生命周期
 
     def init_plugin(self, config: dict = None):
@@ -163,7 +146,6 @@ class SiteRatioLimiter(_PluginBase):
 
         config = config or {}
         self._enabled = bool(config.get("enabled"))
-        self._notify_channel = self._normalize_channels(config.get("notify_channel"))
         self._downloaders = self._normalize_config_list(config.get("downloaders"))
         self._sites = self._normalize_config_list(config.get("sites"))
         self._ratio_lower = self._to_ratio(config.get("ratio_lower_limit"), 1.0)
@@ -244,14 +226,14 @@ class SiteRatioLimiter(_PluginBase):
         # 首次启用或相关配置变化：以静默基线按新档位执行限速/取消限速动作；
         # 上传限速大小变化时强制按新值刷新已限速种子
         if first_run or apply_changed:
-            self._process_site_ratios(notify=False, apply=True, force=bool(upload_changed))
+            self._process_site_ratios(apply=True, force=bool(upload_changed))
             logger.info(
                 f"{self.LOG_TAG}已完成站点状态基线构建（{'首次' if first_run else '配置变化'}"
                 f"{'，上传限速大小变化，已按新值刷新' if upload_changed else ''}）"
             )
         else:
             # 配置未实质变化：只刷新状态与统计（不调用限速接口）
-            self._process_site_ratios(notify=False, apply=False)
+            self._process_site_ratios(apply=False)
             logger.info(f"{self.LOG_TAG}配置未发生实质变化，仅刷新站点分享率/档位/统计，不调整限速")
 
         # 记录本次生效的配置签名
@@ -340,7 +322,7 @@ class SiteRatioLimiter(_PluginBase):
     def on_site_refreshed(self, event: Event = None):
         """
         站点分享率数据刷新事件：仅在全站刷新完成（site_id == *）时处理，
-        刷新内部站点状态并按新档位执行批量限速/取消限速，档位变化时通知。
+        刷新内部站点状态并按新档位执行批量限速/取消限速。
         """
         if not self._enabled:
             return
@@ -351,11 +333,11 @@ class SiteRatioLimiter(_PluginBase):
             if site_id not in (None, "*"):
                 return
             logger.info(f"{self.LOG_TAG}站点数据刷新完成事件（site_id={site_id}），开始按最新分享率调整上传限速")
-        self._process_site_ratios(notify=True)
+        self._process_site_ratios()
 
     # ---------------------------------------------------------------- 核心流程
 
-    def _process_site_ratios(self, notify: bool = True, apply: bool = True, force: bool = False):
+    def _process_site_ratios(self, apply: bool = True, force: bool = False):
         """
         刷新站点账号分享率快照，重算每个管理站点的档位状态（带滞回的三档）：
         - 分享率 <= 下限 -> 🔻 低于下限：取消该站种子的上传限速，并保持到分享率 > 上限；
@@ -363,7 +345,6 @@ class SiteRatioLimiter(_PluginBase):
                            并保持到分享率 <= 下限；
         - （下限, 上限] 中间区间 -> ⏸ 中间区间：保持原档位状态（从哪边进入维持哪边），不做任何限速调整，
                            防止档位抖动导致频繁限速/取消限速；
-        - 档位跨边界发生变化（且非首次基线）时按变化方向发送通知；
         - 更新内部站点统计（供下载时判定与详情面板展示）。
 
         :param apply: 是否执行限速/取消限速动作；False 时仅刷新状态与统计（不调用限速接口）
@@ -414,13 +395,6 @@ class SiteRatioLimiter(_PluginBase):
                 # 无历史时进入中性「中间区间」态，不做任何调整
                 new_state = prev_state if prev_state in (self._STATE_LOW, self._STATE_HIGH) else self._STATE_NORMAL
             stats["state"] = new_state
-
-            # 仅当档位跨边界变化且不是首次基线（无历史状态）时通知
-            if notify and prev_state and prev_state != new_state and prev_state != self._STATE_UNKNOWN:
-                if new_state == self._STATE_LOW:
-                    self._send_message(self._build_low_text(name, ratio, lower))
-                elif new_state == self._STATE_HIGH:
-                    self._send_message(self._build_high_text(name, ratio, upper))
             new_states[name] = new_state
             logger.info(
                 f"{self.LOG_TAG}站点 {name} 分享率 {ratio:g}（阈值 {lower:g} - {upper:g}）"
@@ -890,38 +864,6 @@ class SiteRatioLimiter(_PluginBase):
         effective_limit = min(float(limit), qb_upload_limit)
         return int(effective_limit) if effective_limit.is_integer() else effective_limit
 
-    # ---------------------------------------------------------------- 通知
-
-    def _build_low_text(self, site_name: str, ratio: float, lower: float) -> str:
-        return (f"**{site_name}** 分享率过低（当前 **{ratio:g}** ≤ 下限 **{lower:g}**），"
-                f"已取消该站所有种子的上传速度上限（分享率达到上限前保持不限速）。")
-
-    def _build_high_text(self, site_name: str, ratio: float, upper: float) -> str:
-        return (f"**{site_name}** 分享率已达到阈值上限（当前 **{ratio:g}** > 上限 **{upper:g}**），"
-                f"已对该站未限速的种子新增上传限速（分享率降到下限前保持限速）。")
-
-    def _send_message(self, text: str) -> bool:
-        """按配置的通知渠道发送消息。"""
-        channels = self._normalize_channels(self._notify_channel)
-        if not channels:
-            return False
-        sent = False
-        for channel in channels:
-            notify_channel = self._NOTIFY_TYPE_MAP.get(channel)
-            if not notify_channel:
-                continue
-            try:
-                self.post_message(
-                    channel=notify_channel,
-                    title="【站点分享率上传限速】",
-                    text=text,
-                    link=settings.MP_DOMAIN(f"#/plugins?tab=installed&id={self.__class__.__name__}"),
-                )
-                sent = True
-            except Exception as err:
-                logger.error(f"{self.LOG_TAG}发送通知失败（{channel}）：{err}")
-        return sent
-
     # ---------------------------------------------------------------- 恢复与调度
 
     def _restore_limits(self, downloaders: Optional[List[str]] = None):
@@ -1074,7 +1016,6 @@ class SiteRatioLimiter(_PluginBase):
         """返回当前配置，供表单回填。"""
         return {
             "enabled": self._enabled,
-            "notify_channel": self._notify_channel,
             "downloaders": self._downloaders,
             "sites": self._sites,
             "ratio_lower_limit": self._ratio_lower,
@@ -1086,7 +1027,7 @@ class SiteRatioLimiter(_PluginBase):
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """
         插件设置表单：
-        第一行：启用插件 / 发送通知（多选渠道）；
+        第一行：启用插件；
         第二行：下载器（多选，仅 qBittorrent）/ 站点（多选，按站点筛选）；
         第三行：全局分享率下限 / 全局分享率上限 / 上传速度（KB/s）；
         第四行：按站点单独分享率阈值（站点=下限,上限）；
@@ -1104,21 +1045,6 @@ class SiteRatioLimiter(_PluginBase):
                     downloader_items.append({"title": conf_name, "value": conf_name})
         except Exception as err:
             logger.warning(f"{self.LOG_TAG}读取下载器配置失败：{err}")
-
-        # 通知渠道下拉：MoviePilot 已启用渠道的类型去重
-        notify_items = []
-        try:
-            seen_types = set()
-            for conf in (ServiceConfigHelper.get_notification_configs() or []):
-                if not getattr(conf, "enabled", False):
-                    continue
-                conf_type = getattr(conf, "type", "") or ""
-                conf_name = getattr(conf, "name", "") or conf_type
-                if conf_type and conf_type not in seen_types:
-                    seen_types.add(conf_type)
-                    notify_items.append({"title": conf_name, "value": conf_type})
-        except Exception as err:
-            logger.warning(f"{self.LOG_TAG}读取通知渠道配置失败：{err}")
 
         # 站点下拉：与站点管理排序一致（按优先级 pri 升序，同优先级保持原顺序）
         site_items = []
@@ -1155,16 +1081,11 @@ class SiteRatioLimiter(_PluginBase):
                                 "props": {"cols": 12, "md": 8},
                                 "content": [
                                     {
-                                        "component": "VSelect",
+                                        "component": "VAlert",
                                         "props": {
-                                            "model": "notify_channel",
-                                            "label": "发送通知",
-                                            "items": notify_items,
-                                            "multiple": True,
-                                            "chips": True,
-                                            "clearable": True,
-                                            "hint": "可多选 MoviePilot 系统设置中已配置并启用的通知渠道；留空表示不发送通知。仅在站点分享率档位发生变化时通知（分享率过低 / 恢复限速）。",
-                                            "persistent-hint": True,
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "text": "本插件不发送任何通知；站点分享率档位变化、限速/取消限速动作均记录在 MoviePilot 日志中。",
                                         },
                                     }
                                 ],
@@ -1332,7 +1253,7 @@ class SiteRatioLimiter(_PluginBase):
                                         "props": {
                                             "type": "error",
                                             "variant": "tonal",
-                                            "text": "档位带滞回：分享率 <= 下限 -> 🔻 低于下限，取消该站所有种子的上传速度上限，并保持到分享率 > 上限；分享率 > 上限 -> 🔺 达到上限，新增上传限速，并保持到分享率 <= 下限；中间区间 -> ⏸ 保持现状，不调用限速接口（防止限速波动）。档位跨边界变化时才发送通知。保存配置时仅在上传速度、阈值（导致档位变化）或站点/下载器范围变化时才调用接口调整限速。停用或卸载插件时自动恢复本插件限速过的种子上传速度。",
+                                            "text": "档位带滞回：分享率 <= 下限 -> 🔻 低于下限，取消该站所有种子的上传速度上限，并保持到分享率 > 上限；分享率 > 上限 -> 🔺 达到上限，新增上传限速，并保持到分享率 <= 下限；中间区间 -> ⏸ 保持现状，不调用限速接口（防止限速波动）。保存配置时仅在上传速度、阈值（导致档位变化）或站点/下载器范围变化时才调用接口调整限速。停用或卸载插件时自动恢复本插件限速过的种子上传速度。",
                                         },
                                     }
                                 ],
@@ -1480,25 +1401,6 @@ class SiteRatioLimiter(_PluginBase):
             for key, (lower, upper) in sorted(confs.items())
         )
         return confs, normalized_text
-
-    @staticmethod
-    def _normalize_channels(value: Any) -> List[str]:
-        """将通知渠道配置规范化为去重后的字符串列表，兼容旧版单个字符串配置。"""
-        if value is None:
-            return []
-        if isinstance(value, str):
-            raw = [value]
-        else:
-            try:
-                raw = list(value)
-            except TypeError:
-                raw = [value]
-        channels = []
-        for item in raw:
-            item = str(item or "").strip()
-            if item and item not in channels:
-                channels.append(item)
-        return channels
 
     @staticmethod
     def _normalize_config_list(value: Any) -> List[str]:
