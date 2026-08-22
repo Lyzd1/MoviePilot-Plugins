@@ -4,9 +4,16 @@
 > 解析约定：
 > - 每行一个任务：`- [ ]`（未完成）或 `- [x]`（已完成），后跟任务编号 `[T编号]` 与描述；
 > - 行尾显式状态标记 `@pending` / `@in_progress` / `@done` / `@blocked`（与复选框保持一致）；
-> - 目标版本 v1.0.0（`package.v2.json` 的 version 与插件类 `plugin_version` 必须一致）。
+> - 目标版本 v1.1.0（`package.v2.json` 的 version 与插件类 `plugin_version` 必须一致）。
 
-## 任务清单
+## 任务清单（v1.1.0 迭代）
+
+- [x] [T10] 移除「立即运行一次」按钮与相关调度，运行方式改为纯事件驱动：SiteRefreshed（site_id=*）触发获取各站点分享率并判断档位是否改变 @done
+- [x] [T11] 分享率读取改为 SiteOper.get_userdata_by_date（按站点名，今天数据优先回退昨天），与流量管理/魔力兑换插件一致；面板增加数据日期列便于核对刷新是否生效 @done
+- [x] [T12] 详情面板删除种子明细表，仅保留站点状态表（站点/分享率/数据日期/阈值/档位/已限速种子数） @done
+- [x] [T13] 版本号更新 v1.0.0 -> v1.1.0（插件类与 package.v2.json 一致 + history 记录）、README/TODOLIST 同步 @done
+
+## 任务清单（v1.0.0 已发布）
 
 - [x] [T1] 插件骨架与元数据：`plugins.v2/siteratiolimiter/__init__.py` 类、plugin_* 字段、get_state/get_command/get_api @done
 - [x] [T2] 配置与表单：get_form（启用/立即运行/通知渠道/下载器(qb)/站点筛选/全局分享率下限、上限/上传速度/站点单独阈值文本）+ 规范化工具 @done
@@ -20,5 +27,5 @@
 
 ## 进度统计
 
-完成：9 / 9
+完成：13 / 13（v1.0.0 已发布，v1.1.0 待发布）
 更新时间：2026-08-22
