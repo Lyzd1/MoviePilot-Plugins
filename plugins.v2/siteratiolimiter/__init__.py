@@ -64,7 +64,7 @@ class SiteRatioLimiter(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.3.1"
+    plugin_version = "1.3.2"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -443,7 +443,11 @@ class SiteRatioLimiter(_PluginBase):
         for service_name, service_info in services.items():
             downloader = service_info.instance
             downloader_type = getattr(service_info, "type", "")
-            by_site, _ = self._torrents_by_site(service_name, downloader)
+            by_site, torrents = self._torrents_by_site(service_name, downloader)
+            # 清理已不在下载器中的种子记录（已删除的种子），避免兜底重试/恢复记录无限驻留
+            current_hashes = {self._torrent_hash(t) for t in torrents if self._torrent_hash(t)}
+            self._limited_hashes.get(service_name, set()).intersection_update(current_hashes)
+            self._restore_hashes.get(service_name, set()).intersection_update(current_hashes)
             # 执行动作：仅当 apply=True 时才调用限速/取消限速接口
             if apply:
                 for name in managed_names:
@@ -554,8 +558,10 @@ class SiteRatioLimiter(_PluginBase):
 
     def _apply_site_limits(self, service_name: str, downloader: Any, site_name: str, torrents: List[Any], limit: float, force: bool = False) -> int:
         """
-        对指定站点「正常」档位的种子设置上传限速：
-        - force=False（常规）：仅对当前未限速（up_limit=0）的种子设置限速，已限速的种子跳过；
+        对指定站点「达到上限」档位的种子设置上传限速：
+        - force=False（常规）：仅对当前未限速（up_limit=0）的种子调用接口设置限速；
+          已限速（up_limit>0）的种子跳过接口调用，但仍登记为「本插件维护限速中」，
+          避免兜底恢复重试把本应保持限速的种子误恢复为不限速（防止限速抖动）；
         - force=True（上传限速大小变化）：当前值已等于目标值的跳过，其余（0 或旧值）按目标值刷新。
         """
         applied = 0
@@ -569,10 +575,12 @@ class SiteRatioLimiter(_PluginBase):
             if force:
                 # 上传限速大小变化：仅需要调整的种子才调用接口
                 if abs(current_kb - target) < 1:
+                    limited.add(torrent_hash)  # 当前值已等于目标：登记为限速中，跳过接口调用
                     continue
             else:
-                # 常规：已限速（含外部设置的限速）不重复干预
+                # 常规：已限速（含外部限速与本插件历史限速）不重复干预，但登记为限速中
                 if current_kb > 0:
+                    limited.add(torrent_hash)
                     continue
             try:
                 ok = downloader.change_torrent(hash_string=torrent_hash, upload_limit=target)
