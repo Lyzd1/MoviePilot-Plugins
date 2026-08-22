@@ -4,7 +4,15 @@
 > 解析约定：
 > - 每行一个任务：`- [ ]`（未完成）或 `- [x]`（已完成），后跟任务编号 `[T编号]` 与描述；
 > - 行尾显式状态标记 `@pending` / `@in_progress` / `@done` / `@blocked`（与复选框保持一致）；
-> - 目标版本 v1.3.2（`package.v2.json` 的 version 与插件类 `plugin_version` 必须一致）。
+> - 目标版本 v1.5.0（`package.v2.json` 的 version 与插件类 `plugin_version` 必须一致）。
+
+## 任务清单（v1.5.0 迭代）
+
+- [x] [T30] 移除通知功能后修复半成品编辑导致的语法/引用断裂（init_plugin / on_site_refreshed / _process_site_ratios / get_form 中残留的 notify 参数与 notify_items），删除 _send_message / _build_low_text / _build_high_text / _normalize_channels / _NOTIFY_TYPE_MAP，版本 v1.4.0 已发布（commit `6ea51e1`） @done
+- [x] [T31] 新增定时扫描下载器新增种子功能：配置项 scan_enable / scan_cron（cron 表达式，与辅种定时任务同一调度体系）/ scan_onlyonce（立即扫描一次）；get_service() 注册 CronTrigger 定时任务，scan_onlyonce 用 BackgroundScheduler date 任务延迟 3 秒执行后自动复位 @done
+- [x] [T32] 扫描逻辑 scan_new_torrents：与上次扫描快照（持久化 scanned_hashes）对比识别新增种子（覆盖手动添加/其他工具辅种等非 MoviePilot 下载事件来源）；识别站点且档位「达到上限」且未限速 -> 按现有规则自动限速；已限速登记跳过；未识别站点记录 warning 日志（种子名/hash/tracker/标签/分类）；汇总结果写日志，不发送通知 @done
+- [x] [T33] 表单/配置同步：get_form 增加定时扫描开关 + VCronField 执行周期 + 立即扫描开关；_current_config 同步 scan 配置项；README / package.v2.json description / history / 版本号 v1.5.0 同步 @done
+- [x] [T34] 校验与发布：py_compile / JSON / 版本一致性校验，git commit 并 push 到 github（origin main） @done
 
 ## 任务清单（v1.3.2 迭代）
 
@@ -51,5 +59,5 @@
 
 ## 进度统计
 
-完成：25 / 25（v1.0.0 ~ v1.3.2 均已发布）
+完成：34 / 34（v1.0.0 ~ v1.5.0 均已发布）
 更新时间：2026-08-22

@@ -24,9 +24,17 @@
    - 档位在中间区间 -> 保持现状，不调用限速接口；
    - 保存配置时：仅当修改了上传限速大小、或修改阈值导致档位变化、或站点/下载器范围变化时
      才调用接口调整限速，否则只刷新状态与统计，不产生限速 API 调用；
-5. 详情面板：展示每个配置站点的账号分享率、阈值（下限-上限）与档位状态（供下载时判定），
+5. 定时扫描下载器新增种子（与辅种定时任务相同的 cron 调度体系）：
+   - 按配置的执行周期（cron 表达式）自动扫描所选下载器，与上次扫描快照对比
+     找出「新增种子」（涵盖手动添加、其他工具辅种等非 MoviePilot 下载事件来源）；
+   - 新增种子识别到所属站点且该站档位为「达到上限」且未限速 -> 按现有规则自动限速；
+     已被限速的种子登记跳过、档位未达上限或不在筛选范围的种子跳过；
+   - 无法识别站点的种子写入 warning 日志（种子名 / hash / tracker / 标签 / 分类），
+     用于排查「同一站点部分种子识别不到」的问题；汇总结果记录在日志，不发送通知；
+   - 支持「立即扫描一次」按钮（保存配置后执行，随后自动复位）；
+6. 详情面板：展示每个配置站点的账号分享率、阈值（下限-上限）与档位状态（供下载时判定），
    以及该站已限速种子数，不再展示种子级明细；
-6. 停用/卸载时自动将本插件限速过的种子恢复为不限速（跨会话持久化 + 失败兜底重试）。
+7. 停用/卸载时自动将本插件限速过的种子恢复为不限速（跨会话持久化 + 失败兜底重试）。
 """
 
 import datetime
@@ -36,6 +44,7 @@ from urllib.parse import urlparse
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
 from app.core.event import Event, eventmanager
@@ -59,11 +68,11 @@ class SiteRatioLimiter(_PluginBase):
     # 插件名称
     plugin_name = "站点分享率上传限速"
     # 插件描述
-    plugin_desc = "基于站点账号分享率与分享率上下限自动管理 qBittorrent 种子上传限速：低于下限取消限速并保持到达到上限，达到上限恢复限速并保持到低于下限，中间区间保持现状防波动；下载种子时按插件维护的站点档位状态限速。"
+    plugin_desc = "基于站点账号分享率与分享率上下限自动管理 qBittorrent 种子上传限速：低于下限取消限速并保持到达到上限，达到上限恢复限速并保持到低于下限，中间区间保持现状防波动；下载种子时按插件维护的站点档位状态限速；支持定时扫描下载器新增种子（手动添加/辅种等非 MoviePilot 下载事件来源），识别站点并按档位自动限速，未识别种子记录日志。"
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.4.0"
+    plugin_version = "1.5.0"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -104,8 +113,15 @@ class SiteRatioLimiter(_PluginBase):
     _site_confs: Dict[str, Tuple[float, float]] = {}
     # 上传速度 KB/s，0 表示不做限速处理
     _upload_limit = 2000
+    # 定时扫描下载器新增种子：启用开关 / 执行周期（cron 表达式，与辅种定时任务保持一致）/ 立即扫描一次
+    _scan_enable = False
+    _scan_cron = ""
+    _scan_onlyonce = False
 
     # ---- 运行时状态 ----
+    _scan_scheduler = None
+    # 上次扫描时各下载器的种子 hash 快照 {下载器名称: {种子Hash}}，跨会话持久化
+    _scanned_hashes: Dict[str, Set[str]] = {}
     _retry_scheduler = None
     _retry_attempts = 0
     _MAX_RESTORE_RETRY = 60
@@ -128,6 +144,7 @@ class SiteRatioLimiter(_PluginBase):
     _RESTORE_DATA_KEY = "restore_hashes"
     _SITE_STATES_KEY = "site_states"
     _SIG_KEY = "config_signature"
+    _SCANNED_HASHES_KEY = "scanned_hashes"
 
     # ---------------------------------------------------------------- 生命周期
 
@@ -143,6 +160,7 @@ class SiteRatioLimiter(_PluginBase):
         was_enabled = self._enabled
         old_downloaders = self._downloaders or []
         self._stop_restore_retry(wait=True)
+        self._stop_scan_scheduler()
 
         config = config or {}
         self._enabled = bool(config.get("enabled"))
@@ -155,6 +173,9 @@ class SiteRatioLimiter(_PluginBase):
             self._ratio_lower, self._ratio_upper = 1.0, 5.0
         self._site_confs, self._site_conf_text = self._normalize_site_confs(config.get("site_confs"))
         self._upload_limit = max(self._to_int(config.get("upload_limit"), 2000), 0)
+        self._scan_enable = bool(config.get("scan_enable"))
+        self._scan_cron = str(config.get("scan_cron") or "").strip()
+        self._scan_onlyonce = bool(config.get("scan_onlyonce"))
 
         # 站点映射（域名/名称）只构建一次
         self._site_domains = self._load_site_domains()
@@ -169,6 +190,8 @@ class SiteRatioLimiter(_PluginBase):
 
         # 加载跨会话持久化的待恢复记录、站点档位状态与上次生效的配置签名
         self._restore_hashes = self._load_set_map(self._RESTORE_DATA_KEY)
+        # 上次扫描快照（用于定时扫描识别「新增种子」）
+        self._scanned_hashes = self._load_set_map(self._SCANNED_HASHES_KEY)
         try:
             raw_states = self.get_data(self._SITE_STATES_KEY) or {}
             self._site_states = {
@@ -245,8 +268,66 @@ class SiteRatioLimiter(_PluginBase):
         # 持久化待恢复记录（恢复失败项保留）
         self._save_set_map(self._RESTORE_DATA_KEY, self._restore_hashes)
 
+        # 立即扫描一次（保存配置时勾选「立即扫描」开关）：延迟 3 秒执行，避免与基线流程重叠
+        if self._scan_onlyonce:
+            self._scan_onlyonce = False
+            try:
+                self.update_config(self._current_config())
+            except Exception:
+                pass
+            logger.info(f"{self.LOG_TAG}已勾选「立即扫描下载器新增种子」，将在 3 秒后执行")
+            self._start_scan_once()
+
+    def _start_scan_once(self):
+        """启动一次性的下载器新增种子扫描任务（与定时任务共用扫描逻辑）。"""
+        try:
+            self._stop_scan_scheduler()
+            self._scan_scheduler = BackgroundScheduler(timezone=settings.TZ)
+            self._scan_scheduler.add_job(
+                func=self.scan_new_torrents,
+                trigger="date",
+                run_date=datetime.datetime.now(tz=pytz.timezone(settings.TZ)) + datetime.timedelta(seconds=3),
+                name="站点分享率上传限速-立即扫描",
+            )
+            self._scan_scheduler.start()
+        except Exception as err:
+            logger.error(f"{self.LOG_TAG}启动立即扫描任务失败：{err}")
+
+    def _stop_scan_scheduler(self):
+        """停止立即扫描任务（定时任务由 MoviePilot 系统调度，无需在此维护）。"""
+        try:
+            if getattr(self, "_scan_scheduler", None):
+                if self._scan_scheduler.running:
+                    self._scan_scheduler.shutdown(wait=False)
+                self._scan_scheduler = None
+        except Exception as err:
+            logger.error(f"{self.LOG_TAG}停止立即扫描任务失败：{err}")
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        """
+        注册定时扫描服务：按配置的 cron 表达式周期扫描所选下载器中的新增种子
+        （识别站点 + 按档位自动限速），与辅种定时任务保持同一调度体系。
+        """
+        if self._enabled and self._scan_enable and self._scan_cron:
+            try:
+                trigger = CronTrigger.from_crontab(self._scan_cron)
+            except Exception as err:
+                logger.error(f"{self.LOG_TAG}定时扫描 cron 表达式无效：{err}")
+                return []
+            return [
+                {
+                    "id": "SiteRatioLimiterScan",
+                    "name": "扫描下载器新增种子",
+                    "trigger": trigger,
+                    "func": self.scan_new_torrents,
+                    "kwargs": {},
+                }
+            ]
+        return []
+
     def stop_service(self):
         """停止插件；停用或卸载插件时自动将已限速种子恢复为不限速。"""
+        self._stop_scan_scheduler()
         try:
             self._restore_limits()
         except Exception as err:
@@ -504,6 +585,147 @@ class SiteRatioLimiter(_PluginBase):
                 logger.error(f"{self.LOG_TAG}[{service_name}] 定位种子 [{download_hash}] 失败：{err}")
         logger.warning(f"{self.LOG_TAG}种子 [{download_hash}] 未在已选下载器中发现（可能尚未添加完成），跳过")
         return False
+
+    def scan_new_torrents(self):
+        """
+        定时/立即扫描所选下载器中的「新增种子」（与上次扫描快照对比，跨会话持久化）：
+
+        - 识别每个新增种子所属站点（下载历史 -> tracker 域名 -> 标签 -> 分类）；
+        - 识别到站点且该站档位为「达到上限」且种子未限速 -> 复用现有规则自动限速；
+          已被限速的种子登记为「本插件维护限速中」跳过接口调用（防抖动/防误恢复）；
+        - 无法识别站点的种子记录 warning 日志（种子名/hash/tracker/标签/分类），
+          并统计到汇总日志，便于排查「同一站点部分种子识别不到」的问题；
+        - 扫描完成后更新并持久化扫描快照，下次只处理新增种子。
+
+        运行方式：MoviePilot 系统调度（get_service 注册的 cron 定时任务）
+        或「立即扫描」一次性任务（BackgroundScheduler date 任务）。
+        """
+        if not self._enabled:
+            logger.info(f"{self.LOG_TAG}插件未启用，跳过下载器种子扫描")
+            return
+        logger.info(f"{self.LOG_TAG}开始扫描下载器新增种子 ...")
+
+        services = self._get_services()
+        if not services:
+            logger.warning(f"{self.LOG_TAG}扫描失败：没有可用的 qBittorrent 下载器")
+            return
+
+        # 上次扫描快照 {下载器: {hash}}，首次为空时全部种子视为新增
+        last_scanned = {name: set(hash_list) for name, hash_list in (self._scanned_hashes or {}).items()}
+        # 本轮扫描快照 {下载器: {hash}}：先保留本次未参与扫描的下载器旧快照，避免断连期被清空后误判
+        current_scanned: Dict[str, Set[str]] = {name: set(hash_list) for name, hash_list in last_scanned.items()}
+        # 汇总统计
+        total_new = 0
+        identified = 0
+        unidentified = 0
+        limited_new = 0
+        already_limited = 0
+        skipped = 0
+
+        for service_name, service_info in services.items():
+            downloader = service_info.instance
+            downloader_type = getattr(service_info, "type", "")
+            try:
+                torrents, error = downloader.get_torrents()
+            except Exception as err:
+                logger.error(f"{self.LOG_TAG}[{service_name}] 获取种子列表失败：{err}")
+                continue
+            if error:
+                logger.warning(f"{self.LOG_TAG}[{service_name}] 获取种子列表失败")
+                continue
+            torrents = torrents or []
+            current_hashes = {self._torrent_hash(t) for t in torrents if self._torrent_hash(t)}
+            current_scanned[service_name] = current_hashes
+            # 新增种子 = 当前快照 - 上次快照
+            new_hashes = current_hashes - (last_scanned.get(service_name) or set())
+            if not new_hashes:
+                logger.info(f"{self.LOG_TAG}[{service_name}] 无新增种子（当前共 {len(current_hashes)} 个）")
+                continue
+            new_torrents = [t for t in torrents if self._torrent_hash(t) in new_hashes]
+            total_new += len(new_torrents)
+            logger.info(f"{self.LOG_TAG}[{service_name}] 扫描到 {len(new_torrents)} 个新增种子，开始识别站点 ...")
+
+            # 站点识别：批量查询一次下载历史（新增种子）
+            history_sites = self._load_history_sites(list(new_hashes))
+            site_cache: Dict[str, str] = {}
+            for torrent in new_torrents:
+                torrent_hash = self._torrent_hash(torrent)
+                torrent_name = self._torrent_name(torrent) or torrent_hash
+                # 识别站点（下载历史 -> tracker 域名 -> 标签 -> 分类）
+                site = self._resolve_site(torrent, torrent_hash, history_sites, site_cache)
+                if not site:
+                    unidentified += 1
+                    logger.warning(
+                        f"{self.LOG_TAG}[{service_name}] 新增种子未识别到站点：{torrent_name}"
+                        f"（hash={torrent_hash}，tracker={self._torrent_tracker_urls(torrent) or '无'}，"
+                        f"标签={self._torrent_tags(torrent) or '无'}，分类={self._torrent_category(torrent) or '无'}）"
+                    )
+                    continue
+                identified += 1
+                # 站点筛选：勾选了站点且不属于所选站点时跳过
+                selected = self._selected_sites()
+                if selected and site.lower() not in selected:
+                    skipped += 1
+                    logger.info(f"{self.LOG_TAG}[{service_name}] 新增种子 {torrent_name} 站点 {site} 不在筛选范围，跳过")
+                    continue
+                # 复用现有规则：仅当站点档位为「达到上限」且种子未限速时自动限速
+                stats = self._site_stats.get(site) or self._site_stats.get(site.lower()) or {}
+                state = stats.get("state")
+                if state != self._STATE_HIGH:
+                    ratio = stats.get("ratio")
+                    ratio_text = f"{ratio:g}" if ratio is not None else "无数据"
+                    skipped += 1
+                    logger.info(
+                        f"{self.LOG_TAG}[{service_name}] 新增种子 {torrent_name} 站点 {site} 档位："
+                        f"{self._STATE_LABELS.get(state or self._STATE_UNKNOWN)}（分享率 {ratio_text}），不做限速"
+                    )
+                    continue
+                if self._upload_limit <= 0:
+                    skipped += 1
+                    logger.info(f"{self.LOG_TAG}上传速度为 0（不做限速处理），新增种子 [{torrent_name}] 跳过")
+                    continue
+                # 已被限速（含外部限速）：登记为「本插件维护限速中」，跳过接口调用（防误恢复）
+                if self._torrent_current_limit_kb(torrent) > 0:
+                    already_limited += 1
+                    self._limited_hashes.setdefault(service_name, set()).add(torrent_hash)
+                    logger.info(f"{self.LOG_TAG}[{service_name}] 新增种子 {torrent_name} 站点 {site} 已被限速，登记跳过")
+                    continue
+                # 站点档位达到上限且未限速：设置上传限速
+                limit = self._effective_upload_limit(downloader, downloader_type, self._upload_limit)
+                if limit <= 0:
+                    skipped += 1
+                    continue
+                try:
+                    ok = downloader.change_torrent(hash_string=torrent_hash, upload_limit=int(limit))
+                except Exception as err:
+                    ok = False
+                    logger.error(f"{self.LOG_TAG}[{service_name}] 新增种子 [{torrent_name}] 设置上传限速失败：{err}")
+                if ok:
+                    self._limited_hashes.setdefault(service_name, set()).add(torrent_hash)
+                    self._restore_hashes.setdefault(service_name, set()).add(torrent_hash)
+                    limited_new += 1
+                    # 同步站点统计的限速计数
+                    site_stats = self._site_stats.setdefault(site, {})
+                    site_stats["limited"] = site_stats.get("limited", 0) + 1
+                    site_stats["total"] = site_stats.get("total", 0) + 1
+                    logger.info(
+                        f"{self.LOG_TAG}[{service_name}] 新增种子 {torrent_name} 站点 {site} 档位达到上限，"
+                        f"已限速 {self._format_limit(limit)}"
+                    )
+                else:
+                    skipped += 1
+            # 持久化待恢复记录（新增限速的种子）
+            self._save_set_map(self._RESTORE_DATA_KEY, self._restore_hashes)
+
+        # 更新并持久化扫描快照
+        self._scanned_hashes = current_scanned
+        self._save_set_map(self._SCANNED_HASHES_KEY, self._scanned_hashes)
+
+        logger.info(
+            f"{self.LOG_TAG}扫描完成：新增 {total_new} 个种子，识别站点 {identified} 个，"
+            f"未识别站点 {unidentified} 个，自动限速 {limited_new} 个，已限速跳过 {already_limited} 个，"
+            f"不做处理 {skipped} 个"
+        )
 
     def _cancel_site_limits(self, service_name: str, downloader: Any, site_name: str, torrents: List[Any]) -> int:
         """取消指定站点所有种子的上传速度上限（恢复不限速）。"""
@@ -1022,12 +1244,15 @@ class SiteRatioLimiter(_PluginBase):
             "ratio_upper_limit": self._ratio_upper,
             "site_confs": self._site_conf_text,
             "upload_limit": self._upload_limit,
+            "scan_enable": self._scan_enable,
+            "scan_cron": self._scan_cron,
+            "scan_onlyonce": self._scan_onlyonce,
         }
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """
         插件设置表单：
-        第一行：启用插件；
+        第一行：启用插件 / 定时扫描下载器新增种子（启用开关 + 执行周期 + 立即扫描一次）；
         第二行：下载器（多选，仅 qBittorrent）/ 站点（多选，按站点筛选）；
         第三行：全局分享率下限 / 全局分享率上限 / 上传速度（KB/s）；
         第四行：按站点单独分享率阈值（站点=下限,上限）；
@@ -1078,14 +1303,65 @@ class SiteRatioLimiter(_PluginBase):
                             },
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "scan_enable",
+                                            "label": "定时扫描下载器新增种子",
+                                            "hint": "开启后按下方执行周期自动扫描所选下载器中的新增种子（与上次扫描快照对比）：识别所属站点并按现有档位规则自动限速，未识别站点的种子记录日志（不在筛选范围/档位未达上限的跳过）。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "scan_onlyonce",
+                                            "label": "立即扫描一次",
+                                            "hint": "保存配置后立即扫描一次下载器新增种子（与定时任务共用同一套扫描逻辑），扫描完成后自动复位关闭。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12, "md": 8},
+                                "content": [
+                                    {
+                                        "component": "VCronField",
+                                        "props": {
+                                            "model": "scan_cron",
+                                            "label": "扫描执行周期（cron）",
+                                            "placeholder": "0 0 0 ? *",
+                                            "hint": "cron 表达式，默认定时扫描下载器新增种子；建议与辅种定时任务保持一致。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VAlert",
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "本插件不发送任何通知；站点分享率档位变化、限速/取消限速动作均记录在 MoviePilot 日志中。",
+                                            "text": "本插件不发送任何通知；扫描结果（新增/未识别/已限速种子）均记录在 MoviePilot 日志中。",
                                         },
                                     }
                                 ],
