@@ -1,27 +1,33 @@
 """
 站点分享率上传限速插件（MoviePilot V2）
 
-基于「站点账号分享率」与配置的分享率下限自动管理 qBittorrent 种子的上传限速。
+基于「站点账号分享率」与配置的分享率下限/上限，带滞回地管理 qBittorrent 种子的上传限速。
+
+档位与滞回规则（防止限速波动）：
+1. 分享率 <= 下限 -> 🔻 低于下限：取消该站所有种子的上传速度上限；
+   此后保持不限速，直到分享率 > 上限（而不是一到下限之上就立刻限速）；
+2. 分享率 > 上限 -> 🔺 达到上限：将该站未限速的种子批量设置上传限速；
+   此后保持限速，直到分享率 <= 下限（而不是一降到上限之下就立刻取消限速）；
+3. 处于（下限, 上限] 中间区间 -> ⏸ 中间区间：不修改档位状态、不做任何限速调整
+   （从哪边进入就维持哪边的状态，防止档位抖动导致的频繁限速/取消限速）。
 
 功能：
-1. 全局设置分享率下限，并可对每个站点单独设置（未配置的站点回退全局值）；
-2. 插件内部维护每个站点的分享率档位状态（🔻 低于下限 / ✅ 正常 / ⚪ 无数据），
-   档位仅两档：分享率 <= 下限为「低于下限」，其余一律为「正常」；
-   正常站点的种子全部限速，低于下限的站点取消限速；
-3. 该状态由「站点数据统计」插件的分享率刷新事件（SiteRefreshed，全站刷新完成 site_id == *）更新，
-   启用插件时做一次静默基线（不通知）；
-4. 监听下载种子事件（DownloadAdded）：直接从插件内部维护的站点状态读取当前档位，
-   站点档位为「正常」时立即限制该种子上传速度（KB/s），否则不做任何操作
+1. 全局设置分享率下限/上限，并可对每个站点单独设置（未配置的站点回退全局值）；
+2. 插件内部维护每个站点的档位状态，由「站点数据统计」插件的分享率刷新事件
+   （SiteRefreshed，全站刷新完成 site_id == *）更新，启用插件时做一次静默基线（不通知）；
+3. 监听下载种子事件（DownloadAdded）：直接从插件内部维护的站点状态读取当前档位，
+   仅当站点档位为「达到上限」时立即限制该种子上传速度（KB/s），否则不做任何操作
    （不在下载时实时查询 MoviePilot 站点数据，数据来源为插件维护的站点状态）；
-5. 站点分享率刷新事件：
-   - 档位降到「低于下限」 -> 取消该站所有种子在 qBittorrent 中的上传速度上限；
-   - 档位为「正常」 -> 将该站当前未限速的种子批量设置上传限速；
-   - 站点档位发生变化时才发送通知（分享率过低 / 恢复限速）；
-   - 保存配置时：仅当修改了上传限速大小、或修改阈值导致档位变化、或下载器/站点范围变化时
+4. 站点分享率刷新事件：
+   - 档位变化到「低于下限」 -> 取消该站种子的上传速度上限；
+   - 档位变化到「达到上限」 -> 将该站当前未限速的种子批量设置上传限速；
+   - 档位在中间区间 -> 保持现状，不调用限速接口；
+   - 站点档位发生变化时才发送通知（分享率过低 / 达到上限）；
+   - 保存配置时：仅当修改了上传限速大小、或修改阈值导致档位变化、或站点/下载器范围变化时
      才调用接口调整限速，否则只刷新状态与统计，不产生限速 API 调用；
-6. 详情面板：展示每个配置站点的账号分享率与档位状态（供下载时判定），
+5. 详情面板：展示每个配置站点的账号分享率、阈值（下限-上限）与档位状态（供下载时判定），
    以及该站已限速种子数，不再展示种子级明细；
-7. 停用/卸载时自动将本插件限速过的种子恢复为不限速（跨会话持久化 + 失败兜底重试）。
+6. 停用/卸载时自动将本插件限速过的种子恢复为不限速（跨会话持久化 + 失败兜底重试）。
 """
 
 import datetime
@@ -46,22 +52,23 @@ class SiteRatioLimiter(_PluginBase):
     """
     站点分享率上传限速插件。
 
-    以「站点账号分享率」与配置的分享率下限为决策依据，事件驱动地管理
-    qBittorrent 种子的上传限速，并在详情面板展示每个站点的分享率与档位状态。
+    以「站点账号分享率」与配置的下限/上限为决策依据，带滞回地管理
+    qBittorrent 种子的上传限速：低于下限取消限速、达到上限恢复限速、
+    中间区间保持现状，并在详情面板展示每个站点的分享率与档位状态。
     """
 
     # 插件名称
     plugin_name = "站点分享率上传限速"
     # 插件描述
-    plugin_desc = "基于站点账号分享率与分享率下限自动管理 qBittorrent 种子上传限速：档位仅两档，低于下限取消限速、其余正常站点全部限速；下载种子时按插件维护的站点档位状态限速；档位变化时通知。"
+    plugin_desc = "基于站点账号分享率与分享率上下限自动管理 qBittorrent 种子上传限速：低于下限取消限速并保持到达到上限，达到上限恢复限速并保持到低于下限，中间区间保持现状防波动；下载种子时按插件维护的站点档位状态限速；档位变化时通知。"
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     # 插件作者
-    plugin_author = "Guo1"
+    plugin_author = "Lyzd1"
     # 作者主页
-    author_url = "https://github.com/Guo1"
+    author_url = "https://github.com/Lyzd1"
     # 插件配置项ID前缀
     plugin_config_prefix = "siteratiolimiter_"
     # 加载顺序
@@ -71,14 +78,16 @@ class SiteRatioLimiter(_PluginBase):
 
     LOG_TAG = "[站点分享率上传限速] "
 
-    # ---- 站点档位状态（仅两档 + 无数据） ----
-    _STATE_LOW = "low"          # 分享率 <= 下限：取消限速
-    _STATE_NORMAL = "normal"    # 分享率 > 下限：全部限速
+    # ---- 站点档位状态（滞回三档 + 无数据） ----
+    _STATE_LOW = "low"          # 分享率 <= 下限：取消限速，并保持到分享率 > 上限
+    _STATE_NORMAL = "normal"    # 中间区间（下限, 上限]：保持现状，不调整
+    _STATE_HIGH = "high"        # 分享率 > 上限：限速，并保持到分享率 <= 下限
     _STATE_UNKNOWN = "unknown"  # 无分享率数据
 
     _STATE_LABELS = {
         "low": "🔻 低于下限",
-        "normal": "✅ 正常",
+        "normal": "⏸ 中间区间",
+        "high": "🔺 达到上限",
         "unknown": "⚪ 无数据",
     }
 
@@ -90,11 +99,12 @@ class SiteRatioLimiter(_PluginBase):
     _downloaders: List[str] = []
     # 已选择的站点名称，为空表示管理所有活动站点
     _sites: List[str] = []
-    # 全局分享率下限（正数，最多 1 位小数）；档位：<= 下限为低于下限，否则正常
+    # 全局分享率下限/上限（正数，最多 1 位小数，上限需 >= 下限）
     _ratio_lower = 1.0
-    # 按站点单独阈值文本（每行「站点=下限」）与解析结果 {站名小写: 下限}
+    _ratio_upper = 5.0
+    # 按站点单独阈值文本（每行「站点=下限,上限」）与解析结果 {站名小写: (下限, 上限)}
     _site_conf_text = ""
-    _site_confs: Dict[str, float] = {}
+    _site_confs: Dict[str, Tuple[float, float]] = {}
     # 上传速度 KB/s，0 表示不做限速处理
     _upload_limit = 2000
 
@@ -157,6 +167,10 @@ class SiteRatioLimiter(_PluginBase):
         self._downloaders = self._normalize_config_list(config.get("downloaders"))
         self._sites = self._normalize_config_list(config.get("sites"))
         self._ratio_lower = self._to_ratio(config.get("ratio_lower_limit"), 1.0)
+        self._ratio_upper = self._to_ratio(config.get("ratio_upper_limit"), 5.0)
+        if self._ratio_upper < self._ratio_lower:
+            logger.warning(f"{self.LOG_TAG}分享率上限小于下限，已重置为默认值（下限 1.0 / 上限 5.0）")
+            self._ratio_lower, self._ratio_upper = 1.0, 5.0
         self._site_confs, self._site_conf_text = self._normalize_site_confs(config.get("site_confs"))
         self._upload_limit = max(self._to_int(config.get("upload_limit"), 2000), 0)
 
@@ -178,7 +192,7 @@ class SiteRatioLimiter(_PluginBase):
             self._site_states = {
                 str(name): str(state)
                 for name, state in raw_states.items()
-                if name and state in (self._STATE_LOW, self._STATE_NORMAL, self._STATE_UNKNOWN)
+                if name and state in (self._STATE_LOW, self._STATE_NORMAL, self._STATE_HIGH, self._STATE_UNKNOWN)
             } if isinstance(raw_states, dict) else {}
         except Exception as err:
             logger.error(f"{self.LOG_TAG}读取持久化站点状态失败：{err}")
@@ -277,7 +291,8 @@ class SiteRatioLimiter(_PluginBase):
     def on_download_added(self, event: Event = None):
         """
         下载种子事件：直接读取插件内部维护的站点档位状态，
-        站点档位为「正常」（分享率 > 下限）时立即限制该种子的上传速度，否则不做任何操作。
+        仅当站点档位为「达到上限」（分享率 > 上限）时立即限制该种子的上传速度，
+        低于下限/中间区间/无数据均不做任何操作。
         """
         if not self._enabled:
             return
@@ -306,7 +321,7 @@ class SiteRatioLimiter(_PluginBase):
         # 直接从插件内部站点状态判定（不实时查询站点数据）
         stats = self._site_stats.get(site_name) or self._site_stats.get(site_name.lower())
         state = (stats or {}).get("state")
-        if state != self._STATE_NORMAL:
+        if state != self._STATE_HIGH:
             ratio = (stats or {}).get("ratio")
             ratio_text = f"{ratio:g}" if ratio is not None else "无数据"
             logger.info(
@@ -315,7 +330,7 @@ class SiteRatioLimiter(_PluginBase):
             )
             return
 
-        # 站点档位为正常（分享率高于下限）：直接限制该种子上传速度
+        # 站点档位为达到上限（分享率高于上限）：直接限制该种子上传速度
         if self._upload_limit <= 0:
             logger.info(f"{self.LOG_TAG}上传速度为 0（不做限速处理），种子 [{download_hash}] 跳过")
             return
@@ -342,10 +357,13 @@ class SiteRatioLimiter(_PluginBase):
 
     def _process_site_ratios(self, notify: bool = True, apply: bool = True, force: bool = False):
         """
-        刷新站点账号分享率快照，重算每个管理站点的档位状态（仅两档）：
-        - 分享率 <= 下限 -> 🔻 低于下限：取消该站种子的上传限速；
-        - 分享率 > 下限  -> ✅ 正常：将该站未限速种子批量补限速（force=True 时按新值刷新已限速种子）；
-        - 档位发生变化（且非首次基线）时按变化方向发送通知；
+        刷新站点账号分享率快照，重算每个管理站点的档位状态（带滞回的三档）：
+        - 分享率 <= 下限 -> 🔻 低于下限：取消该站种子的上传限速，并保持到分享率 > 上限；
+        - 分享率 > 上限  -> 🔺 达到上限：将该站未限速种子批量补限速（force=True 时按新值刷新已限速种子），
+                           并保持到分享率 <= 下限；
+        - （下限, 上限] 中间区间 -> ⏸ 中间区间：保持原档位状态（从哪边进入维持哪边），不做任何限速调整，
+                           防止档位抖动导致频繁限速/取消限速；
+        - 档位跨边界发生变化（且非首次基线）时按变化方向发送通知；
         - 更新内部站点统计（供下载时判定与详情面板展示）。
 
         :param apply: 是否执行限速/取消限速动作；False 时仅刷新状态与统计（不调用限速接口）
@@ -368,13 +386,14 @@ class SiteRatioLimiter(_PluginBase):
             stats["total"] = 0
 
         for name in managed_names:
-            lower = self._site_thresholds(name)
+            lower, upper = self._site_thresholds(name)
             ratio = self._site_ratios.get(name)
             if ratio is None:
                 ratio = self._site_ratios.get(name.lower())
             updated = self._site_ratio_times.get(name) or self._site_ratio_times.get(name.lower())
             stats = self._site_stats.setdefault(name, {})
             stats["lower"] = lower
+            stats["upper"] = upper
             stats["ratio"] = ratio
             stats["updated"] = updated
             if ratio is None:
@@ -383,23 +402,28 @@ class SiteRatioLimiter(_PluginBase):
                 logger.info(f"{self.LOG_TAG}站点 {name} 无分享率数据（等待站点数据统计），保持原档位")
                 continue
 
-            # 仅两档：<= 下限为低于下限，其余全部为正常
+            # 带滞回的档位状态机：
+            # 跨过下限（<=）-> 低于下限；跨过上限（>）-> 达到上限；中间区间保持原档位（防波动）
+            prev_state = self._site_states.get(name)
             if ratio <= lower:
                 new_state = self._STATE_LOW
+            elif ratio > upper:
+                new_state = self._STATE_HIGH
             else:
-                new_state = self._STATE_NORMAL
+                # 中间区间：从哪边进入就维持哪边（LOW 保持不限速 / HIGH 保持限速），
+                # 无历史时进入中性「中间区间」态，不做任何调整
+                new_state = prev_state if prev_state in (self._STATE_LOW, self._STATE_HIGH) else self._STATE_NORMAL
             stats["state"] = new_state
 
-            prev_state = self._site_states.get(name)
-            # 仅当档位发生变化且不是首次基线（无历史状态）时通知
+            # 仅当档位跨边界变化且不是首次基线（无历史状态）时通知
             if notify and prev_state and prev_state != new_state and prev_state != self._STATE_UNKNOWN:
                 if new_state == self._STATE_LOW:
                     self._send_message(self._build_low_text(name, ratio, lower))
-                elif new_state == self._STATE_NORMAL:
-                    self._send_message(self._build_normal_text(name, ratio, lower))
+                elif new_state == self._STATE_HIGH:
+                    self._send_message(self._build_high_text(name, ratio, upper))
             new_states[name] = new_state
             logger.info(
-                f"{self.LOG_TAG}站点 {name} 分享率 {ratio:g}（下限 {lower:g}）"
+                f"{self.LOG_TAG}站点 {name} 分享率 {ratio:g}（阈值 {lower:g} - {upper:g}）"
                 f"档位：{self._STATE_LABELS.get(new_state)}（数据时间：{updated or '—'}）"
             )
 
@@ -429,7 +453,7 @@ class SiteRatioLimiter(_PluginBase):
                     if state == self._STATE_LOW:
                         canceled = self._cancel_site_limits(service_name, downloader, name, site_torrents)
                         summary.append(f"{service_name}：站点 {name} 取消限速 {canceled} 个种子")
-                    elif state == self._STATE_NORMAL:
+                    elif state == self._STATE_HIGH:
                         limit = self._effective_upload_limit(downloader, downloader_type, self._upload_limit)
                         if limit <= 0:
                             summary.append(f"{service_name}：站点 {name} 上传速度为 0，不执行限速")
@@ -438,6 +462,9 @@ class SiteRatioLimiter(_PluginBase):
                                 service_name, downloader, name, site_torrents, limit, force=force
                             )
                             summary.append(f"{service_name}：站点 {name} 限速 {applied} 个种子")
+                    else:
+                        # 中间区间：保持现状，不调用限速接口
+                        summary.append(f"{service_name}：站点 {name} 处于中间区间，保持现状不调整")
                 # 动作后重新拉取一次种子列表（限速值已刷新），避免用动作前的旧快照统计
                 by_site, _ = self._torrents_by_site(service_name, downloader)
             # 统计：已限速种子数按当前实际限速统计（含外部限速），作用于动作之后不受时序影响
@@ -575,12 +602,16 @@ class SiteRatioLimiter(_PluginBase):
             names = [name for name in names if name.lower() in selected]
         return names
 
-    def _site_thresholds(self, site_name: str) -> float:
-        """返回站点分享率下限；未配置单独阈值的站点使用全局值。"""
+    def _site_thresholds(self, site_name: str) -> Tuple[float, float]:
+        """返回站点分享率（下限, 上限）；未配置单独阈值的站点使用全局值。"""
         conf = self._site_confs.get(str(site_name or "").strip().lower())
         if conf:
-            return conf
-        return self._ratio_lower
+            lower, upper = conf
+            # 单独阈值未配置上限（旧版/单值配置）时继承全局上限
+            if upper <= 0:
+                upper = self._ratio_upper
+            return lower, upper
+        return self._ratio_lower, self._ratio_upper
 
     def _load_site_domains(self) -> Dict[str, str]:
         """构建 站点域名(小写) -> 站点名称 映射，用于识别种子所属站点。"""
@@ -855,11 +886,11 @@ class SiteRatioLimiter(_PluginBase):
 
     def _build_low_text(self, site_name: str, ratio: float, lower: float) -> str:
         return (f"**{site_name}** 分享率过低（当前 **{ratio:g}** ≤ 下限 **{lower:g}**），"
-                f"已取消该站所有种子的上传速度上限。")
+                f"已取消该站所有种子的上传速度上限（分享率达到上限前保持不限速）。")
 
-    def _build_normal_text(self, site_name: str, ratio: float, lower: float) -> str:
-        return (f"**{site_name}** 分享率已恢复到下限以上（当前 **{ratio:g}** > 下限 **{lower:g}**），"
-                f"已对该站未限速的种子新增上传限速。")
+    def _build_high_text(self, site_name: str, ratio: float, upper: float) -> str:
+        return (f"**{site_name}** 分享率已达到阈值上限（当前 **{ratio:g}** > 上限 **{upper:g}**），"
+                f"已对该站未限速的种子新增上传限速（分享率降到下限前保持限速）。")
 
     def _send_message(self, text: str) -> bool:
         """按配置的通知渠道发送消息。"""
@@ -1022,8 +1053,11 @@ class SiteRatioLimiter(_PluginBase):
         return {
             "upload_limit": self._upload_limit,
             "ratio_lower": self._ratio_lower,
-            # 站点单独阈值确定性排序：{站点小写: 下限}
-            "site_confs": sorted(f"{key}={value}" for key, value in self._site_confs.items()),
+            "ratio_upper": self._ratio_upper,
+            # 站点单独阈值确定性排序：{站点小写: 下限-上限}
+            "site_confs": sorted(
+                f"{key}={lower},{upper}" for key, (lower, upper) in self._site_confs.items()
+            ),
             "downloaders": sorted(self._downloaders),
             "sites": sorted(self._sites),
         }
@@ -1036,6 +1070,7 @@ class SiteRatioLimiter(_PluginBase):
             "downloaders": self._downloaders,
             "sites": self._sites,
             "ratio_lower_limit": self._ratio_lower,
+            "ratio_upper_limit": self._ratio_upper,
             "site_confs": self._site_conf_text,
             "upload_limit": self._upload_limit,
         }
@@ -1045,8 +1080,8 @@ class SiteRatioLimiter(_PluginBase):
         插件设置表单：
         第一行：启用插件 / 发送通知（多选渠道）；
         第二行：下载器（多选，仅 qBittorrent）/ 站点（多选，按站点筛选）；
-        第三行：全局分享率下限 / 上传速度（KB/s）；
-        第四行：按站点单独分享率下限（站点=下限）；
+        第三行：全局分享率下限 / 全局分享率上限 / 上传速度（KB/s）；
+        第四行：按站点单独分享率阈值（站点=下限,上限）；
         第五行：功能说明。
         """
         # 下载器下拉：MoviePilot 已配置并启用的 qBittorrent
@@ -1176,7 +1211,7 @@ class SiteRatioLimiter(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -1187,7 +1222,7 @@ class SiteRatioLimiter(_PluginBase):
                                             "type": "number",
                                             "min": 0.1,
                                             "step": 0.1,
-                                            "hint": "正数（>0），最多 1 位小数。档位仅两档：站点分享率小于等于该值时取消上传限速，大于该值时全部限速。",
+                                            "hint": "正数（>0），最多 1 位小数。分享率小于等于该值时取消上传限速，并保持到分享率超过上限。",
                                             "persistent-hint": True,
                                             "onKeydown": "function (e) { if (e.key === '-') { e.preventDefault(); } }",
                                         },
@@ -1196,7 +1231,27 @@ class SiteRatioLimiter(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "ratio_upper_limit",
+                                            "label": "分享率上限",
+                                            "placeholder": "分享率 > 上限时恢复限速",
+                                            "type": "number",
+                                            "min": 0.1,
+                                            "step": 0.1,
+                                            "hint": "正数（>0），最多 1 位小数，需大于等于下限。分享率大于该值时新增上传限速，并保持到分享率小于等于下限（滞回防波动）。",
+                                            "persistent-hint": True,
+                                            "onKeydown": "function (e) { if (e.key === '-') { e.preventDefault(); } }",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -1225,12 +1280,12 @@ class SiteRatioLimiter(_PluginBase):
                                         "component": "VTextarea",
                                         "props": {
                                             "model": "site_confs",
-                                            "label": "按站点单独分享率下限",
-                                            "placeholder": "一行一个，例如：\n馒头=0.8\nHDChina=1.0",
+                                            "label": "按站点单独分享率阈值",
+                                            "placeholder": "一行一个，例如：\n馒头=0.8,2.0\nHDChina=1.0,3.5",
                                             "rows": 3,
                                             "auto-grow": True,
                                             "clearable": True,
-                                            "hint": "格式：站点名称=分享率下限（正数>0，最多 1 位小数）。对应站点使用单独下限；未配置或无法识别站点时回退使用全局分享率下限。",
+                                            "hint": "格式：站点名称=分享率下限,分享率上限（正数>0，最多 1 位小数，上限需 >= 下限）。对应站点使用单独阈值；未配置或无法识别站点时回退使用全局分享率下限/上限。",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -1250,7 +1305,7 @@ class SiteRatioLimiter(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "数据来源：站点账号分享率由「站点数据统计」插件抓取，并通过分享率刷新事件（SiteRefreshed）同步到本插件内部状态。请提前安装并启用该插件。下载种子时本插件直接读取内部维护的站点档位状态判定是否限速（档位正常时限速，否则不操作）。",
+                                            "text": "数据来源：站点账号分享率由「站点数据统计」插件抓取，并通过分享率刷新事件（SiteRefreshed）同步到本插件内部状态。请提前安装并启用该插件。下载种子时本插件直接读取内部维护的站点档位状态判定是否限速（档位达到上限时限速，否则不操作）。",
                                         },
                                     }
                                 ],
@@ -1269,7 +1324,7 @@ class SiteRatioLimiter(_PluginBase):
                                         "props": {
                                             "type": "error",
                                             "variant": "tonal",
-                                            "text": "档位仅两档：分享率 <= 下限 -> 🔻 低于下限，取消该站所有种子的上传速度上限；分享率 > 下限 -> ✅ 正常，该站全部种子限速。档位发生变化时才发送通知。保存配置时仅在上传速度、阈值（导致档位变化）或站点/下载器范围变化时才调用接口调整限速。停用或卸载插件时自动恢复本插件限速过的种子上传速度。",
+                                            "text": "档位带滞回：分享率 <= 下限 -> 🔻 低于下限，取消该站所有种子的上传速度上限，并保持到分享率 > 上限；分享率 > 上限 -> 🔺 达到上限，新增上传限速，并保持到分享率 <= 下限；中间区间 -> ⏸ 保持现状，不调用限速接口（防止限速波动）。档位跨边界变化时才发送通知。保存配置时仅在上传速度、阈值（导致档位变化）或站点/下载器范围变化时才调用接口调整限速。停用或卸载插件时自动恢复本插件限速过的种子上传速度。",
                                         },
                                     }
                                 ],
@@ -1298,9 +1353,10 @@ class SiteRatioLimiter(_PluginBase):
             stats = self._site_stats.get(name) or {}
             ratio = stats.get("ratio")
             lower = stats.get("lower")
+            upper = stats.get("upper")
             state = stats.get("state") or self._STATE_UNKNOWN
             ratio_text = f"{ratio:g}" if ratio is not None else "—"
-            threshold_text = f"{lower:g}" if lower is not None else "—"
+            threshold_text = f"{lower:g} - {upper:g}" if lower is not None and upper is not None else "—"
             updated = str(stats.get("updated") or "").strip() or "—"
             limited = stats.get("limited") or 0
             total = stats.get("total") or 0
@@ -1346,7 +1402,7 @@ class SiteRatioLimiter(_PluginBase):
                                             {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '站点名称'},
                                             {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '账号分享率'},
                                             {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '数据日期'},
-                                            {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '分享率下限'},
+                                            {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '阈值（下限-上限）'},
                                             {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '档位状态'},
                                             {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '已限速种子'},
                                         ]
@@ -1362,18 +1418,17 @@ class SiteRatioLimiter(_PluginBase):
 
     # ---------------------------------------------------------------- 工具方法
 
-    def _normalize_site_confs(self, value: Any) -> Tuple[Dict[str, float], str]:
+    def _normalize_site_confs(self, value: Any) -> Tuple[Dict[str, Tuple[float, float]], str]:
         """
-        解析并规范化站点单独分享率下限文本。
+        解析并规范化站点单独分享率阈值文本。
 
-        表单使用每行「站点名称=分享率下限」格式；兼容冒号/中文冒号分隔。
-        兼容旧版「站点=下限,上限」格式：存在两个数值时取第一个作为下限并提示忽略上限。
+        表单使用每行「站点名称=分享率下限,分享率上限」格式；兼容冒号/中文冒号分隔。
+        兼容旧版单值「站点=下限」格式：仅配置下限，上限继承全局值（内部以 0 标记）。
         站点名称按小写匹配，重复站点以最后一项为准，非法项会被忽略。
         """
-        confs: Dict[str, float] = {}
+        confs: Dict[str, Tuple[float, float]] = {}
         labels: Dict[str, str] = {}
         invalid_count = 0
-        ignored_upper = 0
 
         for raw_line in str(value or "").splitlines():
             line = raw_line.strip()
@@ -1389,27 +1444,32 @@ class SiteRatioLimiter(_PluginBase):
             if not name or not parts:
                 invalid_count += 1
                 continue
-            if len(parts) == 2:
-                # 兼容旧版「站点=下限,上限」，仅取下限
-                ignored_upper += 1
-                parts = parts[:1]
-            elif len(parts) > 2:
+            if len(parts) == 1:
+                # 旧版单值格式：仅配置下限，上限继承全局
+                lower = self._to_ratio(parts[0], 0.0)
+                upper = 0.0
+            elif len(parts) == 2:
+                lower = self._to_ratio(parts[0], 0.0)
+                upper = self._to_ratio(parts[1], 0.0)
+            else:
                 invalid_count += 1
                 continue
-            lower = self._to_ratio(parts[0], 0.0)
-            if lower <= 0:
+            if lower <= 0 or upper < 0:
+                invalid_count += 1
+                continue
+            if upper > 0 and upper < lower:
+                logger.warning(f"{self.LOG_TAG}站点 {name} 分享率上限小于下限，已忽略该行：{line}")
                 invalid_count += 1
                 continue
             key = name.lower()
-            confs[key] = lower
+            confs[key] = (lower, upper)
             labels[key] = name
 
-        if ignored_upper:
-            logger.info(f"{self.LOG_TAG}站点单独分享率阈值中 {ignored_upper} 行包含旧版上限值，已忽略上限仅采用下限")
         if invalid_count:
             logger.warning(f"{self.LOG_TAG}站点单独分享率阈值中有 {invalid_count} 项格式无效，已忽略")
         normalized_text = "\n".join(
-            f"{labels[key]}={lower}" for key, lower in sorted(confs.items())
+            f"{labels[key]}={lower},{upper}" if upper > 0 else f"{labels[key]}={lower}"
+            for key, (lower, upper) in sorted(confs.items())
         )
         return confs, normalized_text
 
