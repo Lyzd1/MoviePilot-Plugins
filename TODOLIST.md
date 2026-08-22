@@ -16,9 +16,9 @@
 - [x] [T6] 限速/恢复统一封装：_limited/_restore 归属集合、跨会话持久化、停用/卸载恢复不限速、兜底恢复重试、状态变化通知 @done
 - [x] [T7] 详情面板 get_page：每个配置站点的分享率 + 相对上下限的档位状态（下载时判定依据）+ 种子限速标识表 @done
 - [x] [T8] 注册 `package.v2.json` 条目（末尾追加）+ README + py_compile/JSON 校验 + 代码自审 @done
-- [ ] [T9] 版本发布：版本号一致性复核，git commit + push 到 github（需先处理本机 git safe.directory / 凭据问题） @pending
+- [x] [T9] 版本发布：版本号一致性复核（1.0.0），git commit `085a28e` 并 push 到 github（origin main） @done
 
 ## 进度统计
 
-完成：8 / 9（T9 待发布）
+完成：9 / 9
 更新时间：2026-08-22
