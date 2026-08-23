@@ -145,7 +145,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.6.1" 
+    plugin_version = "4.6.2" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -175,6 +175,7 @@ class OpenlistMover(_PluginBase):
 
     # === 新增：目录列表缓存（洗版预检查复用，避免逐个后缀探测） ===
     _dir_listing_cache: Dict[str, Tuple[float, List[str]]] = {}
+    _dir_listing_locks: Dict[str, Lock] = {}  # 每个目录一把锁，用于单飞（同目录并发只发一次 list）
     _dir_cache_lock = Lock()
     _dir_cache_seconds = 3600  # 目录列表缓存时长（秒），默认 1 小时；0 = 不缓存
     # ==========================================================
@@ -333,6 +334,7 @@ class OpenlistMover(_PluginBase):
             # 配置变化后清空旧缓存，避免沿用过期配置下的列表
             with self._dir_cache_lock:
                 self._dir_listing_cache = {}
+                self._dir_listing_locks = {}
             logger.debug(f"Openlist Mover 洗版目录列表缓存时长: {self._dir_cache_seconds} 秒")
             # ================================
 
@@ -795,7 +797,7 @@ class OpenlistMover(_PluginBase):
                                             "type": "info",
                                             "variant": "tonal",
                                             "title": "洗版模式配置",
-                                            "text": "开启后，移动前会对目标目录做一次 list，检查是否存在同名的旧视频/音频文件（仅视频/音频文件触发该预检查，封面/nfo 等额外后缀文件不会触发，避免误删）。目录列表结果会临时缓存（默认 1 小时，可配置）：插件自身的移动/删除会增量更新缓存（新文件追加、洗版删除同步移除），缓存有效期内同一目录后续洗版可直接命中旧版本并替换，替换后缓存自动刷新；外部变化在缓存过期后重新拉取。若移动时仍遇到目标文件已存在 (403 exists)，将自动使用覆盖模式 (overwrite: true) 重新移动。洗版成功后，会先删除旧的 STRM 文件，等待指定延迟后再重新生成。",
+                                            "text": "开启后，探测到新媒体文件时（执行移动前）会提前 list 一次目标目录并缓存（默认 1 小时，可配置，同目录并发只发一次请求）：检查是否存在同名的旧视频/音频文件（仅视频/音频文件触发该预检查，封面/nfo 等额外后缀文件不会触发，避免误删）。缓存由插件自身增量维护：移动成功的新文件追加进缓存、洗版删除同步移除，缓存有效期内同一目录后续洗版可直接命中旧版本并替换，替换后缓存自动刷新；外部变化在缓存过期后重新拉取；空目录会缓存为空列表，首个文件移动成功后自动追加。若移动时仍遇到目标文件已存在 (403 exists)，将自动使用覆盖模式 (overwrite: true) 重新移动。洗版成功后，会先删除旧的 STRM 文件，等待指定延迟后再重新生成。",
                                         },
                                     }
                                 ]
@@ -1770,6 +1772,27 @@ class OpenlistMover(_PluginBase):
             
             # 日志级别调整为 DEBUG
             logger.debug(f"开始处理新文件: {file_path}")
+
+            # 0. 提前计算路径映射（本地纯计算，不依赖文件内容/大小）
+            src_dir, dst_dir, name, error = self._find_mapping(file_path)
+            
+            if error:
+                logger.error(f"处理失败: {error}")
+                if self._notify:
+                    self.post_message(
+                        mtype=NotificationType.SiteMessage,
+                        title="Openlist 移动失败",
+                        text=f"文件：{file_path}\n错误：{error}",
+                    )
+                return # 最终会进入 finally
+
+            # 0.1 洗版模式下，在等待文件稳定/执行移动之前，提前拉取并缓存目标目录列表。
+            #     同一批次多个文件（如整季）并发到达时，同目录只会发出一次 list 请求（单飞），
+            #     后续任务的洗版预检查直接复用缓存，避免同时间窗内多个任务各自触发 list。
+            if self._wash_mode_enabled:
+                file_suffix = Path(name).suffix.lower()
+                if file_suffix in VIDEO_EXTENSIONS or file_suffix in AUDIO_EXTENSIONS:
+                    self._prefill_dir_cache(dst_dir)
             
             # 等待文件稳定
             file_ready = False
@@ -1809,20 +1832,7 @@ class OpenlistMover(_PluginBase):
                 logger.debug(f"移动延迟 {self._move_delay_seconds} 秒...")
                 time.sleep(self._move_delay_seconds)
 
-            # 1. 查找路径映射
-            src_dir, dst_dir, name, error = self._find_mapping(file_path)
-            
-            if error:
-                logger.error(f"处理失败: {error}")
-                if self._notify:
-                    self.post_message(
-                        mtype=NotificationType.SiteMessage,
-                        title="Openlist 移动失败",
-                        text=f"文件：{file_path}\n错误：{error}",
-                    )
-                return # 最终会进入 finally
-
-            # 2. 检查是否需要洗版（主动检查类似文件）
+            # 2. 检查是否需要洗版（主动检查类似文件，预检查复用上面已预填充的目录缓存）
             is_wash = False
             if self._wash_mode_enabled:
                 is_wash = self._check_and_clean_similar_files(dst_dir, name)
@@ -2514,11 +2524,15 @@ class OpenlistMover(_PluginBase):
 
     def _get_dir_listing_cached(self, dst_dir: str) -> Optional[List[str]]:
         """
-        获取目标目录的文件/子目录名称列表（带缓存）。
-        返回: List[str] 名称列表；[] 表示目录不存在；None 表示结果不明确（不应执行删除）
+        获取目标目录的文件/子目录名称列表（带缓存 + 单飞）。
+        单飞：同一目录的并发请求共享同一把 key 锁，只有最先到达的线程真正发起 list，
+        其余线程在拿到锁后直接复用其结果，避免同目录并发各自触发 list 请求。
+        返回: List[str] 名称列表（空列表表示目录为空或不存在）；None 表示结果不明确（不应执行删除）
         """
         key = dst_dir.rstrip('/')
         now = time.time()
+
+        # 1. 命中有效缓存直接返回
         with self._dir_cache_lock:
             cached = self._dir_listing_cache.get(key)
             if cached:
@@ -2527,14 +2541,40 @@ class OpenlistMover(_PluginBase):
                     logger.debug(f"洗版模式：使用目录列表缓存 {key} ({len(cached_names)} 条, 已缓存 {int(now - cache_time)} 秒)")
                     return cached_names
 
-        listing = self._call_openlist_list_dir_api(key)
-        if listing is None:
-            return None
-
+        # 2. 单飞：按目录获取（或创建）专用锁
         with self._dir_cache_lock:
-            self._dir_listing_cache[key] = (now, listing)
-        logger.debug(f"洗版模式：已缓存目录列表 {key} ({len(listing)} 条)")
-        return listing
+            key_lock = self._dir_listing_locks.get(key)
+            if key_lock is None:
+                key_lock = Lock()
+                self._dir_listing_locks[key] = key_lock
+
+        with key_lock:
+            # 3. 拿到锁后再查一次缓存（可能已被等待中的首个拉取者填充）
+            with self._dir_cache_lock:
+                cached = self._dir_listing_cache.get(key)
+                if cached:
+                    cache_time, cached_names = cached
+                    if self._dir_cache_seconds <= 0 or time.time() - cache_time < self._dir_cache_seconds:
+                        logger.debug(f"洗版模式：使用目录列表缓存 {key} (单飞等待后命中, {len(cached_names)} 条)")
+                        return cached_names
+
+            # 4. 执行拉取（仅持锁线程执行，其余线程排队等待，不会重复请求）
+            listing = self._call_openlist_list_dir_api(key)
+            if listing is not None:
+                with self._dir_cache_lock:
+                    self._dir_listing_cache[key] = (time.time(), listing)
+                logger.debug(f"洗版模式：已缓存目录列表 {key} ({len(listing)} 条)")
+            return listing
+
+    def _prefill_dir_cache(self, dst_dir: str):
+        """
+        探测到新媒体文件后、执行移动前，提前拉取并缓存目标目录列表。
+        同一批次多个文件并发到达时，同目录只发一次 list（单飞），后续任务的洗版
+        预检查直接复用缓存，避免同一时间窗内多个任务各自触发 list 请求。
+        """
+        listing = self._get_dir_listing_cached(dst_dir)
+        if listing is None:
+            logger.warning(f"洗版模式：预填充目录列表缓存失败 {dst_dir}")
 
     def _add_to_dir_cache(self, dst_dir: str, name: str):
         """移动成功后，将新文件名增量加入对应目录的列表缓存（若该目录已有缓存条目）"""
