@@ -36,10 +36,15 @@
    以及该站已限速种子数，不再展示种子级明细；
 7. 取消限速仅发生在运行中「分享率 <= 下限」档位：停用/卸载插件、移除下载器、
    升级/热重载等场景均不修改任何种子的上传限速（保持插件运行期设置的值）。
+8. 新增种子自动重新宣告（可选）：下载事件与定时扫描发现的新增种子共用同一全局去重列表
+   （跨会话持久化，同一种子只宣告一次），仅对「低于下限（不限速）」站点的种子在
+   「全局总宣告种子数」批次限额内自动通过 qBittorrent 接口重新宣告
+   （首次延迟后按间隔重复宣告指定次数），详情面板展示当前宣告种子与宣告进度。
 """
 
 import datetime
 import re
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
@@ -69,11 +74,11 @@ class SiteRatioLimiter(_PluginBase):
     # 插件名称
     plugin_name = "站点分享率上传限速"
     # 插件描述
-    plugin_desc = "基于站点账号分享率与分享率上下限自动管理 qBittorrent 种子上传限速：低于下限取消限速并保持到达到上限，达到上限恢复限速并保持到低于下限，中间区间保持现状防波动；下载种子时按插件维护的站点档位状态限速；支持定时扫描下载器新增种子（手动添加/辅种等非 MoviePilot 下载事件来源），识别站点并按档位自动限速，未识别种子记录日志。"
+    plugin_desc = "基于站点账号分享率与分享率上下限自动管理 qBittorrent 种子上传限速：低于下限取消限速并保持到达到上限，达到上限恢复限速并保持到低于下限，中间区间保持现状防波动；下载种子时按插件维护的站点档位状态限速；支持定时扫描下载器新增种子（手动添加/辅种等非 MoviePilot 下载事件来源），识别站点并按档位自动限速，未识别种子记录日志；可选新增种子自动重新宣告（仅对不限速站点、全局批次限额、下载事件与扫描共用去重列表，详情面板展示宣告种子与进度）。"
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.6.0"
+    plugin_version = "1.7.0"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -118,11 +123,27 @@ class SiteRatioLimiter(_PluginBase):
     _scan_enable = False
     _scan_cron = ""
     _scan_onlyonce = False
+    # 新增种子自动重新宣告（qBittorrent reannounce）：启用开关 / 全局总宣告种子数（同一批次时间窗口内最多宣告的种子数）
+    _reannounce_enable = False
+    _reannounce_limit = 5
+    # 每个种子重复宣告次数 / 宣告间隔（秒）/ 首次宣告延迟（秒）
+    _reannounce_times = 15
+    _reannounce_interval = 330
+    _reannounce_delay = 180
 
     # ---- 运行时状态 ----
     _scan_scheduler = None
     # 上次扫描时各下载器的种子 hash 快照 {下载器名称: {种子Hash}}，跨会话持久化
     _scanned_hashes: Dict[str, Set[str]] = {}
+    # 新增种子宣告调度器与批次窗口计数（同一时间窗口内仅宣告前 N 个新种子）
+    _reannounce_scheduler = None
+    _reannounce_batch_ts = 0.0
+    _reannounce_batch_count = 0
+    _REANNOUNCE_BATCH_WINDOW = 10.0   # 秒
+    # 新增种子宣告登记列表 {下载器: {种子Hash}}：下载事件与扫描共用（跨会话持久化，去重：同一种子只登记一次）
+    _reannounce_hashes: Dict[str, Set[str]] = {}
+    # 宣告进行中进度 {下载器: {种子Hash: {"name","site","total","done","next_ts"}}}，跨会话持久化
+    _reannounce_progress: Dict[str, Dict[str, Dict[str, Any]]] = {}
     # 站点域名(小写) -> 站点名称；站点名称(小写) -> 站点名称
     _site_domains: Dict[str, str] = {}
     _site_names: Dict[str, str] = {}
@@ -141,6 +162,8 @@ class SiteRatioLimiter(_PluginBase):
     _SITE_STATES_KEY = "site_states"
     _SIG_KEY = "config_signature"
     _SCANNED_HASHES_KEY = "scanned_hashes"
+    _REANNOUNCE_HASHES_KEY = "reannounce_hashes"
+    _REANNOUNCE_PROGRESS_KEY = "reannounce_progress"
 
     # ---------------------------------------------------------------- 生命周期
 
@@ -155,6 +178,7 @@ class SiteRatioLimiter(_PluginBase):
         """
         was_enabled = self._enabled
         self._stop_scan_scheduler()
+        self._stop_reannounce_scheduler()
 
         config = config or {}
         self._enabled = bool(config.get("enabled"))
@@ -170,6 +194,11 @@ class SiteRatioLimiter(_PluginBase):
         self._scan_enable = bool(config.get("scan_enable"))
         self._scan_cron = str(config.get("scan_cron") or "").strip()
         self._scan_onlyonce = bool(config.get("scan_onlyonce"))
+        self._reannounce_enable = bool(config.get("reannounce_enable"))
+        self._reannounce_limit = max(self._to_int(config.get("reannounce_limit"), 5), 1)
+        self._reannounce_times = max(self._to_int(config.get("reannounce_times"), 15), 1)
+        self._reannounce_interval = max(self._to_int(config.get("reannounce_interval"), 330), 10)
+        self._reannounce_delay = max(self._to_int(config.get("reannounce_delay"), 180), 0)
 
         # 站点映射（域名/名称）只构建一次
         self._site_domains = self._load_site_domains()
@@ -185,6 +214,9 @@ class SiteRatioLimiter(_PluginBase):
         # 加载跨会话持久化的站点档位状态与上次生效的配置签名
         # 上次扫描快照（用于定时扫描识别「新增种子」）
         self._scanned_hashes = self._load_set_map(self._SCANNED_HASHES_KEY)
+        # 新增种子宣告登记列表（下载事件与扫描共用去重）与进行中宣告进度（跨会话恢复）
+        self._reannounce_hashes = self._load_set_map(self._REANNOUNCE_HASHES_KEY)
+        self._reannounce_progress = self._load_reannounce_progress()
         try:
             raw_states = self.get_data(self._SITE_STATES_KEY) or {}
             self._site_states = {
@@ -208,6 +240,8 @@ class SiteRatioLimiter(_PluginBase):
         self._site_stats = {}
         self._site_ratios = {}
         self._site_ratio_times = {}
+        self._reannounce_batch_ts = 0.0
+        self._reannounce_batch_count = 0
 
         # 停用插件时：不取消任何限速（取消限速仅发生在运行中「分享率 <= 下限」档位）
         if was_enabled and not self._enabled:
@@ -257,6 +291,9 @@ class SiteRatioLimiter(_PluginBase):
                 pass
             logger.info(f"{self.LOG_TAG}已勾选「立即扫描下载器新增种子」，将在 3 秒后执行")
             self._start_scan_once()
+
+        # 新增种子重新宣告调度：启用后周期宣告（有宣告任务时按期宣告，空闲时轮询）
+        self._start_reannounce_scheduler()
 
     def _start_scan_once(self):
         """启动一次性的下载器新增种子扫描任务（与定时任务共用扫描逻辑）。"""
@@ -313,6 +350,7 @@ class SiteRatioLimiter(_PluginBase):
         都不会取消任何种子的上传限速。
         """
         self._stop_scan_scheduler()
+        self._stop_reannounce_scheduler()
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
@@ -333,8 +371,9 @@ class SiteRatioLimiter(_PluginBase):
     def on_download_added(self, event: Event = None):
         """
         下载种子事件：直接读取插件内部维护的站点档位状态，
-        仅当站点档位为「达到上限」（分享率 > 上限）时立即限制该种子的上传速度，
-        低于下限/中间区间/无数据均不做任何操作。
+        仅当站点档位为「达到上限」（分享率 > 上限）时立即限制该种子的上传速度；
+        站点档位为「低于下限」（不限速）且启用新增种子宣告时，登记并自动重新宣告
+        （与定时扫描共用同一全局去重列表）。
         """
         if not self._enabled:
             return
@@ -343,6 +382,7 @@ class SiteRatioLimiter(_PluginBase):
             return
         event_data = event.event_data or {}
         download_hash = str(event_data.get("hash") or "").strip()
+        torrent_name = str(event_data.get("name") or "").strip()
         context = event_data.get("context")
         site_name = ""
         if context and hasattr(context, "torrent_info") and context.torrent_info:
@@ -363,6 +403,12 @@ class SiteRatioLimiter(_PluginBase):
         # 直接从插件内部站点状态判定（不实时查询站点数据）
         stats = self._site_stats.get(site_name) or self._site_stats.get(site_name.lower())
         state = (stats or {}).get("state")
+        # 新增种子宣告：仅不限速站点（档位「低于下限」）登记并宣告（与扫描共用同一全局去重列表）
+        if self._reannounce_enable and state == self._STATE_LOW:
+            self._register_reannounce(
+                torrent_hash=download_hash, site_name=site_name, state=state,
+                torrent_name=torrent_name or download_hash,
+            )
         if state != self._STATE_HIGH:
             ratio = (stats or {}).get("ratio")
             ratio_text = f"{ratio:g}" if ratio is not None else "无数据"
@@ -480,6 +526,7 @@ class SiteRatioLimiter(_PluginBase):
             # 清理已不在下载器中的种子记录（已删除的种子），避免会话登记无限驻留
             current_hashes = {self._torrent_hash(t) for t in torrents if self._torrent_hash(t)}
             self._limited_hashes.get(service_name, set()).intersection_update(current_hashes)
+            self._cleanup_reannounce_progress(service_name, current_hashes)
             # 执行动作：仅当 apply=True 时才调用限速/取消限速接口
             if apply:
                 for name in managed_names:
@@ -605,6 +652,7 @@ class SiteRatioLimiter(_PluginBase):
                 continue
             torrents = torrents or []
             current_hashes = {self._torrent_hash(t) for t in torrents if self._torrent_hash(t)}
+            self._cleanup_reannounce_progress(service_name, current_hashes)
             current_scanned[service_name] = current_hashes
             # 新增种子 = 当前快照 - 上次快照
             new_hashes = current_hashes - (last_scanned.get(service_name) or set())
@@ -641,6 +689,12 @@ class SiteRatioLimiter(_PluginBase):
                 # 复用现有规则：仅当站点档位为「达到上限」且种子未限速时自动限速
                 stats = self._site_stats.get(site) or self._site_stats.get(site.lower()) or {}
                 state = stats.get("state")
+                # 新增种子宣告登记：下载事件与扫描共用同一全局去重列表（同一种子只登记一次），
+                # 仅「低于下限（不限速）」站点的种子在全局宣告种子数额度内实际宣告
+                self._register_reannounce(
+                    torrent_hash=torrent_hash, site_name=site, state=state,
+                    torrent_name=torrent_name, service_name=service_name,
+                )
                 if state != self._STATE_HIGH:
                     ratio = stats.get("ratio")
                     ratio_text = f"{ratio:g}" if ratio is not None else "无数据"
@@ -1049,6 +1103,231 @@ class SiteRatioLimiter(_PluginBase):
         effective_limit = min(float(limit), qb_upload_limit)
         return int(effective_limit) if effective_limit.is_integer() else effective_limit
 
+    # ---------------------------------------------------------------- 新增种子重新宣告
+
+    def _register_reannounce(self, torrent_hash: str, site_name: str, state: Optional[str] = None,
+                             torrent_name: str = "", service_name: str = ""):
+        """
+        新增种子宣告登记（下载事件与扫描共用同一全局去重列表）：
+        - 无论档位，新种子都会进入全局去重列表（跨会话持久化），同一种子只登记一次；
+        - 仅档位「低于下限」（🔻 不限速站点）的种子会实际宣告；
+        - 全局总宣告种子数：同一批次时间窗口（约 10 秒）内最多宣告该数量个新种子，
+          超出的加入列表跳过宣告，之后任何来源再次发现也不会宣告。
+        """
+        if not self._enabled or not self._reannounce_enable or not torrent_hash:
+            return
+        # 全局去重：任一已登记列表含该 hash 则不再处理（防止下载事件/扫描重复登记与重复宣告）
+        if any(torrent_hash in hashes for hashes in self._reannounce_hashes.values()):
+            return
+        # 下载事件来源未提供下载器时按 hash 定位所属下载器
+        if not service_name:
+            service_name = self._locate_service_by_hash(torrent_hash)
+            if not service_name:
+                logger.info(
+                    f"{self.LOG_TAG}种子 {torrent_name or torrent_hash} 尚未出现在下载器中，"
+                    "宣告登记跳过（后续新增种子扫描会补登记）"
+                )
+                return
+        # 所有新增种子加入全局去重列表（事件与扫描共用，跨会话持久化）
+        self._reannounce_hashes.setdefault(service_name, set()).add(torrent_hash)
+        self._save_set_map(self._REANNOUNCE_HASHES_KEY, self._reannounce_hashes)
+        label = self._STATE_LABELS.get(state or self._STATE_UNKNOWN, state or self._STATE_UNKNOWN)
+        # 宣告对象：仅「低于下限（不限速）」站点的种子
+        if state != self._STATE_LOW:
+            logger.info(
+                f"{self.LOG_TAG}[{service_name}] 种子 {torrent_name or torrent_hash} 站点 {site_name}"
+                f" 档位 {label}，加入宣告列表但跳过宣告（仅「低于下限」不限速站点宣告）"
+            )
+            return
+        # 全局总宣告种子数：同一批次时间窗口内仅宣告前 N 个
+        now = time.time()
+        if now - self._reannounce_batch_ts > self._REANNOUNCE_BATCH_WINDOW:
+            self._reannounce_batch_ts = now
+            self._reannounce_batch_count = 0
+        if self._reannounce_batch_count >= self._reannounce_limit:
+            logger.info(
+                f"{self.LOG_TAG}[{service_name}] 种子 {torrent_name or torrent_hash} 站点 {site_name}"
+                f" 超过全局宣告种子数上限（{self._reannounce_limit} 个/批次窗口），加入列表跳过宣告"
+            )
+            return
+        self._reannounce_batch_count += 1
+        # 启动宣告：首次延迟后开始，共宣告 reannounce_times 次
+        prog = self._reannounce_progress.setdefault(service_name, {})
+        prog[torrent_hash] = {
+            "name": torrent_name or torrent_hash,
+            "site": site_name,
+            "total": self._reannounce_times,
+            "done": 0,
+            "next_ts": now + self._reannounce_delay,
+        }
+        self._save_reannounce_progress()
+        logger.info(
+            f"{self.LOG_TAG}[{service_name}] 种子 {torrent_name or torrent_hash}（站点 {site_name}，"
+            f"不限速）已加入宣告队列：首次宣告约 {self._reannounce_delay} 秒后，共宣告 {self._reannounce_times} 次"
+        )
+        self._start_reannounce_scheduler()
+
+    def _locate_service_by_hash(self, torrent_hash: str) -> str:
+        """在已选下载器中定位种子所属下载器名称（下载事件未提供下载器时使用）。"""
+        services = self._get_services()
+        if not services:
+            return ""
+        for service_name, service_info in services.items():
+            downloader = service_info.instance
+            try:
+                torrents, error = downloader.get_torrents()
+                if error:
+                    continue
+                if any(self._torrent_hash(t) == torrent_hash for t in (torrents or [])):
+                    return service_name
+            except Exception:
+                continue
+        return ""
+
+    def _start_reannounce_scheduler(self):
+        """启动新增种子宣告调度（每 5 秒轮询到期种子做一次重新宣告）。"""
+        try:
+            if getattr(self, "_reannounce_scheduler", None) and self._reannounce_scheduler.running:
+                return
+            if not self._enabled or not self._reannounce_enable:
+                return
+            self._reannounce_scheduler = BackgroundScheduler(timezone=settings.TZ)
+            self._reannounce_scheduler.add_job(
+                func=self._reannounce_tick,
+                trigger="interval",
+                seconds=5,
+                max_instances=1,
+                name="站点分享率上传限速-新种子宣告",
+            )
+            self._reannounce_scheduler.start()
+            logger.info(f"{self.LOG_TAG}新增种子宣告调度已启动")
+        except Exception as err:
+            logger.error(f"{self.LOG_TAG}启动新增种子宣告调度失败：{err}")
+
+    def _stop_reannounce_scheduler(self):
+        """停止新增种子宣告调度。"""
+        try:
+            if getattr(self, "_reannounce_scheduler", None):
+                if self._reannounce_scheduler.running:
+                    self._reannounce_scheduler.shutdown(wait=False)
+                self._reannounce_scheduler = None
+        except Exception as err:
+            logger.error(f"{self.LOG_TAG}停止新增种子宣告调度失败：{err}")
+
+    def _reannounce_tick(self):
+        """周期宣告任务：对到期的种子调用 qBittorrent 重新宣告接口，并更新宣告进度。"""
+        if not self._enabled or not self._reannounce_enable:
+            return
+        if not self._reannounce_progress:
+            return
+        now = time.time()
+        due_by_service: Dict[str, List[str]] = {}
+        for service_name, prog in self._reannounce_progress.items():
+            due = [
+                h for h, p in prog.items()
+                if (p.get("next_ts") or 0) <= now and (p.get("done") or 0) < (p.get("total") or 1)
+            ]
+            if due:
+                due_by_service[service_name] = due
+        if not due_by_service:
+            return
+        services = self._get_services() or {}
+        changed = False
+        for service_name, due in due_by_service.items():
+            prog = self._reannounce_progress.get(service_name) or {}
+            service_info = services.get(service_name)
+            qbc = getattr(getattr(service_info, "instance", None), "qbc", None)
+            reannounce = getattr(qbc, "torrents_reannounce", None) if qbc else None
+            if not callable(reannounce):
+                logger.warning(
+                    f"{self.LOG_TAG}[{service_name}] 无可用 qBittorrent 重新宣告接口，本轮 {len(due)} 个种子宣告跳过（下载器重连后将自动继续）"
+                )
+                continue
+            try:
+                reannounce(torrent_hashes=due)
+            except Exception as err:
+                logger.error(f"{self.LOG_TAG}[{service_name}] 重新宣告 {len(due)} 个种子失败：{err}")
+                for torrent_hash in due:
+                    p = prog.pop(torrent_hash, None)
+                    if p:
+                        logger.warning(
+                            f"{self.LOG_TAG}[{service_name}] 种子 {p.get('name') or torrent_hash} 宣告失败，"
+                            "已移出宣告队列（去重登记保留）"
+                        )
+                changed = True
+                continue
+            for torrent_hash in due:
+                p = prog.get(torrent_hash) or {}
+                total = p.get("total") or self._reannounce_times
+                p["done"] = (p.get("done") or 0) + 1
+                if p["done"] >= total:
+                    prog.pop(torrent_hash, None)
+                    logger.info(
+                        f"{self.LOG_TAG}[{service_name}] 种子 {p.get('name') or torrent_hash}"
+                        f"（站点 {p.get('site') or '—'}）宣告完成：{p['done']}/{total} 次"
+                    )
+                else:
+                    p["next_ts"] = now + self._reannounce_interval
+                    logger.info(
+                        f"{self.LOG_TAG}[{service_name}] 种子 {p.get('name') or torrent_hash}"
+                        f"（站点 {p.get('site') or '—'}）已宣告：{p['done']}/{total} 次"
+                    )
+                changed = True
+            if not prog:
+                self._reannounce_progress.pop(service_name, None)
+        if changed:
+            self._save_reannounce_progress()
+
+    def _cleanup_reannounce_progress(self, service_name: str, current_hashes: Set[str]):
+        """清理宣告进度中已不在下载器的种子（种子被删除），去重登记列表则长期保留。"""
+        prog = self._reannounce_progress.get(service_name)
+        if not prog:
+            return
+        removed = [h for h in prog if h not in current_hashes]
+        if not removed:
+            return
+        for h in removed:
+            prog.pop(h, None)
+        if not prog:
+            self._reannounce_progress.pop(service_name, None)
+        logger.info(f"{self.LOG_TAG}[{service_name}] 清理 {len(removed)} 个已删除/消失种子的宣告进度")
+        self._save_reannounce_progress()
+
+    def _load_reannounce_progress(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """读取跨会话持久化的宣告进度 {下载器: {种子Hash: {name,site,total,done,next_ts}}}。"""
+        try:
+            raw = self.get_data(self._REANNOUNCE_PROGRESS_KEY) or {}
+            if not isinstance(raw, dict):
+                return {}
+            loaded: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for service, hashes in raw.items():
+                if not isinstance(hashes, dict):
+                    continue
+                entries: Dict[str, Dict[str, Any]] = {}
+                for torrent_hash, item in hashes.items():
+                    if not torrent_hash or not isinstance(item, dict):
+                        continue
+                    entries[str(torrent_hash)] = {
+                        "name": str(item.get("name") or torrent_hash),
+                        "site": str(item.get("site") or ""),
+                        "total": max(int(item.get("total") or self._reannounce_times), 1),
+                        "done": max(int(item.get("done") or 0), 0),
+                        "next_ts": float(item.get("next_ts") or 0),
+                    }
+                if entries:
+                    loaded[str(service)] = entries
+            return loaded
+        except Exception as err:
+            logger.error(f"{self.LOG_TAG}读取宣告进度失败：{err}")
+            return {}
+
+    def _save_reannounce_progress(self):
+        """持久化宣告进度。"""
+        try:
+            self.save_data(self._REANNOUNCE_PROGRESS_KEY, self._reannounce_progress)
+        except Exception as err:
+            logger.error(f"{self.LOG_TAG}持久化宣告进度失败：{err}")
+
     # ---------------------------------------------------------------- 持久化
 
     def _load_set_map(self, key: str) -> Dict[str, set]:
@@ -1107,6 +1386,11 @@ class SiteRatioLimiter(_PluginBase):
             "scan_enable": self._scan_enable,
             "scan_cron": self._scan_cron,
             "scan_onlyonce": self._scan_onlyonce,
+            "reannounce_enable": self._reannounce_enable,
+            "reannounce_limit": self._reannounce_limit,
+            "reannounce_times": self._reannounce_times,
+            "reannounce_interval": self._reannounce_interval,
+            "reannounce_delay": self._reannounce_delay,
         }
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -1222,6 +1506,125 @@ class SiteRatioLimiter(_PluginBase):
                                             "type": "info",
                                             "variant": "tonal",
                                             "text": "本插件不发送任何通知；扫描结果（新增/未识别/已限速种子）均记录在 MoviePilot 日志中。",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "reannounce_enable",
+                                            "label": "新增种子自动宣告",
+                                            "hint": "开启后，下载事件或定时扫描发现的新增种子（两者共用同一全局去重列表，同一种子只宣告一次）自动通过 qBittorrent 接口重新宣告（reannounce）；仅对「低于下限（不限速）」站点的种子宣告。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "reannounce_limit",
+                                            "label": "全局总宣告种子数",
+                                            "placeholder": "例如 5",
+                                            "type": "number",
+                                            "min": 1,
+                                            "step": 1,
+                                            "hide-spin-buttons": True,
+                                            "hint": "同一时间多个新增种子时，所有种子都加入宣告列表，但同一批次时间窗口（约 10 秒）内最多宣告该数量个种子；其余加入列表跳过宣告，之后任何来源再次发现也不会宣告。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "reannounce_times",
+                                            "label": "每个种子宣告次数",
+                                            "placeholder": "例如 15",
+                                            "type": "number",
+                                            "min": 1,
+                                            "step": 1,
+                                            "hide-spin-buttons": True,
+                                            "hint": "每个种子累计重新宣告的次数（详情面板的宣告进度 = 已宣告次数/总次数）。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "reannounce_interval",
+                                            "label": "宣告间隔（秒）",
+                                            "placeholder": "例如 330",
+                                            "type": "number",
+                                            "min": 10,
+                                            "step": 1,
+                                            "hide-spin-buttons": True,
+                                            "hint": "同一个种子两次宣告之间的间隔秒数（与刷流插件默认一致 330 秒）。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "reannounce_delay",
+                                            "label": "首次宣告延迟（秒）",
+                                            "placeholder": "例如 180",
+                                            "type": "number",
+                                            "min": 0,
+                                            "step": 1,
+                                            "hide-spin-buttons": True,
+                                            "hint": "种子加入宣告队列后到首次宣告的延迟秒数，默认 180 秒（与刷流插件一致）。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "text": "宣告对象为「低于下限（🔻 不限速）」站点的种子；所有新增种子先加入全局去重列表（下载事件与定时扫描共用，跨会话持久化），同一种子只登记一次、只参与一次宣告流程。详情面板可查看当前宣告种子与宣告进度。",
                                         },
                                     }
                                 ],
@@ -1402,19 +1805,16 @@ class SiteRatioLimiter(_PluginBase):
 
     def get_page(self) -> List[dict]:
         """
-        详情面板：站点状态表——展示每个站点的账号分享率与档位状态
-        （即下载种子时判定限速的数据来源），不再展示种子明细。
+        详情面板：
+        1. 站点状态表——每个站点的账号分享率与档位状态（下载种子时判定限速的数据来源）；
+        2. 新增种子宣告表——当前宣告中的种子及其宣告进度（已宣告次数/总次数）。
         """
         if not self._enabled:
             return [{'component': 'div', 'text': '插件未启用', 'props': {'class': 'text-center'}}]
 
-        site_names = list(self._site_stats.keys())
-        if not site_names:
-            return [{'component': 'div', 'text': '暂无站点分享率数据（等待站点数据统计刷新）', 'props': {'class': 'text-center'}}]
-
         # ---- 站点状态表 ----
         site_rows = []
-        for name in site_names:
+        for name in list(self._site_stats.keys()):
             stats = self._site_stats.get(name) or {}
             ratio = stats.get("ratio")
             lower = stats.get("lower")
@@ -1434,23 +1834,23 @@ class SiteRatioLimiter(_PluginBase):
                 "count": f"{limited}/{total}" if total else f"{limited}",
             })
 
-        site_trs = [
-            {
-                'component': 'tr',
-                'props': {'class': 'text-sm'},
-                'content': [
-                    {'component': 'td', 'props': {'class': 'whitespace-nowrap break-keep text-high-emphasis'}, 'text': row["name"]},
-                    {'component': 'td', 'text': row["ratio"]},
-                    {'component': 'td', 'props': {'class': 'whitespace-nowrap'}, 'text': row["updated"]},
-                    {'component': 'td', 'text': row["threshold"]},
-                    {'component': 'td', 'text': row["state"]},
-                    {'component': 'td', 'text': row["count"]},
-                ]
-            } for row in site_rows
-        ]
-
-        return [
-            {
+        site_vrow = None
+        if site_rows:
+            site_trs = [
+                {
+                    'component': 'tr',
+                    'props': {'class': 'text-sm'},
+                    'content': [
+                        {'component': 'td', 'props': {'class': 'whitespace-nowrap break-keep text-high-emphasis'}, 'text': row["name"]},
+                        {'component': 'td', 'text': row["ratio"]},
+                        {'component': 'td', 'props': {'class': 'whitespace-nowrap'}, 'text': row["updated"]},
+                        {'component': 'td', 'text': row["threshold"]},
+                        {'component': 'td', 'text': row["state"]},
+                        {'component': 'td', 'text': row["count"]},
+                    ]
+                } for row in site_rows
+            ]
+            site_vrow = {
                 'component': 'VRow',
                 'content': [
                     {
@@ -1479,7 +1879,90 @@ class SiteRatioLimiter(_PluginBase):
                     }
                 ]
             }
-        ]
+
+        # ---- 新增种子宣告表（当前宣告中的种子与宣告进度） ----
+        announce_rows = []
+        now = time.time()
+        for service_name in sorted(self._reannounce_progress.keys()):
+            prog = self._reannounce_progress.get(service_name) or {}
+            for torrent_hash, p in sorted(prog.items()):
+                total = p.get("total") or 1
+                done = p.get("done") or 0
+                next_ts = p.get("next_ts") or 0
+                wait_sec = max(int(next_ts - now), 0) if next_ts > now else 0
+                if done <= 0:
+                    status = f"等待首次宣告（约 {wait_sec} 秒后）" if wait_sec else "即将宣告"
+                elif done < total:
+                    status = f"宣告中（约 {wait_sec} 秒后下次宣告）"
+                else:
+                    status = "宣告完成"
+                announce_rows.append({
+                    "name": p.get("name") or torrent_hash,
+                    "site": p.get("site") or "—",
+                    "progress": f"{done}/{total}",
+                    "status": status,
+                })
+
+        announce_vrow = None
+        if announce_rows:
+            announce_trs = [
+                {
+                    'component': 'tr',
+                    'props': {'class': 'text-sm'},
+                    'content': [
+                        {'component': 'td', 'props': {'class': 'whitespace-nowrap break-keep text-high-emphasis'}, 'text': row["name"]},
+                        {'component': 'td', 'text': row["site"]},
+                        {'component': 'td', 'text': row["progress"]},
+                        {'component': 'td', 'text': row["status"]},
+                    ]
+                } for row in announce_rows
+            ]
+            announce_vrow = {
+                'component': 'VRow',
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12},
+                        'content': [
+                            {
+                                'component': 'VAlert',
+                                'props': {
+                                    'type': 'info',
+                                    'variant': 'tonal',
+                                    'text': f"新增种子自动宣告：当前宣告中 {len(announce_rows)} 个种子；"
+                                            f"全局宣告种子数上限为每批次 {self._reannounce_limit} 个，"
+                                            "仅对「🔻 低于下限（不限速）」站点的种子宣告；宣告进度为每个种子已宣告次数/总宣告次数。",
+                                },
+                            },
+                            {
+                                'component': 'VTable',
+                                'props': {'hover': True},
+                                'content': [
+                                    {
+                                        'component': 'thead',
+                                        'content': [
+                                            {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '种子名称'},
+                                            {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '站点'},
+                                            {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '宣告进度'},
+                                            {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '状态'},
+                                        ]
+                                    },
+                                    {'component': 'tbody', 'content': announce_trs}
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+
+        result = []
+        if site_vrow:
+            result.append(site_vrow)
+        if announce_vrow:
+            result.append(announce_vrow)
+        if not result:
+            return [{'component': 'div', 'text': '暂无站点分享率数据（等待站点数据统计刷新）', 'props': {'class': 'text-center'}}]
+        return result
 
     # ---------------------------------------------------------------- 工具方法
 
