@@ -40,6 +40,23 @@ VIDEO_EXTENSIONS = [
     ".m2ts", # 蓝光原盘
 ]
 
+# --- 音频文件扩展名 ---
+AUDIO_EXTENSIONS = [
+    ".flac",
+    ".ape",
+    ".wav",
+    ".mp3",
+    ".aac",
+    ".m4a",
+    ".ogg",
+    ".wma",
+    ".opus",
+    ".ac3",
+    ".dts",
+    ".dsf",
+    ".aiff",
+]
+
 # --- 临时文件后缀 ---
 TEMP_EXTENSIONS = [".!qB", ".part", ".mp", ".tmp", ".temp", ".download"]
 
@@ -76,15 +93,15 @@ class NewFileMonitorHandler(FileSystemEventHandler):
         self.sync = sync  # sync 是 OpenlistMover 插件实例
 
     def _is_target_file(self, file_path: Path) -> bool:
-        """检查文件是否是目标文件（视频文件或配置的额外后缀文件），且不是临时文件"""
+        """检查文件是否是目标文件（视频/音频文件或配置的额外后缀文件），且不是临时文件"""
         file_suffix = file_path.suffix.lower()
         
         # 1. 检查是否为临时文件
         if file_suffix in TEMP_EXTENSIONS:
             return False
         
-        # 2. 检查是否为视频文件
-        if file_suffix in VIDEO_EXTENSIONS:
+        # 2. 检查是否为视频/音频文件
+        if file_suffix in VIDEO_EXTENSIONS or file_suffix in AUDIO_EXTENSIONS:
             return True
         
         # 3. 检查是否为配置的额外后缀（如 .jpg, .nfo 等）
@@ -124,11 +141,11 @@ class OpenlistMover(_PluginBase):
     # 插件名称
     plugin_name = "Openlist 视频文件同步"
     # 插件描述
-    plugin_desc = "监控本地目录，当有新视频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录。支持移动任务监控和 strm 文件同步。"
+    plugin_desc = "监控本地目录，当有新视频/音频文件生成时，自动通过 Openlist API 将其移动到指定的云盘目录。支持移动任务监控和 strm 文件同步。"
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.5.0" 
+    plugin_version = "4.6.0" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -151,6 +168,16 @@ class OpenlistMover(_PluginBase):
     _strm_copy_extensions_set = set() # 解析后的后缀集合
     _observer = []
     _scheduler: Optional[BackgroundScheduler] = None
+
+    # === 新增：音频后缀配置 ===
+    _audio_extensions = ""
+    # ========================
+
+    # === 新增：目录列表缓存（洗版预检查复用，避免逐个后缀探测） ===
+    _dir_listing_cache: Dict[str, Tuple[float, List[str]]] = {}
+    _dir_cache_lock = Lock()
+    _dir_cache_seconds = 3600  # 目录列表缓存时长（秒），默认 1 小时；0 = 不缓存
+    # ==========================================================
     
     # === 新增移动延迟配置 ===
     _move_delay_seconds = 0
@@ -282,6 +309,32 @@ class OpenlistMover(_PluginBase):
                     VIDEO_EXTENSIONS = custom_extensions
                     logger.info(f"已加载 {len(VIDEO_EXTENSIONS)} 个自定义视频后缀: {VIDEO_EXTENSIONS}")
             # =======================
+
+            # === 加载音频后缀配置 ===
+            audio_extensions_config = config.get("audio_extensions", "")
+            if audio_extensions_config:
+                # 解析用户配置的音频后缀
+                custom_audio_extensions = [
+                    ext.strip().lower()
+                    for ext in audio_extensions_config.split("\n")
+                    if ext.strip() and ext.strip().startswith('.')
+                ]
+                if custom_audio_extensions:
+                    global AUDIO_EXTENSIONS
+                    AUDIO_EXTENSIONS = custom_audio_extensions
+                    logger.info(f"已加载 {len(AUDIO_EXTENSIONS)} 个自定义音频后缀: {AUDIO_EXTENSIONS}")
+            # =======================
+
+            # === 加载目录列表缓存时长配置 ===
+            try:
+                self._dir_cache_seconds = max(0, int(config.get("dir_cache_seconds", 3600)))
+            except (ValueError, TypeError):
+                self._dir_cache_seconds = 3600
+            # 配置变化后清空旧缓存，避免沿用过期配置下的列表
+            with self._dir_cache_lock:
+                self._dir_listing_cache = {}
+            logger.debug(f"Openlist Mover 洗版目录列表缓存时长: {self._dir_cache_seconds} 秒")
+            # ================================
 
             # === 加载全局扫描配置 ===
             self._global_scan_enabled = config.get("global_scan_enabled", False)
@@ -607,8 +660,8 @@ class OpenlistMover(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "title": "视频文件后缀配置",
-                                            "text": "定义哪些文件扩展名被视为视频文件。用于文件监控和洗版模式的文件识别。",
+                                            "title": "视频/音频文件后缀配置",
+                                            "text": "定义哪些文件扩展名被视为视频/音频文件。用于文件监控、洗版模式的文件识别和 STRM 生成。留空时使用内置默认后缀列表。",
                                         },
                                     }
                                 ]
@@ -620,15 +673,30 @@ class OpenlistMover(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12},
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VTextarea",
                                         "props": {
                                             "model": "video_extensions",
                                             "label": "视频文件后缀",
-                                            "rows": 3,
+                                            "rows": 4,
                                             "placeholder": "每行一个后缀，例如：\n.mkv\n.mp4\n.ts\n.avi\n.rmvb\n.wmv\n.mov\n.flv\n.mpg\n.mpeg\n.iso\n.bdmv\n.m2ts",
+                                        },
+                                    }
+                                ]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "audio_extensions",
+                                            "label": "音频文件后缀",
+                                            "rows": 4,
+                                            "placeholder": "每行一个后缀，例如：\n.flac\n.ape\n.wav\n.mp3\n.aac\n.m4a\n.ogg\n.wma\n.opus\n.ac3\n.dts\n.dsf\n.aiff",
                                         },
                                     }
                                 ]
@@ -727,7 +795,7 @@ class OpenlistMover(_PluginBase):
                                             "type": "info",
                                             "variant": "tonal",
                                             "title": "洗版模式配置",
-                                            "text": "当开启后，如果移动时发现目标文件已存在 (403 exists)，将自动使用覆盖模式 (overwrite: true) 重新移动。洗版成功后，会先删除旧的 STRM 文件，等待指定延迟后再重新生成。",
+                                            "text": "开启后，移动前会对目标目录做一次 list，检查是否存在同名的旧视频/音频文件（仅视频/音频文件触发该预检查，封面/nfo 等额外后缀文件不会触发，避免误删）。目录列表结果会临时缓存（默认 1 小时，可配置），同一目录后续新增文件复用，不再逐个后缀发探测请求。若移动时仍遇到目标文件已存在 (403 exists)，将自动使用覆盖模式 (overwrite: true) 重新移动。洗版成功后，会先删除旧的 STRM 文件，等待指定延迟后再重新生成。",
                                         },
                                     }
                                 ]
@@ -759,6 +827,27 @@ class OpenlistMover(_PluginBase):
                                             "type": "number",
                                             "min": 0,
                                             "placeholder": "默认 60 (删除旧STRM后等待60秒再生效)",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "dir_cache_seconds",
+                                            "label": "洗版目录列表缓存时长 (秒)",
+                                            "type": "number",
+                                            "min": 0,
+                                            "placeholder": "默认 3600 (1小时内同目录复用一次list结果；0=不缓存)",
                                         },
                                     }
                                 ]
@@ -972,6 +1061,8 @@ class OpenlistMover(_PluginBase):
             "clear_panel_threshold": 30,
             "keep_successful_tasks": 3,
             "video_extensions": "",
+            "audio_extensions": "",
+            "dir_cache_seconds": 3600,
             "global_scan_enabled": False,
             "global_scan_time": "02:00",
             "task_check_interval": 60,
@@ -1314,6 +1405,9 @@ class OpenlistMover(_PluginBase):
                     # 增加成功计数
                     self._successful_moves_count += 1
                     self._save_plugin_state()  # 保存状态计数器
+
+                    # 移动成功后目标目录内容已变化，使洗版目录列表缓存失效
+                    self._invalidate_dir_cache(task['dst_dir'])
 
                     # 判断文件后缀，选择处理方式
                     file_ext = Path(task['file']).suffix.lower()
@@ -2362,50 +2456,52 @@ class OpenlistMover(_PluginBase):
     def _check_and_clean_similar_files(self, dst_dir: str, target_file: str) -> bool:
         """
         检查目标目录中是否存在类似文件（相同文件名但不同后缀），如果存在则删除
+        仅对视频/音频文件执行；额外后缀文件（封面/nfo等）直接跳过，避免误删同名媒体文件。
+        目录内容通过一次 /api/fs/list 获取并做本地比对，列表结果会在 _dir_cache_seconds
+        时间内缓存，供同一目录后续新增文件的洗版预检查复用（不再逐个后缀发 GET 探测，
+        删除操作仍合并为一次 REMOVE 调用）。
         返回 True 表示需要洗版，False 表示不需要
         """
         if not self._wash_mode_enabled:
             return False
 
         target_path = Path(target_file)
-        target_name_without_ext = target_path.stem  # 获取文件名（不含后缀）
+        target_suffix = target_path.suffix.lower()
+        target_name_without_ext = target_path.stem
+
+        # 仅对视频/音频文件执行洗版预检查
+        if target_suffix not in VIDEO_EXTENSIONS and target_suffix not in AUDIO_EXTENSIONS:
+            logger.debug(f"洗版模式：{target_file} 不是视频/音频文件，跳过洗版预检查")
+            return False
 
         logger.debug(f"检查目标目录 {dst_dir} 中是否存在类似文件: {target_name_without_ext}.*")
 
-        # 构建目录路径进行检查
-        dir_exists, dir_info = self._call_openlist_get_api(dst_dir)
-        if dir_exists is None:
-            logger.warning(f"洗版模式：目标目录 {dst_dir} 存在性检查结果不明确，取消移动操作")
-            return False  # 结果不明确，取消操作
-        if not dir_exists:
-            logger.debug(f"目标目录 {dst_dir} 不存在，无需检查类似文件")
-            return False
+        # 通过目录列表一次性获取内容（带缓存），避免逐个后缀发 GET 探测
+        names = self._get_dir_listing_cached(dst_dir)
+        if names is None:
+            logger.warning(f"洗版模式：目标目录 {dst_dir} 列表结果不明确，跳过删除（若移动时遇到 403 exists 将由传统洗版兜底）")
+            return False  # 结果不明确，不执行删除
 
-        # 假设目录存在，我们需要列出目录内容来检查类似文件
-        # 由于没有直接的 list API，我们通过尝试检查每个可能的视频文件来模拟
+        # 本地比对：查找相同文件名（不含后缀）、不同视频/音频后缀的条目
+        name_lookup = {n.lower(): n for n in names}
         files_to_delete = []
-
-        # 检查所有视频扩展名的文件是否存在
-        for ext in VIDEO_EXTENSIONS:
-            if ext == target_path.suffix.lower():
+        for ext in list(VIDEO_EXTENSIONS) + list(AUDIO_EXTENSIONS):
+            if ext == target_suffix:
                 continue  # 跳过目标文件本身的后缀
+            candidate = f"{target_name_without_ext}{ext}"
+            actual_name = name_lookup.get(candidate.lower())
+            if actual_name is not None:
+                logger.debug(f"发现类似文件需要删除: {actual_name}")
+                files_to_delete.append(actual_name)
 
-            check_file_path = f"{dst_dir.rstrip('/')}/{target_name_without_ext}{ext}"
-            file_exists, file_info = self._call_openlist_get_api(check_file_path)
-
-            if file_exists is None:
-                logger.warning(f"洗版模式：文件 {check_file_path} 存在性检查结果不明确，取消移动操作")
-                return False  # 结果不明确，取消操作
-            elif file_exists:
-                logger.debug(f"发现类似文件需要删除: {check_file_path}")
-                files_to_delete.append(f"{target_name_without_ext}{ext}")
-
-        # 如果发现需要删除的文件，执行删除操作
+        # 如果发现需要删除的文件，合并为一次删除操作
         if files_to_delete:
             logger.debug(f"洗版模式：删除 {len(files_to_delete)} 个类似文件: {files_to_delete}")
             delete_success = self._call_openlist_remove_api(dst_dir, files_to_delete)
 
             if delete_success:
+                # 删除后目录内容已变化，使缓存失效
+                self._invalidate_dir_cache(dst_dir)
                 logger.debug(f"洗版模式：成功删除类似文件")
                 return True
             else:
@@ -2414,6 +2510,113 @@ class OpenlistMover(_PluginBase):
 
         logger.debug(f"目标目录 {dst_dir} 中未发现类似文件")
         return False
+
+    def _get_dir_listing_cached(self, dst_dir: str) -> Optional[List[str]]:
+        """
+        获取目标目录的文件/子目录名称列表（带缓存）。
+        返回: List[str] 名称列表；[] 表示目录不存在；None 表示结果不明确（不应执行删除）
+        """
+        key = dst_dir.rstrip('/')
+        now = time.time()
+        with self._dir_cache_lock:
+            cached = self._dir_listing_cache.get(key)
+            if cached:
+                cache_time, cached_names = cached
+                if self._dir_cache_seconds <= 0 or now - cache_time < self._dir_cache_seconds:
+                    logger.debug(f"洗版模式：使用目录列表缓存 {key} ({len(cached_names)} 条, 已缓存 {int(now - cache_time)} 秒)")
+                    return cached_names
+
+        listing = self._call_openlist_list_dir_api(key)
+        if listing is None:
+            return None
+
+        with self._dir_cache_lock:
+            self._dir_listing_cache[key] = (now, listing)
+        logger.debug(f"洗版模式：已缓存目录列表 {key} ({len(listing)} 条)")
+        return listing
+
+    def _invalidate_dir_cache(self, dst_dir: str):
+        """使指定目录的列表缓存失效（目录内容发生变化后调用）"""
+        key = dst_dir.rstrip('/')
+        with self._dir_cache_lock:
+            had = self._dir_listing_cache.pop(key, None)
+        if had is not None:
+            logger.debug(f"洗版模式：已使目录列表缓存失效 {key}")
+
+    def _call_openlist_list_dir_api(self, path: str) -> Optional[List[str]]:
+        """
+        调用 Openlist API /api/fs/list 获取目录内容（refresh=False，不会触发 strm 生成副作用）。
+        返回: List[str] 名称列表；[] 表示目录不存在；None 表示结果不明确
+        """
+        api_url = f"{self._openlist_url}/api/fs/list"
+        names: List[str] = []
+        page = 1
+        per_page = 1000
+
+        try:
+            # 分页拉取完整目录内容
+            while True:
+                payload = {
+                    "path": path,
+                    "password": "",
+                    "page": page,
+                    "per_page": per_page,
+                    "refresh": False,
+                }
+
+                data = json.dumps(payload).encode("utf-8")
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": self._openlist_token,
+                    "User-Agent": "MoviePilot-OpenlistMover-DirList",
+                }
+
+                req = urllib.request.Request(api_url, data=data, headers=headers, method="POST")
+
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    response_body = response.read().decode("utf-8")
+                    response_code = response.getcode()
+
+                    if response_code != 200:
+                        logger.warning(f"Openlist List API 返回非 200 状态码 {response_code}: {response_body}")
+                        return None
+
+                    response_data = json.loads(response_body)
+                    if response_data.get("code") != 200:
+                        error_msg = response_data.get('message', '未知错误') or ''
+                        # 目录不存在视为空列表
+                        if "not exist" in error_msg.lower() or "not found" in error_msg.lower():
+                            logger.debug(f"Openlist List API: 目录不存在 {path}")
+                            return []
+                        logger.warning(f"Openlist List API 报告失败: {error_msg} (Path: {path})")
+                        return None
+
+                    data_obj = response_data.get('data', {}) or {}
+                    content = data_obj.get('content') or []
+                    for item in content:
+                        if item.get('name') is not None:
+                            names.append(str(item['name']))
+                    total = data_obj.get('total')
+
+                    # 已取完所有条目则停止
+                    if len(content) < per_page or (total is not None and len(names) >= int(total)):
+                        break
+                    page += 1
+
+            return names
+
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                logger.debug(f"Openlist List API: 目录不存在 {path} (HTTP 404)")
+                return []
+            logger.error(f"Openlist List API 调用失败 (HTTPError {e.code}): {e}")
+            return None
+        except urllib.error.URLError as e:
+            logger.error(f"Openlist List API 调用失败 (URLError): {e}")
+            return None
+        except Exception as e:
+            logger.error(f"调用 Openlist List API 时出错: {e} - {traceback.format_exc()}")
+            return None
 
     def _scan_local_directories(self):
         """
@@ -2448,8 +2651,8 @@ class OpenlistMover(_PluginBase):
                         file_path = Path(root) / file
                         file_suffix = file_path.suffix.lower()
 
-                        # 检查是否为视频文件
-                        if file_suffix in VIDEO_EXTENSIONS:
+                        # 检查是否为视频/音频文件
+                        if file_suffix in VIDEO_EXTENSIONS or file_suffix in AUDIO_EXTENSIONS:
                             total_files_found += 1
 
                             # 检查是否为临时文件
