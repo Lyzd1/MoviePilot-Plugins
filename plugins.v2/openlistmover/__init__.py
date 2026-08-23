@@ -145,7 +145,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.6.3" 
+    plugin_version = "4.6.4" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -799,7 +799,7 @@ class OpenlistMover(_PluginBase):
                                             "type": "info",
                                             "variant": "tonal",
                                             "title": "洗版模式配置",
-                                            "text": "开启后，探测到新媒体文件时（执行移动前）会提前 list 一次目标目录并缓存（默认 1 小时，可配置，同目录并发只发一次请求）：检查是否存在同名的旧视频/音频文件（仅视频/音频文件触发该预检查，封面/nfo 等额外后缀文件不会触发，避免误删）。缓存保存在内存中，由插件增量维护：移动成功的新文件追加进缓存、洗版删除同步移除，缓存有效期内同一目录后续洗版可直接命中旧版本并替换；空目录会缓存为空列表，首个文件移动成功后自动追加。条目过期即删除（读取/追加/删除时发现过期立即移除，并每 10 分钟自动清扫一次过期条目与单飞锁，回收内存）；设为 0 = 不缓存（每次重新拉取）。外部变化在缓存过期后重新拉取；若移动时仍遇到目标文件已存在 (403 exists)，将自动使用覆盖模式 (overwrite: true) 重新移动。洗版成功后，会先删除旧的 STRM 文件，等待指定延迟后再重新生成。",
+                                            "text": "开启后，探测到新媒体文件时（执行移动前）会提前 list 一次目标目录并缓存（默认 1 小时，可配置，同目录并发只发一次请求）：检查是否存在同名的旧视频/音频文件（仅视频/音频文件触发该预检查，封面/nfo 等额外后缀文件不会触发，避免误删）。缓存保存在内存中，由插件增量维护：移动成功的新文件追加进缓存、洗版删除同步移除，缓存有效期内同一目录后续洗版可直接命中旧版本并替换；空目录会缓存为空列表，首个文件移动成功后自动追加。条目采用滑动续期：有效期内每次命中/更新都会刷新寿命，目录持续活跃则缓存持续有效，空闲超过 TTL 才过期；过期即删除（读取/追加/删除时发现过期立即移除，并每 10 分钟自动清扫一次过期条目与单飞锁，回收内存）；设为 0 = 不缓存（每次重新拉取）。外部变化在缓存过期后重新拉取；若移动时仍遇到目标文件已存在 (403 exists)，将自动使用覆盖模式 (overwrite: true) 重新移动。洗版成功后，会先删除旧的 STRM 文件，等待指定延迟后再重新生成。",
                                         },
                                     }
                                 ]
@@ -2526,9 +2526,10 @@ class OpenlistMover(_PluginBase):
 
     def _get_dir_listing_cached(self, dst_dir: str) -> Optional[List[str]]:
         """
-        获取目标目录的文件/子目录名称列表（带缓存 + 单飞 + 过期即删）。
+        获取目标目录的文件/子目录名称列表（带缓存 + 单飞 + 过期即删 + 滑动续期）。
         缓存有效判定：_dir_cache_seconds > 0 且未超过该时长（0 或负值 = 不缓存，每次重新拉取）。
-        命中有效缓存直接返回；发现条目已过期（或未开启缓存）时，【立即从 dict 删除该条目】
+        命中有效缓存时【滑动续期】（把时间戳更新为当前时间，目录持续活跃则缓存持续有效，
+        空闲超过 TTL 才过期）；发现条目已过期（或未开启缓存）时，【立即从 dict 删除该条目】
         回收内存，再重新拉取覆盖。
         单飞：同一目录的并发请求共享同一把 key 锁，只有最先到达的线程真正发起 list，
         其余线程在拿到锁后直接复用其结果，避免同目录并发各自触发 list 请求。
@@ -2543,13 +2544,15 @@ class OpenlistMover(_PluginBase):
 
         now = time.time()
 
-        # 1. 命中有效缓存直接返回；过期条目立即删除
+        # 1. 命中有效缓存直接返回并滑动续期；过期条目立即删除
         with self._dir_cache_lock:
             cached = self._dir_listing_cache.get(key)
             if cached:
                 cache_time, cached_names = cached
                 if self._dir_cache_seconds > 0 and now - cache_time < self._dir_cache_seconds:
-                    logger.debug(f"洗版模式：使用目录列表缓存 {key} ({len(cached_names)} 条, 已缓存 {int(now - cache_time)} 秒)")
+                    # 滑动续期：命中即刷新时间戳
+                    self._dir_listing_cache[key] = (now, cached_names)
+                    logger.debug(f"洗版模式：使用目录列表缓存 {key} ({len(cached_names)} 条, 已缓存 {int(now - cache_time)} 秒, 已续期)")
                     return cached_names
                 # 条目已过期（或未开启缓存）：直接删除，回收内存
                 self._dir_listing_cache.pop(key, None)
@@ -2563,13 +2566,15 @@ class OpenlistMover(_PluginBase):
                 self._dir_listing_locks[key] = key_lock
 
         with key_lock:
-            # 3. 拿到锁后再查一次缓存（可能已被等待中的首个拉取者填充）；过期条目同样立即删除
+            # 3. 拿到锁后再查一次缓存（可能已被等待中的首个拉取者填充）；命中同样滑动续期
             with self._dir_cache_lock:
                 cached = self._dir_listing_cache.get(key)
                 if cached:
                     cache_time, cached_names = cached
                     if self._dir_cache_seconds > 0 and time.time() - cache_time < self._dir_cache_seconds:
-                        logger.debug(f"洗版模式：使用目录列表缓存 {key} (单飞等待后命中, {len(cached_names)} 条)")
+                        refreshed = time.time()
+                        self._dir_listing_cache[key] = (refreshed, cached_names)
+                        logger.debug(f"洗版模式：使用目录列表缓存 {key} (单飞等待后命中, {len(cached_names)} 条, 已续期)")
                         return cached_names
                     self._dir_listing_cache.pop(key, None)
 
@@ -2593,7 +2598,7 @@ class OpenlistMover(_PluginBase):
             logger.warning(f"洗版模式：预填充目录列表缓存失败 {dst_dir}")
 
     def _add_to_dir_cache(self, dst_dir: str, name: str):
-        """移动成功后，将新文件名增量加入对应目录的列表缓存（若该目录已有缓存条目）"""
+        """移动成功后，将新文件名增量加入对应目录的列表缓存，并滑动续期（若该目录已有缓存条目）"""
         key = dst_dir.rstrip('/')
         now = time.time()
         with self._dir_cache_lock:
@@ -2601,12 +2606,14 @@ class OpenlistMover(_PluginBase):
             if cached:
                 cache_time, cached_names = cached
                 if self._dir_cache_seconds > 0 and now - cache_time < self._dir_cache_seconds:
-                    # 有效条目：追加新文件
+                    # 有效条目：追加新文件并滑动续期
                     if name not in cached_names:
-                        self._dir_listing_cache[key] = (cache_time, cached_names + [name])
-                        logger.debug(f"洗版模式：已将 {name} 加入目录列表缓存 {key} ({len(cached_names) + 1} 条)")
+                        self._dir_listing_cache[key] = (now, cached_names + [name])
+                        logger.debug(f"洗版模式：已将 {name} 加入目录列表缓存 {key} ({len(cached_names) + 1} 条, 已续期)")
                     else:
-                        logger.debug(f"洗版模式：目录列表缓存 {key} 已包含 {name}，无需追加")
+                        # 已包含：仅滑动续期
+                        self._dir_listing_cache[key] = (now, cached_names)
+                        logger.debug(f"洗版模式：目录列表缓存 {key} 已包含 {name}，仅续期")
                 else:
                     # 条目已过期（或未开启缓存）：直接删除，不追加（下次读取会重新拉取完整列表）
                     self._dir_listing_cache.pop(key, None)
@@ -2615,7 +2622,7 @@ class OpenlistMover(_PluginBase):
                 logger.debug(f"洗版模式：目录列表缓存 {key} 不存在，无需追加")
 
     def _remove_from_dir_cache(self, dst_dir: str, names: List[str]):
-        """洗版删除成功后，将被删除的文件名从对应目录的列表缓存中移除（保持缓存与真实目录同步）"""
+        """洗版删除成功后，将被删除的文件名从对应目录的列表缓存中移除，并滑动续期（保持缓存与真实目录同步）"""
         if not names:
             return
         key = dst_dir.rstrip('/')
@@ -2626,8 +2633,8 @@ class OpenlistMover(_PluginBase):
                 cache_time, cached_names = cached
                 if self._dir_cache_seconds > 0 and now - cache_time < self._dir_cache_seconds:
                     remaining = [n for n in cached_names if n not in names]
-                    self._dir_listing_cache[key] = (cache_time, remaining)
-                    logger.debug(f"洗版模式：目录列表缓存 {key} 已移除 {len(names)} 个被删条目 (剩 {len(remaining)} 条)")
+                    self._dir_listing_cache[key] = (now, remaining)
+                    logger.debug(f"洗版模式：目录列表缓存 {key} 已移除 {len(names)} 个被删条目 (剩 {len(remaining)} 条, 已续期)")
                 else:
                     # 条目已过期（或未开启缓存）：内容已不可信，直接删除条目即可
                     self._dir_listing_cache.pop(key, None)
