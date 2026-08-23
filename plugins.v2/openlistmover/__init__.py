@@ -145,7 +145,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.6.0" 
+    plugin_version = "4.6.1" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -795,7 +795,7 @@ class OpenlistMover(_PluginBase):
                                             "type": "info",
                                             "variant": "tonal",
                                             "title": "洗版模式配置",
-                                            "text": "开启后，移动前会对目标目录做一次 list，检查是否存在同名的旧视频/音频文件（仅视频/音频文件触发该预检查，封面/nfo 等额外后缀文件不会触发，避免误删）。目录列表结果会临时缓存（默认 1 小时，可配置），同一目录后续新增文件复用，不再逐个后缀发探测请求。若移动时仍遇到目标文件已存在 (403 exists)，将自动使用覆盖模式 (overwrite: true) 重新移动。洗版成功后，会先删除旧的 STRM 文件，等待指定延迟后再重新生成。",
+                                            "text": "开启后，移动前会对目标目录做一次 list，检查是否存在同名的旧视频/音频文件（仅视频/音频文件触发该预检查，封面/nfo 等额外后缀文件不会触发，避免误删）。目录列表结果会临时缓存（默认 1 小时，可配置）：插件自身的移动/删除会增量更新缓存（新文件追加、洗版删除同步移除），缓存有效期内同一目录后续洗版可直接命中旧版本并替换，替换后缓存自动刷新；外部变化在缓存过期后重新拉取。若移动时仍遇到目标文件已存在 (403 exists)，将自动使用覆盖模式 (overwrite: true) 重新移动。洗版成功后，会先删除旧的 STRM 文件，等待指定延迟后再重新生成。",
                                         },
                                     }
                                 ]
@@ -1406,8 +1406,8 @@ class OpenlistMover(_PluginBase):
                     self._successful_moves_count += 1
                     self._save_plugin_state()  # 保存状态计数器
 
-                    # 移动成功后目标目录内容已变化，使洗版目录列表缓存失效
-                    self._invalidate_dir_cache(task['dst_dir'])
+                    # 移动成功后目标目录内容已变化，将新文件增量加入洗版目录列表缓存（而非整体失效）
+                    self._add_to_dir_cache(task['dst_dir'], task['file'])
 
                     # 判断文件后缀，选择处理方式
                     file_ext = Path(task['file']).suffix.lower()
@@ -2458,8 +2458,9 @@ class OpenlistMover(_PluginBase):
         检查目标目录中是否存在类似文件（相同文件名但不同后缀），如果存在则删除
         仅对视频/音频文件执行；额外后缀文件（封面/nfo等）直接跳过，避免误删同名媒体文件。
         目录内容通过一次 /api/fs/list 获取并做本地比对，列表结果会在 _dir_cache_seconds
-        时间内缓存，供同一目录后续新增文件的洗版预检查复用（不再逐个后缀发 GET 探测，
-        删除操作仍合并为一次 REMOVE 调用）。
+        时间内缓存：插件自身的移动/洗版删除会增量更新缓存（新文件追加、被删条目移除），
+        缓存有效期内同一目录后续新增文件的洗版预检查直接复用列表命中旧版本（不再逐个后缀
+        发 GET 探测，删除操作仍合并为一次 REMOVE 调用）。
         返回 True 表示需要洗版，False 表示不需要
         """
         if not self._wash_mode_enabled:
@@ -2500,8 +2501,8 @@ class OpenlistMover(_PluginBase):
             delete_success = self._call_openlist_remove_api(dst_dir, files_to_delete)
 
             if delete_success:
-                # 删除后目录内容已变化，使缓存失效
-                self._invalidate_dir_cache(dst_dir)
+                # 删除后同步更新缓存：移除被删条目（后续新文件移动成功后再追加）
+                self._remove_from_dir_cache(dst_dir, files_to_delete)
                 logger.debug(f"洗版模式：成功删除类似文件")
                 return True
             else:
@@ -2535,13 +2536,28 @@ class OpenlistMover(_PluginBase):
         logger.debug(f"洗版模式：已缓存目录列表 {key} ({len(listing)} 条)")
         return listing
 
-    def _invalidate_dir_cache(self, dst_dir: str):
-        """使指定目录的列表缓存失效（目录内容发生变化后调用）"""
+    def _add_to_dir_cache(self, dst_dir: str, name: str):
+        """移动成功后，将新文件名增量加入对应目录的列表缓存（若该目录已有缓存条目）"""
         key = dst_dir.rstrip('/')
         with self._dir_cache_lock:
-            had = self._dir_listing_cache.pop(key, None)
-        if had is not None:
-            logger.debug(f"洗版模式：已使目录列表缓存失效 {key}")
+            cached = self._dir_listing_cache.get(key)
+            if cached and name not in cached[1]:
+                self._dir_listing_cache[key] = (cached[0], cached[1] + [name])
+                logger.debug(f"洗版模式：已将 {name} 加入目录列表缓存 {key} ({len(cached[1]) + 1} 条)")
+            else:
+                logger.debug(f"洗版模式：目录列表缓存 {key} 不存在或已包含 {name}，无需追加")
+
+    def _remove_from_dir_cache(self, dst_dir: str, names: List[str]):
+        """洗版删除成功后，将被删除的文件名从对应目录的列表缓存中移除（保持缓存与真实目录同步）"""
+        if not names:
+            return
+        key = dst_dir.rstrip('/')
+        with self._dir_cache_lock:
+            cached = self._dir_listing_cache.get(key)
+            if cached:
+                remaining = [n for n in cached[1] if n not in names]
+                self._dir_listing_cache[key] = (cached[0], remaining)
+                logger.debug(f"洗版模式：目录列表缓存 {key} 已移除 {len(names)} 个被删条目 (剩 {len(remaining)} 条)")
 
     def _call_openlist_list_dir_api(self, path: str) -> Optional[List[str]]:
         """
