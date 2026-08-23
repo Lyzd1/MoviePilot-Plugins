@@ -34,9 +34,8 @@
    - 支持「立即扫描一次」按钮（保存配置后执行，随后自动复位）；
 6. 详情面板：展示每个配置站点的账号分享率、阈值（下限-上限）与档位状态（供下载时判定），
    以及该站已限速种子数，不再展示种子级明细；
-7. 停用插件时（用户主动停用/禁用）：自动将本插件限速过的种子恢复为不限速
-   （跨会话持久化 + 失败兜底重试）；升级/热重载插件不会误触发恢复
-   （stop_service 不再无条件恢复，避免升级后限速被误取消）。
+7. 取消限速仅发生在运行中「分享率 <= 下限」档位：停用/卸载插件、移除下载器、
+   升级/热重载等场景均不修改任何种子的上传限速（保持插件运行期设置的值）。
 """
 
 import datetime
@@ -74,7 +73,7 @@ class SiteRatioLimiter(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.5.1"
+    plugin_version = "1.6.0"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -124,9 +123,6 @@ class SiteRatioLimiter(_PluginBase):
     _scan_scheduler = None
     # 上次扫描时各下载器的种子 hash 快照 {下载器名称: {种子Hash}}，跨会话持久化
     _scanned_hashes: Dict[str, Set[str]] = {}
-    _retry_scheduler = None
-    _retry_attempts = 0
-    _MAX_RESTORE_RETRY = 60
     # 站点域名(小写) -> 站点名称；站点名称(小写) -> 站点名称
     _site_domains: Dict[str, str] = {}
     _site_names: Dict[str, str] = {}
@@ -138,12 +134,10 @@ class SiteRatioLimiter(_PluginBase):
     _site_states: Dict[str, str] = {}
     # 站点统计（页面展示 + 下载时判定依据）{站点名称: {ratio, lower, upper, state, updated, limited, total}}
     _site_stats: Dict[str, Dict[str, Any]] = {}
-    # 本插件本轮/会话内限速的种子 {下载器名称: {种子Hash}}，停用/卸载时必须恢复的种子 {下载器名称: {种子Hash}}
+    # 本插件本轮/会话内限速的种子 {下载器名称: {种子Hash}}（防抖动登记与统计）
     _limited_hashes: Dict[str, Set[str]] = {}
-    _restore_hashes: Dict[str, Set[str]] = {}
 
     # 持久化数据键
-    _RESTORE_DATA_KEY = "restore_hashes"
     _SITE_STATES_KEY = "site_states"
     _SIG_KEY = "config_signature"
     _SCANNED_HASHES_KEY = "scanned_hashes"
@@ -156,12 +150,10 @@ class SiteRatioLimiter(_PluginBase):
 
         保存配置时的限速动作控制（避免无意义的限速 API 调用）：
         - 仅当「首次启用 / 上传限速大小变化 / 分享率下限阈值变化 / 下载器或站点范围变化」之一发生时，
-          恢复旧下载器的限速并按新档位调用接口调整限速；
+          按新档位调用接口调整限速；
         - 否则只刷新站点分享率、档位状态与统计（面板数据），不调用任何限速接口。
         """
         was_enabled = self._enabled
-        old_downloaders = self._downloaders or []
-        self._stop_restore_retry(wait=True)
         self._stop_scan_scheduler()
 
         config = config or {}
@@ -190,8 +182,7 @@ class SiteRatioLimiter(_PluginBase):
         except Exception:
             pass
 
-        # 加载跨会话持久化的待恢复记录、站点档位状态与上次生效的配置签名
-        self._restore_hashes = self._load_set_map(self._RESTORE_DATA_KEY)
+        # 加载跨会话持久化的站点档位状态与上次生效的配置签名
         # 上次扫描快照（用于定时扫描识别「新增种子」）
         self._scanned_hashes = self._load_set_map(self._SCANNED_HASHES_KEY)
         try:
@@ -212,22 +203,18 @@ class SiteRatioLimiter(_PluginBase):
             old_sig = {}
         new_sig = self._config_signature()
 
-        # 每次重新初始化时清空会话级记录；待恢复记录与站点档位状态保留
+        # 每次重新初始化时清空会话级记录；站点档位状态保留
         self._limited_hashes = {}
         self._site_stats = {}
         self._site_ratios = {}
         self._site_ratio_times = {}
 
-        # 停用插件时：恢复旧配置下所有已限速的种子为不限速（不再走基线）
+        # 停用插件时：不取消任何限速（取消限速仅发生在运行中「分享率 <= 下限」档位）
         if was_enabled and not self._enabled:
-            self._restore_limits(downloaders=old_downloaders)
-            logger.info(f"{self.LOG_TAG}插件已停用，已恢复本插件限速过的种子为不限速")
-            self._save_set_map(self._RESTORE_DATA_KEY, self._restore_hashes)
-            self._start_restore_retry()
+            logger.info(f"{self.LOG_TAG}插件已停用，保持现有种子上传限速不变（不取消限速）")
             return
 
         if not self._enabled:
-            self._save_set_map(self._RESTORE_DATA_KEY, self._restore_hashes)
             return
 
         # ---- 启用状态：判断是否需要调用限速接口 ----
@@ -241,12 +228,6 @@ class SiteRatioLimiter(_PluginBase):
         # 上传速度为 0 的切换也算「限速大小变化」，需要按最新档位重新执行
         apply_changed = bool(old_sig) and (upload_changed or threshold_changed or downloaders_changed or sites_changed)
         first_run = bool(old_sig) is False
-
-        # 从旧选择中移除的下载器：先恢复其限速（返回恢复权限）
-        if old_sig and downloaders_changed:
-            removed = [name for name in old_downloaders if name not in self._downloaders]
-            if removed:
-                self._restore_limits(downloaders=removed)
 
         # 首次启用或相关配置变化：以静默基线按新档位执行限速/取消限速动作；
         # 上传限速大小变化时强制按新值刷新已限速种子
@@ -266,9 +247,6 @@ class SiteRatioLimiter(_PluginBase):
             self.save_data(self._SIG_KEY, new_sig)
         except Exception as err:
             logger.error(f"{self.LOG_TAG}持久化配置签名失败：{err}")
-
-        # 持久化待恢复记录（恢复失败项保留）
-        self._save_set_map(self._RESTORE_DATA_KEY, self._restore_hashes)
 
         # 立即扫描一次（保存配置时勾选「立即扫描」开关）：延迟 3 秒执行，避免与基线流程重叠
         if self._scan_onlyonce:
@@ -331,9 +309,8 @@ class SiteRatioLimiter(_PluginBase):
         """
         停止插件（升级/热重载/卸载时由 MoviePilot 调用）。
 
-        注意：不在 stop_service 中恢复限速！升级插件时 MoviePilot 会先调用旧实例的
-        stop_service 再加载新实例，若在此恢复会将种子误恢复为不限速；恢复限速仅由
-        init_plugin 在检测到「插件从启用变为停用」（用户主动停用/禁用）时执行。
+        注意：取消限速仅发生在运行中「分享率 <= 下限」档位；停用/卸载/升级/热重载
+        都不会取消任何种子的上传限速。
         """
         self._stop_scan_scheduler()
 
@@ -495,16 +472,14 @@ class SiteRatioLimiter(_PluginBase):
         summary = []
         if not services:
             logger.warning(f"{self.LOG_TAG}没有可用的 qBittorrent 下载器，跳过限速调整（状态已刷新）")
-            self._save_set_map(self._RESTORE_DATA_KEY, self._restore_hashes)
             return
         for service_name, service_info in services.items():
             downloader = service_info.instance
             downloader_type = getattr(service_info, "type", "")
             by_site, torrents = self._torrents_by_site(service_name, downloader)
-            # 清理已不在下载器中的种子记录（已删除的种子），避免兜底重试/恢复记录无限驻留
+            # 清理已不在下载器中的种子记录（已删除的种子），避免会话登记无限驻留
             current_hashes = {self._torrent_hash(t) for t in torrents if self._torrent_hash(t)}
             self._limited_hashes.get(service_name, set()).intersection_update(current_hashes)
-            self._restore_hashes.get(service_name, set()).intersection_update(current_hashes)
             # 执行动作：仅当 apply=True 时才调用限速/取消限速接口
             if apply:
                 for name in managed_names:
@@ -537,13 +512,8 @@ class SiteRatioLimiter(_PluginBase):
                 stats["limited"] = stats.get("limited", 0) + sum(
                     1 for torrent in site_torrents if self._torrent_current_limit_kb(torrent) > 0
                 )
-            # 兜底重试「限速过但恢复失败」的种子
-            if apply:
-                self._retry_stuck_restores(service_name, downloader)
-
         if summary:
             logger.info(f"{self.LOG_TAG}" + "；".join(summary))
-        self._save_set_map(self._RESTORE_DATA_KEY, self._restore_hashes)
 
     def _limit_torrent_by_hash(self, download_hash: str, site_name: str) -> bool:
         """
@@ -575,13 +545,11 @@ class SiteRatioLimiter(_PluginBase):
                     logger.error(f"{self.LOG_TAG}[{service_name}] 种子 [{download_hash}] 设置上传限速失败")
                     return False
                 self._limited_hashes.setdefault(service_name, set()).add(download_hash)
-                self._restore_hashes.setdefault(service_name, set()).add(download_hash)
                 # 同步站点统计中的限速计数
                 stats = self._site_stats.setdefault(site_name, {})
                 stats["limited"] = stats.get("limited", 0) + 1
                 stats["total"] = stats.get("total", 0) + 1
                 logger.info(f"{self.LOG_TAG}[{service_name}] 种子 [{self._torrent_name(target) or download_hash}] 所属站点 {site_name} 档位正常（分享率高于下限），已限速 {self._format_limit(effective_limit)}")
-                self._save_set_map(self._RESTORE_DATA_KEY, self._restore_hashes)
                 return True
             except Exception as err:
                 logger.error(f"{self.LOG_TAG}[{service_name}] 定位种子 [{download_hash}] 失败：{err}")
@@ -704,7 +672,6 @@ class SiteRatioLimiter(_PluginBase):
                     logger.error(f"{self.LOG_TAG}[{service_name}] 新增种子 [{torrent_name}] 设置上传限速失败：{err}")
                 if ok:
                     self._limited_hashes.setdefault(service_name, set()).add(torrent_hash)
-                    self._restore_hashes.setdefault(service_name, set()).add(torrent_hash)
                     limited_new += 1
                     # 同步站点统计的限速计数
                     site_stats = self._site_stats.setdefault(site, {})
@@ -716,8 +683,6 @@ class SiteRatioLimiter(_PluginBase):
                     )
                 else:
                     skipped += 1
-            # 持久化待恢复记录（新增限速的种子）
-            self._save_set_map(self._RESTORE_DATA_KEY, self._restore_hashes)
 
         # 更新并持久化扫描快照
         self._scanned_hashes = current_scanned
@@ -746,12 +711,9 @@ class SiteRatioLimiter(_PluginBase):
                 logger.error(f"{self.LOG_TAG}[{service_name}] 站点 {site_name} 种子 [{torrent_hash}] 取消限速失败：{err}")
             if ok:
                 self._limited_hashes.get(service_name, set()).discard(torrent_hash)
-                self._restore_hashes.get(service_name, set()).discard(torrent_hash)
                 canceled += 1
                 logger.info(f"{self.LOG_TAG}[{service_name}] 站点 {site_name} 分享率低于下限，已取消种子 [{torrent_hash}] 的上传限速")
-            else:
-                # 恢复失败：保留待恢复记录，后续兜底重试
-                self._restore_hashes.setdefault(service_name, set()).add(torrent_hash)
+            # 取消失败不登记：下次分享率刷新仍处于「低于下限」档位时会自然重试
         return canceled
 
     def _apply_site_limits(self, service_name: str, downloader: Any, site_name: str, torrents: List[Any], limit: float, force: bool = False) -> int:
@@ -759,7 +721,7 @@ class SiteRatioLimiter(_PluginBase):
         对指定站点「达到上限」档位的种子设置上传限速：
         - force=False（常规）：仅对当前未限速（up_limit=0）的种子调用接口设置限速；
           已限速（up_limit>0）的种子跳过接口调用，但仍登记为「本插件维护限速中」，
-          避免兜底恢复重试把本应保持限速的种子误恢复为不限速（防止限速抖动）；
+          避免重复调用接口与限速/取消抖动；
         - force=True（上传限速大小变化）：当前值已等于目标值的跳过，其余（0 或旧值）按目标值刷新。
         """
         applied = 0
@@ -787,7 +749,6 @@ class SiteRatioLimiter(_PluginBase):
                 logger.error(f"{self.LOG_TAG}[{service_name}] 站点 {site_name} 种子 [{torrent_hash}] 设置上传限速失败：{err}")
             if ok:
                 limited.add(torrent_hash)
-                self._restore_hashes.setdefault(service_name, set()).add(torrent_hash)
                 applied += 1
         return applied
 
@@ -1087,109 +1048,6 @@ class SiteRatioLimiter(_PluginBase):
             return limit
         effective_limit = min(float(limit), qb_upload_limit)
         return int(effective_limit) if effective_limit.is_integer() else effective_limit
-
-    # ---------------------------------------------------------------- 恢复与调度
-
-    def _restore_limits(self, downloaders: Optional[List[str]] = None):
-        """将本插件限速过的种子恢复为不限速（停用/卸载时调用）。"""
-        if downloaders is None:
-            names = list(dict.fromkeys((self._downloaders or []) + list(self._restore_hashes.keys())))
-        else:
-            names = downloaders
-        services = self._get_services(names)
-        if not services:
-            return
-        for service_name, service_info in services.items():
-            downloader = service_info.instance
-            hashes = self._restore_hashes.get(service_name) or set()
-            failed_hashes = set()
-            for torrent_hash in hashes:
-                try:
-                    if not downloader.change_torrent(hash_string=torrent_hash, upload_limit=0):
-                        failed_hashes.add(torrent_hash)
-                        logger.error(f"{self.LOG_TAG}[{service_name}] 恢复种子 [{torrent_hash}] 上传限速失败：下载器返回失败")
-                        continue
-                    logger.info(f"{self.LOG_TAG}[{service_name}] 种子 [{torrent_hash}] 已恢复不限速")
-                except Exception as err:
-                    failed_hashes.add(torrent_hash)
-                    logger.error(f"{self.LOG_TAG}[{service_name}] 恢复种子 [{torrent_hash}] 上传限速失败：{err}")
-            if failed_hashes:
-                self._restore_hashes[service_name] = failed_hashes
-            else:
-                self._restore_hashes.pop(service_name, None)
-            self._limited_hashes[service_name] = set()
-
-    def _start_restore_retry(self):
-        """存在待恢复记录时启动兜底恢复重试任务（停用/卸载状态下的生命周期保障）。"""
-        try:
-            if getattr(self, "_retry_scheduler", None) and self._retry_scheduler.running:
-                return
-            if not any(self._restore_hashes.values()):
-                return
-            self._retry_attempts = 0
-            self._retry_scheduler = BackgroundScheduler(timezone=settings.TZ)
-            self._retry_scheduler.add_job(
-                func=self._restore_retry_job,
-                trigger="interval",
-                seconds=60,
-                max_instances=1,
-                name="站点分享率上传限速-兜底恢复",
-            )
-            self._retry_scheduler.start()
-            logger.info(
-                f"{self.LOG_TAG}存在 {sum(len(v) for v in self._restore_hashes.values())} 个待恢复种子，"
-                "已启动兜底恢复重试任务"
-            )
-        except Exception as err:
-            logger.error(f"{self.LOG_TAG}启动兜底恢复重试任务失败：{err}")
-
-    def _stop_restore_retry(self, wait: bool = False):
-        """停止兜底恢复重试任务。"""
-        try:
-            if getattr(self, "_retry_scheduler", None):
-                if self._retry_scheduler.running:
-                    self._retry_scheduler.shutdown(wait=wait)
-                self._retry_scheduler = None
-            self._retry_attempts = 0
-        except Exception as err:
-            logger.error(f"{self.LOG_TAG}停止兜底恢复重试任务失败：{err}")
-
-    def _restore_retry_job(self):
-        """兜底恢复重试任务：每轮尝试恢复待恢复记录，全部成功后自动停止。"""
-        try:
-            self._restore_limits()
-        except Exception as err:
-            logger.error(f"{self.LOG_TAG}兜底恢复上传不限速失败：{err}")
-        self._save_set_map(self._RESTORE_DATA_KEY, self._restore_hashes)
-        if not any(self._restore_hashes.values()):
-            self._stop_restore_retry()
-            return
-        self._retry_attempts += 1
-        if self._retry_attempts % self._MAX_RESTORE_RETRY == 0:
-            logger.warning(
-                f"{self.LOG_TAG}待恢复种子仍有限速未恢复（已重试 {self._retry_attempts} 次），"
-                "已继续定时重试，下载器重连后将自动恢复，请检查下载器连接"
-            )
-
-    def _retry_stuck_restores(self, service_name: str, downloader: Any):
-        """启用状态下兜底重试「限速过但恢复失败」的种子恢复不限速。"""
-        pending = set(self._restore_hashes.get(service_name) or set()) - set(
-            self._limited_hashes.get(service_name) or set()
-        )
-        if not pending:
-            return
-        succeeded = set()
-        for torrent_hash in pending:
-            try:
-                if not downloader.change_torrent(hash_string=torrent_hash, upload_limit=0):
-                    logger.error(f"{self.LOG_TAG}[{service_name}] 兜底恢复种子 [{torrent_hash}] 上传限速失败：下载器返回失败")
-                    continue
-                succeeded.add(torrent_hash)
-                logger.info(f"{self.LOG_TAG}[{service_name}] 种子 [{torrent_hash}] 已兜底恢复不限速")
-            except Exception as err:
-                logger.error(f"{self.LOG_TAG}[{service_name}] 兜底恢复种子 [{torrent_hash}] 上传限速失败：{err}")
-        if succeeded:
-            self._restore_hashes.get(service_name, set()).difference_update(succeeded)
 
     # ---------------------------------------------------------------- 持久化
 
@@ -1531,7 +1389,7 @@ class SiteRatioLimiter(_PluginBase):
                                         "props": {
                                             "type": "error",
                                             "variant": "tonal",
-                                            "text": "档位带滞回：分享率 <= 下限 -> 🔻 低于下限，取消该站所有种子的上传速度上限，并保持到分享率 > 上限；分享率 > 上限 -> 🔺 达到上限，新增上传限速，并保持到分享率 <= 下限；中间区间 -> ⏸ 保持现状，不调用限速接口（防止限速波动）。保存配置时仅在上传速度、阈值（导致档位变化）或站点/下载器范围变化时才调用接口调整限速。停用或卸载插件时自动恢复本插件限速过的种子上传速度。",
+                                            "text": "档位带滞回：分享率 <= 下限 -> 🔻 低于下限，取消该站所有种子的上传速度上限，并保持到分享率 > 上限；分享率 > 上限 -> 🔺 达到上限，新增上传限速，并保持到分享率 <= 下限；中间区间 -> ⏸ 保持现状，不调用限速接口（防止限速波动）。保存配置时仅在上传速度、阈值（导致档位变化）或站点/下载器范围变化时才调用接口调整限速。取消限速仅发生在运行中「分享率 <= 下限」档位：停用或卸载插件、移除下载器均不会取消任何种子的上传限速，种子保持插件运行期设置的上传限速不变。",
                                         },
                                     }
                                 ],
