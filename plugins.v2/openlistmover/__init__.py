@@ -8,8 +8,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
-from urllib.parse import quote
-from datetime import datetime, timedelta
+from datetime import datetime
 from threading import Lock
 
 from watchdog.events import FileSystemEventHandler
@@ -145,7 +144,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.6.4" 
+    plugin_version = "4.6.5" 
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -1568,7 +1567,8 @@ class OpenlistMover(_PluginBase):
         for dst_prefix in self._parsed_strm_mappings.keys():
             normalized_dst = os.path.normpath(dst_prefix)
             normalized_task_dir = os.path.normpath(dst_dir)
-            if normalized_task_dir.startswith(normalized_dst):
+            # 边界匹配：完全相等或带路径分隔符的前缀（避免 /YP/Video 误匹配 /YP/Video2）
+            if normalized_task_dir == normalized_dst or normalized_task_dir.startswith(normalized_dst + os.sep):
                 if len(dst_prefix) > len(best_match):
                     best_match = dst_prefix
         
@@ -1584,13 +1584,20 @@ class OpenlistMover(_PluginBase):
             # 计算相对路径
             relative_dir_str = os.path.relpath(dst_dir, dst_prefix)
             relative_dir = relative_dir_str.replace(os.path.sep, '/')
+            # 文件直接位于映射根目录时 relpath 为 "."，归一化为空，避免拼出 "/前缀/." 导致 List/Copy 失败
+            if relative_dir == '.':
+                relative_dir = ''
             
             # 构建 List 路径 (需要 List 目录，而不是文件)
-            list_path = f"{strm_src_prefix.rstrip('/')}/{relative_dir}"
+            list_path = strm_src_prefix.rstrip('/')
+            if relative_dir:
+                list_path = f"{list_path}/{relative_dir}"
             
             # 构建 Copy 路径 (源和目标目录)
             copy_src_dir = list_path
-            copy_dst_dir = f"{strm_dst_prefix.rstrip('/')}/{relative_dir}"
+            copy_dst_dir = strm_dst_prefix.rstrip('/')
+            if relative_dir:
+                copy_dst_dir = f"{copy_dst_dir}/{relative_dir}"
             
             logger.debug(f"任务 {task_id} 成功，开始 STRM 处理:")
             logger.debug(f"  List 路径: {list_path}")
@@ -1718,7 +1725,8 @@ class OpenlistMover(_PluginBase):
             # 标准化路径比较
             normalized_local = os.path.normpath(local_prefix)
             normalized_file = os.path.normpath(local_file_str)
-            if normalized_file.startswith(normalized_local):
+            # 边界匹配：完全相等或带路径分隔符的前缀（避免 /a/b 误匹配 /a/bc 导致映射错位）
+            if normalized_file == normalized_local or normalized_file.startswith(normalized_local + os.sep):
                 if len(local_prefix) > len(best_match):
                     best_match = local_prefix
 
@@ -1960,7 +1968,8 @@ class OpenlistMover(_PluginBase):
         for dst_prefix in self._parsed_strm_mappings.keys():
             normalized_dst = os.path.normpath(dst_prefix)
             normalized_task_dir = os.path.normpath(dst_dir)
-            if normalized_task_dir.startswith(normalized_dst):
+            # 边界匹配：完全相等或带路径分隔符的前缀（避免 /YP/Video 误匹配 /YP/Video2）
+            if normalized_task_dir == normalized_dst or normalized_task_dir.startswith(normalized_dst + os.sep):
                 if len(dst_prefix) > len(best_match):
                     best_match = dst_prefix
 
@@ -1974,8 +1983,13 @@ class OpenlistMover(_PluginBase):
 
             relative_dir_str = os.path.relpath(dst_dir, dst_prefix)
             relative_dir = relative_dir_str.replace(os.path.sep, '/')
+            # 文件直接位于映射根目录时 relpath 为 "."，归一化为空，避免拼出 "/前缀/."
+            if relative_dir == '.':
+                relative_dir = ''
 
-            copy_dst_dir = f"{strm_dst_prefix.rstrip('/')}/{relative_dir}"
+            copy_dst_dir = strm_dst_prefix.rstrip('/')
+            if relative_dir:
+                copy_dst_dir = f"{copy_dst_dir}/{relative_dir}"
             copy_dst_path = f"{copy_dst_dir}/{file_name}"
 
             logger.debug(f"复制文件到strm本地目标: {dst_dir}/{file_name} -> {copy_dst_path}")
@@ -2643,23 +2657,30 @@ class OpenlistMover(_PluginBase):
     def _sweep_dir_cache(self):
         """
         惰性清扫：删除所有已过期的目录列表缓存条目，并同步清理其单飞锁（内存回收）。
+        同时回收“孤儿锁”：没有对应缓存条目的锁（拉取失败 / 不缓存模式下不存储列表 /
+        缓存已过期弹出）也一并删除，避免 _dir_listing_locks 无限增长。
         由 _get_dir_listing_cached 按时间门控触发（无后台线程）。
         _dir_cache_seconds <= 0（不缓存）时视为全部过期，清扫后缓存表为空。
         """
         now = time.time()
         ttl = self._dir_cache_seconds
         with self._dir_cache_lock:
-            if not self._dir_listing_cache:
-                return
             if ttl > 0:
                 expired_keys = [k for k, (t, _) in self._dir_listing_cache.items() if now - t >= ttl]
             else:
                 expired_keys = list(self._dir_listing_cache.keys())
-            if expired_keys:
-                for k in expired_keys:
-                    self._dir_listing_cache.pop(k, None)
+            removed = 0
+            for k in expired_keys:
+                self._dir_listing_cache.pop(k, None)
+                removed += 1
+            # 回收孤儿单飞锁：缓存中已无条目的目录锁不再需要保留。
+            # （正在锁内执行拉取的线程持有的是锁对象本身，此处删除字典条目不影响其完成）
+            for k in list(self._dir_listing_locks.keys()):
+                if not self._dir_listing_cache.get(k):
                     self._dir_listing_locks.pop(k, None)
-                logger.debug(f"洗版模式：惰性清扫缓存，删除 {len(expired_keys)} 个过期目录条目")
+                    removed += 1
+            if removed:
+                logger.debug(f"洗版模式：惰性清扫缓存与单飞锁，清理 {removed} 个过期/孤儿条目")
 
     def _call_openlist_list_dir_api(self, path: str) -> Optional[List[str]]:
         """
