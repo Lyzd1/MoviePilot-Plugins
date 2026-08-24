@@ -209,7 +209,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "站点刷流"
     plugin_desc = "自动托管多个站点刷流任务，并独立调度、统计与诊断。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.1.2"
+    plugin_version = "6.1.3"
     plugin_author = "jxxghp,InfinityPacer,Seed680"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -1795,24 +1795,37 @@ class BrushFlow(_PluginBase):
         return None
 
     def __start_reannounce_task(self, service: ServiceInfo, torrent_hash: str, task: BrushTaskConfig) -> None:
-        """为新添加的种子启动定时重新宣告线程"""
+        """为新添加的种子启动定时重新宣告线程（复用 MoviePilot 已登录的 qBittorrent 客户端）"""
         if not trigger_reannounce_task:
             logger.warning("Reannounce 模块未正确导入，跳过新种子定时重新宣告")
             return
         try:
             downloader = self.downloader
-            qbc = getattr(downloader, "qbc", None) if downloader else None
-            if qbc:
-                host = getattr(qbc, "host", "127.0.0.1").removeprefix("http://").removeprefix("https://")
-                port = getattr(qbc, "port", 8080)
-                base_url = f"http://{host}:{port}"
-            else:
+            if not downloader or not getattr(downloader, "qbc", None):
                 logger.warning(f"刷流任务 [{task.name}] 无法获取 qBittorrent 客户端，跳过新种子重新宣告")
                 return
-            logger.info(f"刷流任务 [{task.name}] 获取 qBittorrent Web API 端点: {base_url}")
+
+            def qbc_provider() -> Optional[Any]:
+                """
+                每次宣告前实时获取 MoviePilot 已登录的 qBittorrent 客户端（qbc）。
+                复用 MoviePilot 鉴权会话，无需自行拼 URL/携带凭据；
+                下载器重连后也能拿到新实例。
+                """
+                try:
+                    current_service = DownloaderHelper().get_service(name=task.downloader)
+                    if not current_service or not DownloaderHelper().is_downloader(
+                            "qbittorrent", service=current_service):
+                        return None
+                    current_instance = getattr(current_service, "instance", None)
+                    if not current_instance or current_instance.is_inactive():
+                        return None
+                    return getattr(current_instance, "qbc", None)
+                except Exception:
+                    return None
+
             reannounce_thread = threading.Thread(
                 target=trigger_reannounce_task,
-                args=(base_url, torrent_hash),
+                args=(qbc_provider, torrent_hash),
                 kwargs={
                     'tags': task.brush_tag,
                     'interval': DEFAULT_INTERVAL,
@@ -1821,7 +1834,7 @@ class BrushFlow(_PluginBase):
                 daemon=True
             )
             reannounce_thread.start()
-            logger.info(f"刷流任务 [{task.name}] 已启动新种子定时重新宣告，Hash: {torrent_hash}")
+            logger.info(f"刷流任务 [{task.name}] 已启动新种子定时重新宣告（复用 MoviePilot 登录会话），Hash: {torrent_hash}")
         except Exception as err:
             logger.error(f"刷流任务 [{task.name}] 启动新种子重新宣告失败: {err}")
 
