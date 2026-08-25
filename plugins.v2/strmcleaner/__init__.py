@@ -632,8 +632,11 @@ class StrmCleaner(_PluginBase):
             )
 
             self._flood_triggered = True
-            self.batch.clear()
-            self.deletion_queue.clear()
+            # 加锁清空，避免与 _add_to_batch / stop_service 竞态
+            with batch_lock:
+                self.batch.clear()
+            with queue_lock:
+                self.deletion_queue.clear()
 
             if self._batch_timer:
                 self._batch_timer.cancel()
