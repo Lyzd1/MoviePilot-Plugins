@@ -23,6 +23,7 @@ from app.helper.storage import StorageHelper
 
 batch_lock = threading.Lock()
 queue_lock = threading.Lock()
+flood_lock = threading.Lock()
 
 
 @dataclass
@@ -99,6 +100,8 @@ class FileMonitorHandler(FileSystemEventHandler):
     def on_deleted(self, event):
         file_path = Path(event.src_path)
 
+        # 防雪崩已触发时，仅丢弃新事件的采集，但保留批量计时器，
+        # 让已入队/已入批次的任务继续按 延迟 正常推进；否则延迟会被绕过。
         if self.plugin._flood_triggered:
             logger.debug(f"[StrmCleaner] 防雪崩已触发，忽略事件: {file_path}")
             return
@@ -117,7 +120,7 @@ class StrmCleaner(_PluginBase):
     plugin_name = "StrmCleaner"
     plugin_desc = "监控STRM文件及文件夹删除，联动清理openlist/local云盘文件及元数据"
     plugin_icon = "Ombi_A.png"
-    plugin_version = "1.5"
+    plugin_version = "1.6"
     plugin_author = "Lyzd1"
     author_url = "https://github.com/Lyzd1"
     plugin_config_prefix = "strmcleaner_"
@@ -157,6 +160,8 @@ class StrmCleaner(_PluginBase):
     _storagechain = None
     _observer = None
     _batch_timer: Optional[threading.Timer] = None
+    _batch_generation: int = 0
+    _stopped: bool = False
 
     batch: Dict[str, BatchGroup] = {}
     deletion_queue: List[DeletionTask] = []
@@ -206,10 +211,14 @@ class StrmCleaner(_PluginBase):
         self.flood_records = []
         self._flood_triggered = False
         self._file_state = {}
+        self._batch_generation = 0
 
         if not self._enabled:
             logger.info("[StrmCleaner] 插件未启用")
             return
+
+        # 重新启用：清除停止标志，允许后续批次/队列正常处理
+        self._stopped = False
 
         if self._delayed_deletion:
             logger.info(f"[StrmCleaner] 延迟删除已启用，延迟 {self._delay_seconds}s")
@@ -286,32 +295,58 @@ class StrmCleaner(_PluginBase):
                 dirs.add(strm_path)
         return list(dirs)
 
-    def _parse_path_mapping(self, strm_path: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    def _match_mapping(self, strm_path: str) -> Optional[Tuple[str, Tuple[str, str, Optional[str], Optional[str]]]]:
+        """
+        在已配置的路径映射中匹配 strm_path：
+        - 必须命中完整前缀边界（避免 /a/b 误匹配 /a/bc）
+        - 多命中时取最长前缀（避免短前缀覆盖更精确的长前缀）
+        """
         mappings = self._parse_all_mappings()
-        for strm_prefix, (storage_type, storage_prefix, local_type, local_prefix) in mappings.items():
-            if strm_path.startswith(strm_prefix):
-                relative = strm_path[len(strm_prefix):].lstrip("/\\")
-                relative_no_ext = relative
-                if relative_no_ext.lower().endswith(".strm"):
-                    relative_no_ext = relative_no_ext[:-5]
-                storage_file_path = storage_prefix.rstrip("/") + "/" + relative_no_ext if relative_no_ext else storage_prefix
-                local_file_path = None
-                if local_type and local_prefix:
-                    local_file_path = local_prefix.rstrip("/") + "/" + relative_no_ext if relative_no_ext else local_prefix
-                return storage_type, storage_file_path, local_type, local_file_path
-        return None, None, None, None
+        best_prefix: Optional[str] = None
+        best_value: Optional[Tuple[str, str, Optional[str], Optional[str]]] = None
+        for raw_prefix, value in mappings.items():
+            prefix = raw_prefix.rstrip("/\\")
+            if not prefix:
+                # 根映射（"/"）：所有绝对路径都匹配，按长度 0 处理
+                if strm_path.startswith("/"):
+                    if best_prefix is None or 0 > len(best_prefix):
+                        best_prefix = ""
+                        best_value = value
+                continue
+            if strm_path == prefix or strm_path.startswith(prefix + "/"):
+                if best_prefix is None or len(prefix) > len(best_prefix):
+                    best_prefix = prefix
+                    best_value = value
+        if best_value is None:
+            return None
+        return best_prefix, best_value
+
+    def _parse_path_mapping(self, strm_path: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+        matched = self._match_mapping(strm_path)
+        if not matched:
+            return None, None, None, None
+        strm_prefix, (storage_type, storage_prefix, local_type, local_prefix) = matched
+        relative = strm_path[len(strm_prefix):].lstrip("/\\")
+        relative_no_ext = relative
+        if relative_no_ext.lower().endswith(".strm"):
+            relative_no_ext = relative_no_ext[:-5]
+        storage_file_path = storage_prefix.rstrip("/") + "/" + relative_no_ext if relative_no_ext else storage_prefix
+        local_file_path = None
+        if local_type and local_prefix:
+            local_file_path = local_prefix.rstrip("/") + "/" + relative_no_ext if relative_no_ext else local_prefix
+        return storage_type, storage_file_path, local_type, local_file_path
 
     def _parse_folder_mapping(self, strm_folder_path: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-        mappings = self._parse_all_mappings()
-        for strm_prefix, (storage_type, storage_prefix, local_type, local_prefix) in mappings.items():
-            if strm_folder_path.startswith(strm_prefix):
-                relative = strm_folder_path[len(strm_prefix):].lstrip("/\\")
-                storage_folder = storage_prefix.rstrip("/") + "/" + relative if relative else storage_prefix
-                local_folder = None
-                if local_type and local_prefix:
-                    local_folder = local_prefix.rstrip("/") + "/" + relative if relative else local_prefix
-                return storage_type, storage_folder, local_type, local_folder
-        return None, None, None, None
+        matched = self._match_mapping(strm_folder_path)
+        if not matched:
+            return None, None, None, None
+        strm_prefix, (storage_type, storage_prefix, local_type, local_prefix) = matched
+        relative = strm_folder_path[len(strm_prefix):].lstrip("/\\")
+        storage_folder = storage_prefix.rstrip("/") + "/" + relative if relative else storage_prefix
+        local_folder = None
+        if local_type and local_prefix:
+            local_folder = local_prefix.rstrip("/") + "/" + relative if relative else local_prefix
+        return storage_type, storage_folder, local_type, local_folder
 
     def _parse_all_mappings(self) -> Dict[str, Tuple[str, str, Optional[str], Optional[str]]]:
         result = {}
@@ -394,6 +429,9 @@ class StrmCleaner(_PluginBase):
         self._add_to_batch(entry)
 
     def _handle_file_deleted(self, file_path: Path):
+        # 清理 _file_state 避免内存泄漏
+        self._file_state.pop(str(file_path), None)
+
         storage_type, storage_path, local_type, local_path = self._parse_path_mapping(str(file_path))
 
         if not storage_type or not storage_path:
@@ -426,21 +464,36 @@ class StrmCleaner(_PluginBase):
             if entry.is_directory:
                 self.batch[parent_dir].has_folder_event = True
 
+            # 新事件到来时重置计时器。由于旧计时器可能已被取消但仍未触发，
+            # 每次重启都用“代数”令牌让旧回调作废，避免旧的 _process_batch 回调
+            # 在新批次刚加入时（几乎零延迟）就把它们处理掉，从而绕过延迟删除。
+            generation = self._batch_generation + 1
+            self._batch_generation = generation
+
             if self._batch_timer:
-                self._batch_timer.cancel()
+                try:
+                    self._batch_timer.cancel()
+                except Exception:
+                    pass
 
             if self._delayed_deletion:
                 wait = self._delay_seconds
             else:
                 wait = 3
 
-            self._batch_timer = threading.Timer(wait, self._process_batch)
+            self._batch_timer = threading.Timer(wait, self._process_batch, args=[generation])
             self._batch_timer.daemon = True
             self._batch_timer.start()
 
-    def _process_batch(self):
+    def _process_batch(self, generation: int = None):
         try:
             with batch_lock:
+                # 旧代数回调：当前已有更新的计时器在跑，说明有新事件加入，
+                # 绝不能处理这批（会绕过延迟），直接退出。
+                if generation is not None and generation != self._batch_generation:
+                    return
+                if self._stopped:
+                    return
                 if not self.batch:
                     return
                 groups = dict(self.batch)
@@ -557,7 +610,10 @@ class StrmCleaner(_PluginBase):
             logger.error(f"[StrmCleaner] 处理批次失败: {e} - {traceback.format_exc()}")
 
     def _check_flood_protection(self, file_count: int) -> bool:
-        if not self._flood_protection_enabled or self._flood_triggered:
+        # 已触发防雪崩后一律判定为“应终止本次批次”，避免继续删除
+        if self._flood_triggered:
+            return True
+        if not self._flood_protection_enabled:
             return False
         if file_count == 0:
             return False
@@ -565,9 +621,9 @@ class StrmCleaner(_PluginBase):
         now = datetime.now()
         cutoff = now.timestamp() - self._flood_window_seconds
 
-        self.flood_records = [r for r in self.flood_records if r.timestamp.timestamp() > cutoff]
-
-        window_total = sum(r.file_count for r in self.flood_records) + file_count
+        with flood_lock:
+            self.flood_records = [r for r in self.flood_records if r.timestamp.timestamp() > cutoff]
+            window_total = sum(r.file_count for r in self.flood_records) + file_count
 
         if window_total >= self._flood_threshold:
             logger.warning(
@@ -606,7 +662,8 @@ class StrmCleaner(_PluginBase):
 
     def _record_flood_event(self, file_count: int):
         if self._flood_protection_enabled:
-            self.flood_records.append(FloodRecord(datetime.now(), file_count))
+            with flood_lock:
+                self.flood_records.append(FloodRecord(datetime.now(), file_count))
 
     def _process_deletion_queue(self):
         results: List[DeletionResult] = []
@@ -615,6 +672,9 @@ class StrmCleaner(_PluginBase):
             pending = [t for t in self.deletion_queue if not t.processed]
 
         for task in pending:
+            if self._stopped:
+                logger.info("[StrmCleaner] 服务已停止，中止删除任务")
+                break
             try:
                 result = self._execute_deletion(task)
                 if result:
@@ -797,6 +857,9 @@ class StrmCleaner(_PluginBase):
                 result.success = True
                 result.files_deleted = deleted_count
 
+            if self._delete_metadata:
+                result.metadata_deleted = self._delete_cloud_metadata(task.storage_type, parent_item, Path(cloud_path))
+
         except Exception as e:
             logger.error(f"[StrmCleaner] 音乐文件删除异常: {e} - {traceback.format_exc()}")
 
@@ -933,6 +996,9 @@ class StrmCleaner(_PluginBase):
     def stop_service(self):
         logger.debug("[StrmCleaner] 停止服务")
 
+        # 先置停止标志，让正在执行的 _process_batch / _process_deletion_queue 立即中止
+        self._stopped = True
+
         if self._observer:
             try:
                 self._observer.stop()
@@ -941,46 +1007,36 @@ class StrmCleaner(_PluginBase):
                 logger.error(f"[StrmCleaner] 停止 observer 失败: {e}")
         self._observer = None
 
-        if self._batch_timer:
-            try:
-                self._batch_timer.cancel()
-            except Exception:
-                pass
-            self._batch_timer = None
+        # 使已到期的批次定时器失效，避免停止期间继续处理
+        with batch_lock:
+            self._batch_generation += 1
+            if self._batch_timer:
+                try:
+                    self._batch_timer.cancel()
+                except Exception:
+                    pass
+                self._batch_timer = None
 
-        tasks_to_process = []
-        with queue_lock:
-            if self.deletion_queue:
-                tasks_to_process = [t for t in self.deletion_queue if not t.processed]
-                self.deletion_queue.clear()
-
-        for task in tasks_to_process:
-            try:
-                self._execute_deletion(task)
-            except Exception as e:
-                logger.error(f"[StrmCleaner] 善后删除失败: {e}")
-
+        # 停止/重载插件时绝不立即执行删除：
+        # MoviePilot 在保存配置、更新插件、系统设置变更、重启时都会调用 stop_service，
+        # 若在此处强制清空队列并执行删除，延迟删除保护会被完全绕过（删除立即发生）。
+        # 未到延迟时间的批次/任务在此丢弃，仅记录日志。
+        dropped_events = 0
+        dropped_tasks = 0
         with batch_lock:
             if self.batch:
-                logger.info(f"[StrmCleaner] 处理 {len(self.batch)} 个剩余批次")
-                groups = dict(self.batch)
+                dropped_events = sum(len(g.entries) for g in self.batch.values())
                 self.batch.clear()
-                for group in groups.values():
-                    for entry in group.entries:
-                        if not entry.is_directory:
-                            storage_type, storage_path, _, _ = self._parse_path_mapping(str(entry.path))
-                            if storage_type and storage_path:
-                                task = DeletionTask(
-                                    task_type="file",
-                                    is_music=entry.is_music,
-                                    file_path=entry.path,
-                                    storage_type=storage_type,
-                                    storage_path=storage_path,
-                                )
-                                try:
-                                    self._execute_deletion(task)
-                                except Exception as e:
-                                    logger.error(f"[StrmCleaner] 善后批次删除失败: {e}")
+        with queue_lock:
+            if self.deletion_queue:
+                dropped_tasks = len([t for t in self.deletion_queue if not t.processed])
+                self.deletion_queue.clear()
+
+        if dropped_events or dropped_tasks:
+            logger.warning(
+                f"[StrmCleaner] 停止服务：丢弃 {dropped_events} 个批次事件 / {dropped_tasks} 个待删除任务"
+                f"（延迟删除保护，未执行删除，云盘对应文件需手动处理或等待下次删除事件）"
+            )
 
         logger.debug("[StrmCleaner] 服务已停止")
 
