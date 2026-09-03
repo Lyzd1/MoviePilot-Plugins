@@ -12,7 +12,7 @@ The plugin follows MoviePilot's plugin architecture (`_PluginBase`):
 
 - `__init__.py` - Main plugin class `BonusExchangePlugin` with UI form definition, scheduler setup, and monitoring logic
 - `bonus_exchange_config.py` - Configuration dataclasses (`BonusExchangeConfig`, `SiteExchangeConfig`, `ExchangeRule`) with rule parsing
-- `exchange_*.py` - Site-specific exchange handlers implementing `execute_exchange()` method
+- `exchange_*.py` - Site-specific exchange handlers implementing `execute_exchange()`, 返回 `(success, message, 实际消耗魔力, 实际获得上传量GB)`
 
 ## Key Dependencies
 
@@ -29,7 +29,7 @@ Example: `学校 500G 2 5G 2300;3 10G 4200` means when upload < 500GB and bonus 
 ## Site-Specific Logic
 
 - Standard sites (`Exchange001`): Cookie auth, POST to `/mybonus.php?action=exchange`
-- M-Team (`ExchangeMteam`): API key auth, quantity = `bonus // 500`, max 1 exchange per cycle
+- M-Team (`ExchangeMteam`): API key auth, quantity = `bonus // BONUS_PER_GB`（800 魔力/G，常量在 `exchange_mteam.py`）, max 1 exchange per cycle
 
 ## Exchange Flow
 
