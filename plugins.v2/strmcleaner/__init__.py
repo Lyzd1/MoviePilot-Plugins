@@ -62,6 +62,7 @@ class DeletionTask:
 class FloodRecord:
     timestamp: datetime
     file_count: int
+    scope_roots: frozenset = frozenset()
 
 
 @dataclass
@@ -120,7 +121,7 @@ class StrmCleaner(_PluginBase):
     plugin_name = "StrmCleaner"
     plugin_desc = "监控STRM文件及文件夹删除，联动清理openlist/local云盘文件及元数据"
     plugin_icon = "Ombi_A.png"
-    plugin_version = "1.6"
+    plugin_version = "1.7"
     plugin_author = "Lyzd1"
     author_url = "https://github.com/Lyzd1"
     plugin_config_prefix = "strmcleaner_"
@@ -399,6 +400,39 @@ class StrmCleaner(_PluginBase):
                 return True
         return False
 
+    def _is_mapping_root(self, path: str) -> bool:
+        """判断 path 是否正好是某条路径映射的 STRM 根目录本身（映射相对部分为空）"""
+        matched = self._match_mapping(path)
+        if not matched:
+            return False
+        strm_prefix, _ = matched
+        relative = path[len(strm_prefix):].lstrip("/\\")
+        return relative == ""
+
+    @staticmethod
+    def _top_level_dirs(paths: List[str]) -> List[str]:
+        """从一组目录路径中归并出最外层目录（被祖先目录覆盖的子目录剔除）"""
+        result: List[str] = []
+        for p in sorted(set(paths)):
+            p_prefix = p.rstrip("/\\") + os.sep
+            if any(p == t or p.startswith(t.rstrip("/\\") + os.sep) for t in result):
+                continue
+            result = [t for t in result if not (t == p or t.startswith(p_prefix))]
+            result.append(p)
+        return result
+
+    def _notify_root_protection(self, root_path: str):
+        if self._notify:
+            self.post_message(
+                mtype=NotificationType.SiteMessage,
+                title="StrmCleaner - 映射根目录删除保护",
+                text=(
+                    f"检测到 STRM 映射根目录被删除：\n{root_path}\n\n"
+                    f"为防止误删整个云盘目录，已阻止联动删除该根目录及其下内容的云盘文件，"
+                    f"如确需清理请手动处理。"
+                ),
+            )
+
     def _on_strm_created(self, file_path: Path):
         self._file_state[str(file_path)] = datetime.now()
 
@@ -499,17 +533,62 @@ class StrmCleaner(_PluginBase):
                 groups = dict(self.batch)
                 self.batch.clear()
 
+            # 收集本批次内的目录删除事件，并归并出最外层被删目录
+            dir_event_paths = [
+                str(e.path)
+                for group in groups.values()
+                for e in group.entries
+                if e.is_directory
+            ]
+            top_dirs = self._top_level_dirs(dir_event_paths)
+
+            # 保护：映射根目录本身被删除时，阻止联动删除云盘根及其下所有内容
+            protected_roots = [t for t in top_dirs if self._is_mapping_root(t)]
+            if protected_roots:
+                kept_groups: Dict[str, BatchGroup] = {}
+                dropped_entries = 0
+                for parent_dir, group in groups.items():
+                    if any(
+                        parent_dir == pr or parent_dir.startswith(pr.rstrip("/\\") + os.sep)
+                        for pr in protected_roots
+                    ):
+                        dropped_entries += len(group.entries)
+                        continue
+                    kept_groups[parent_dir] = group
+                if dropped_entries:
+                    for pr in protected_roots:
+                        logger.warning(
+                            f"[StrmCleaner] 检测到映射根目录被删除: {pr}，"
+                            f"为防止误删整个云盘目录，已阻止该根目录范围内 {dropped_entries} 个删除事件的联动处理，"
+                            f"云盘对应内容需手动处理"
+                        )
+                        self._notify_root_protection(pr)
+                groups = kept_groups
+                if not groups:
+                    return
+
             strm_count = sum(
                 len([e for e in group.entries if not e.is_directory and e.path.suffix.lower() == ".strm"])
                 for group in groups.values()
             )
 
-            if self._check_flood_protection(strm_count):
+            # 计算本批次的“删除来源目录”：被删文件夹事件覆盖的文件归属该文件夹本身，
+            # 其余文件的来源目录为其父目录。防雪崩仅在“来源目录 ≥ 2 个且窗口内总数超阈值”时触发，
+            # 同一目录内的大量删除（如删除整季/整个剧集目录）视为正常操作。
+            scope_roots = set(top_dirs)
+            for parent_dir in groups.keys():
+                if not any(
+                    parent_dir == t or parent_dir.startswith(t.rstrip("/\\") + os.sep)
+                    for t in top_dirs
+                ):
+                    scope_roots.add(parent_dir)
+
+            if self._check_flood_protection(strm_count, scope_roots):
                 logger.warning("[StrmCleaner] 防雪崩触发，放弃本次批次")
                 return
 
             if strm_count > 0:
-                self._record_flood_event(strm_count)
+                self._record_flood_event(strm_count, scope_roots)
 
             tasks: List[DeletionTask] = []
             folder_candidates: List[dict] = []
@@ -532,6 +611,14 @@ class StrmCleaner(_PluginBase):
                     storage_type, storage_path, local_type, local_path = self._parse_folder_mapping(parent_dir)
 
                     if not storage_type:
+                        continue
+
+                    # 保护：目录删除目标为映射根目录本身时，禁止联动删除云盘根
+                    if self._is_mapping_root(parent_dir):
+                        logger.warning(
+                            f"[StrmCleaner] 目录删除目标为映射根目录，已阻止联动删除云盘根: {parent_dir}"
+                        )
+                        self._notify_root_protection(parent_dir)
                         continue
 
                     strm_count = len([e for e in group.entries if not e.is_directory and e.path.suffix.lower() == ".strm"])
@@ -609,7 +696,7 @@ class StrmCleaner(_PluginBase):
         except Exception as e:
             logger.error(f"[StrmCleaner] 处理批次失败: {e} - {traceback.format_exc()}")
 
-    def _check_flood_protection(self, file_count: int) -> bool:
+    def _check_flood_protection(self, file_count: int, scope_roots: Optional[set] = None) -> bool:
         # 已触发防雪崩后一律判定为“应终止本次批次”，避免继续删除
         if self._flood_triggered:
             return True
@@ -620,15 +707,29 @@ class StrmCleaner(_PluginBase):
 
         now = datetime.now()
         cutoff = now.timestamp() - self._flood_window_seconds
+        roots = scope_roots if scope_roots is not None else set()
 
         with flood_lock:
             self.flood_records = [r for r in self.flood_records if r.timestamp.timestamp() > cutoff]
             window_total = sum(r.file_count for r in self.flood_records) + file_count
+            # 统计窗口内的“删除来源目录”并集：跨批次累计
+            window_roots = set(roots)
+            for r in self.flood_records:
+                window_roots.update(r.scope_roots)
 
         if window_total >= self._flood_threshold:
+            # 单一来源目录内的大量删除视为正常操作（如删除整季/整个剧集目录），不触发
+            if len(window_roots) <= 1:
+                logger.info(
+                    f"[StrmCleaner] {self._flood_window_seconds}s内删除 {window_total} 个文件，"
+                    f"但均来自同一目录（{next(iter(window_roots)) if window_roots else '未知'}），"
+                    f"判定为正常批量删除，不触发防雪崩"
+                )
+                return False
+
             logger.warning(
-                f"[StrmCleaner] 防雪崩保护触发！{self._flood_window_seconds}s内删除 {window_total} 个文件，"
-                f"超过阈值 {self._flood_threshold}，插件将自动停用"
+                f"[StrmCleaner] 防雪崩保护触发！{self._flood_window_seconds}s内从 {len(window_roots)} 个不同目录"
+                f"共删除 {window_total} 个文件，超过阈值 {self._flood_threshold}，插件将自动停用"
             )
 
             self._flood_triggered = True
@@ -650,9 +751,9 @@ class StrmCleaner(_PluginBase):
                     mtype=NotificationType.SiteMessage,
                     title="StrmCleaner 防雪崩保护 - 已自动停用",
                     text=(
-                        f"检测到短时间内大量 STRM 文件删除事件，可能为本地存储异常。\n\n"
+                        f"检测到短时间内从多个不同目录大量删除 STRM 文件，可能为本地存储异常。\n\n"
                         f"时间窗口: {self._flood_window_seconds}s\n"
-                        f"删除数量: {window_total} 个\n"
+                        f"删除数量: {window_total} 个（来自 {len(window_roots)} 个不同目录）\n"
                         f"触发阈值: {self._flood_threshold} 个\n\n"
                         f"插件已自动停用，所有云盘删除操作已阻止。\n"
                         f"请检查本地存储状态，确认正常后手动重新启用插件。"
@@ -663,10 +764,12 @@ class StrmCleaner(_PluginBase):
 
         return False
 
-    def _record_flood_event(self, file_count: int):
+    def _record_flood_event(self, file_count: int, scope_roots: Optional[set] = None):
         if self._flood_protection_enabled:
             with flood_lock:
-                self.flood_records.append(FloodRecord(datetime.now(), file_count))
+                self.flood_records.append(
+                    FloodRecord(datetime.now(), file_count, frozenset(scope_roots or set()))
+                )
 
     def _process_deletion_queue(self):
         results: List[DeletionResult] = []
@@ -1223,7 +1326,7 @@ class StrmCleaner(_PluginBase):
                                             "type": "warning",
                                             "variant": "tonal",
                                             "title": "防雪崩保护",
-                                            "text": "短时间内大量文件删除时，自动判定为存储异常并停用插件，防止批量误删。需手动排查后重新启用。文件夹删除不计入计数。",
+                                            "text": "短时间内从多个不同目录删除大量 STRM 文件时，自动判定为存储异常并停用插件，防止批量误删；仅从同一目录删除（如删除整季/整个剧集目录）时即使数量较大也不会触发。需手动排查后重新启用。",
                                         },
                                     }
                                 ],
