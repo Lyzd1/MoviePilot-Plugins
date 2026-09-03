@@ -20,7 +20,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.4.2"
+    plugin_version = "3.4.3"
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -207,18 +207,19 @@ class SubscribeGroup(_PluginBase):
                 logger.info(f"事件数据内容: {event.event_data}")
             logger.info("=" * 60)
 
-            # 新增订阅时，清除 history_handle 记录，允许后续下载重新填充规则
-            event_data = event.event_data
-            if event_data and event_data.get("subscribe_id"):
-                sid = event_data.get("subscribe_id")
-                subscribe = self._subscribeoper.get(sid)
-                if subscribe:
-                    history_handle: List[str] = self.get_data('history_handle') or []
-                    exist_key = f"{subscribe.type}:{subscribe.tmdbid}"
-                    if exist_key in history_handle:
-                        history_handle.remove(exist_key)
-                        self.save_data('history_handle', history_handle)
-                        logger.info(f"新增订阅'{subscribe.name}'，已清除历史处理记录，允许下载后重新填充规则")
+        # 新增订阅时，清除 history_handle 记录，允许后续下载重新填充规则
+        event_data = event.event_data
+        if event_data and event_data.get("subscribe_id"):
+            sid = event_data.get("subscribe_id")
+            subscribe = self._subscribeoper.get(sid)
+            if subscribe:
+                history_handle: List[str] = self.get_data('history_handle') or []
+                exist_key = f"{subscribe.type}:{subscribe.tmdbid}"
+                if exist_key in history_handle:
+                    history_handle.remove(exist_key)
+                    self.save_data('history_handle', history_handle)
+                    logger.info(f"新增订阅'{subscribe.name}'，已清除历史处理记录，允许下载后重新填充规则")
+        
         if not self._category:
             if self._debug:
                 logger.info("二级分类自定义填充未开启")
