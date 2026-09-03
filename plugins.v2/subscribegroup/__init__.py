@@ -20,7 +20,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.4.1"
+    plugin_version = "3.4.2"
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -304,18 +304,81 @@ class SubscribeGroup(_PluginBase):
         if self._debug:
             logger.info("=" * 60)
             logger.info("【DownloadAdded事件】接收到下载添加事件")
-            if hasattr(event, 'event_data'):
+            if hasattr(event, 'event_data') and event.event_data:
+                # 打印顶层字段
+                logger.info(f"Event Hash: {event.event_data.get('hash')}")
+                logger.info(f"Event Title: {event.event_data.get('title')}")
+
                 context = event.event_data.get("context")
                 if context:
+                    # 打印 torrent_info 所有已知字段
                     if hasattr(context, 'torrent_info') and context.torrent_info:
-                        logger.info(f"Torrent Info Site: {context.torrent_info.site}")
-                        logger.info(f"Torrent Info Site Name: {context.torrent_info.site_name}")
-                        logger.info(f"Torrent Info Description: {context.torrent_info.description}")
+                        ti = context.torrent_info
+                        logger.info(f"Torrent Info Site: {ti.site}")
+                        logger.info(f"Torrent Info Site Name: {ti.site_name}")
+                        logger.info(f"Torrent Info Title: {getattr(ti, 'title', None)}")
+                        logger.info(f"Torrent Info Description: {getattr(ti, 'description', None)}")
+                        logger.info(f"Torrent Info Size: {getattr(ti, 'size', None)}")
+                        logger.info(f"Torrent Info Enclosure: {getattr(ti, 'enclosure', None)}")
+                        logger.info(f"Torrent Info Page URL: {getattr(ti, 'page_url', None)}")
+                        logger.info(f"Torrent Info Labels: {getattr(ti, 'labels', None)}")
+                        logger.info(f"Torrent Info Volume Factor: {getattr(ti, 'volume_factor', None)}")
+                        logger.info(f"Torrent Info IMDB ID: {getattr(ti, 'imdbid', None)}")
+                        logger.info(f"Torrent Info Upload Volume Factor: {getattr(ti, 'uploadvolumefactor', None)}")
+                        logger.info(f"Torrent Info Download Volume Factor: {getattr(ti, 'downloadvolumefactor', None)}")
+                        logger.info(f"Torrent Info Pub Date: {getattr(ti, 'pubdate', None)}")
+                        logger.info(f"Torrent Info Date Elapsed: {getattr(ti, 'date_elapsed', None)}")
+                        logger.info(f"Torrent Info Seeders: {getattr(ti, 'seeders', None)}")
+                        logger.info(f"Torrent Info Peers: {getattr(ti, 'peers', None)}")
+                        logger.info(f"Torrent Info Grabs: {getattr(ti, 'grabs', None)}")
+                        logger.info(f"Torrent Info Free Date: {getattr(ti, 'freedate', None)}")
+                        logger.info(f"Torrent Info Hit and Run: {getattr(ti, 'hit_and_run', None)}")
+                        logger.info(f"Torrent Info All Attributes: {vars(ti) if hasattr(ti, '__dict__') else dir(ti)}")
+                    else:
+                        logger.info("Torrent Info: None")
+
+                    # 打印 meta_info 所有已知字段
                     if hasattr(context, 'meta_info') and context.meta_info:
-                        logger.info(f"Meta Info Web Source: {context.meta_info.web_source}")
-                        logger.info(f"Meta Info Resource Team: {context.meta_info.resource_team}")
+                        mi = context.meta_info
+                        logger.info(f"Meta Info Type: {getattr(mi, 'type', None)}")
+                        logger.info(f"Meta Info Title: {getattr(mi, 'title', None)}")
+                        logger.info(f"Meta Info En Title: {getattr(mi, 'en_title', None)}")
+                        logger.info(f"Meta Info Cn Title: {getattr(mi, 'cn_title', None)}")
+                        logger.info(f"Meta Info Year: {getattr(mi, 'year', None)}")
+                        logger.info(f"Meta Info Season: {getattr(mi, 'season', None)}")
+                        logger.info(f"Meta Info Episode: {getattr(mi, 'episode', None)}")
+                        logger.info(f"Meta Info Part: {getattr(mi, 'part', None)}")
+                        logger.info(f"Meta Info Resource Pix: {getattr(mi, 'resource_pix', None)}")
+                        logger.info(f"Meta Info Resource Type: {getattr(mi, 'resource_type', None)}")
+                        logger.info(f"Meta Info Video Encode: {getattr(mi, 'video_encode', None)}")
+                        logger.info(f"Meta Info Resource Effect: {getattr(mi, 'resource_effect', None)}")
+                        logger.info(f"Meta Info Resource Team: {getattr(mi, 'resource_team', None)}")
+                        logger.info(f"Meta Info Web Source: {getattr(mi, 'web_source', None)}")
+                        logger.info(f"Meta Info Edition: {getattr(mi, 'edition', None)}")
+                        logger.info(f"Meta Info Video Effect: {getattr(mi, 'video_effect', None)}")
+                        logger.info(f"Meta Info Audio Effect: {getattr(mi, 'audio_effect', None)}")
+                        logger.info(f"Meta Info All Attributes: {vars(mi) if hasattr(mi, '__dict__') else dir(mi)}")
+                    else:
+                        logger.info("Meta Info: None")
+
+                    # 打印 media_info 所有已知字段
                     if hasattr(context, 'media_info') and context.media_info:
-                        logger.info(f"Media Info Category: {context.media_info.category}")
+                        mdi = context.media_info
+                        logger.info(f"Media Info Type: {getattr(mdi, 'type', None)}")
+                        logger.info(f"Media Info Title: {getattr(mdi, 'title', None)}")
+                        logger.info(f"Media Info Year: {getattr(mdi, 'year', None)}")
+                        logger.info(f"Media Info Category: {getattr(mdi, 'category', None)}")
+                        logger.info(f"Media Info TMDB ID: {getattr(mdi, 'tmdb_id', None)}")
+                        logger.info(f"Media Info IMDB ID: {getattr(mdi, 'imdb_id', None)}")
+                        logger.info(f"Media Info Douban ID: {getattr(mdi, 'douban_id', None)}")
+                        logger.info(f"Media Info TVDB ID: {getattr(mdi, 'tvdb_id', None)}")
+                        logger.info(f"Media Info Original Title: {getattr(mdi, 'original_title', None)}")
+                        logger.info(f"Media Info Original Language: {getattr(mdi, 'original_language', None)}")
+                        logger.info(f"Media Info All Attributes: {vars(mdi) if hasattr(mdi, '__dict__') else dir(mdi)}")
+                    else:
+                        logger.info("Media Info: None")
+                else:
+                    logger.info("Context: None")
             logger.info("=" * 60)
 
         if not self._enabled:
