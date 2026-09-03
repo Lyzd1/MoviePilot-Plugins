@@ -20,7 +20,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.4.3"
+    plugin_version = "3.5.0"
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -41,10 +41,12 @@ class SubscribeGroup(_PluginBase):
     _update_details = []
     _update_confs = None
     _web_source_confs = None
-    _subtitle_confs = None
+    _title_confs = None
+    _label_confs = None
     _subscribe_confs = {}
     _download_web_source_rules = {}
-    _download_subtitle_rules = []
+    _download_title_rules = []
+    _download_label_rules = []
     _subscribeoper = None
     _downloadhistoryoper = None
     _siteoper = None
@@ -63,7 +65,9 @@ class SubscribeGroup(_PluginBase):
             self._update_details = config.get("update_details") or []
             self._update_confs = config.get("update_confs")
             self._web_source_confs = config.get("web_source_confs")
-            self._subtitle_confs = config.get("subtitle_confs")
+            # 兼容旧配置：title_confs 不存在时回退读取旧的 subtitle_confs
+            self._title_confs = config.get("title_confs") or config.get("subtitle_confs")
+            self._label_confs = config.get("label_confs")
 
             if self._debug:
                 logger.info("=" * 60)
@@ -87,23 +91,41 @@ class SubscribeGroup(_PluginBase):
             else:
                 self._download_web_source_rules = {}
 
-            # 解析副标题匹配规则
-            if self._subtitle_confs:
-                self._download_subtitle_rules = []
-                for rule in str(self._subtitle_confs).split("\n"):
+            # 解析标题匹配规则（匹配种子的 title 与 description，两者为或关系）
+            if self._title_confs:
+                self._download_title_rules = []
+                for rule in str(self._title_confs).split("\n"):
                     rule = rule.strip()
                     if rule:
                         try:
                             re.compile(rule)
-                            self._download_subtitle_rules.append(rule)
-                            logger.info(f"添加副标题规则: {rule}")
+                            self._download_title_rules.append(rule)
+                            logger.info(f"添加标题规则: {rule}")
                         except re.error as e:
-                            logger.error(f"副标题规则无效: {rule}, 错误: {e}")
-                logger.info(f"获取到副标题匹配规则 {len(self._download_subtitle_rules)} 个")
+                            logger.error(f"标题规则无效: {rule}, 错误: {e}")
+                logger.info(f"获取到标题匹配规则 {len(self._download_title_rules)} 个")
                 if self._debug:
-                    logger.info(f"副标题规则列表: {self._download_subtitle_rules}")
+                    logger.info(f"标题规则列表: {self._download_title_rules}")
             else:
-                self._download_subtitle_rules = []
+                self._download_title_rules = []
+
+            # 解析标签匹配规则（匹配种子的 labels）
+            if self._label_confs:
+                self._download_label_rules = []
+                for rule in str(self._label_confs).split("\n"):
+                    rule = rule.strip()
+                    if rule:
+                        try:
+                            re.compile(rule)
+                            self._download_label_rules.append(rule)
+                            logger.info(f"添加标签规则: {rule}")
+                        except re.error as e:
+                            logger.error(f"标签规则无效: {rule}, 错误: {e}")
+                logger.info(f"获取到标签匹配规则 {len(self._download_label_rules)} 个")
+                if self._debug:
+                    logger.info(f"标签规则列表: {self._download_label_rules}")
+            else:
+                self._download_label_rules = []
 
             if self._update_confs:
                 active_sites = self._siteoper.list_active()
@@ -188,7 +210,8 @@ class SubscribeGroup(_PluginBase):
             "update_details": self._update_details,
             "update_confs": self._update_confs,
             "web_source_confs": self._web_source_confs,
-            "subtitle_confs": self._subtitle_confs,
+            "title_confs": self._title_confs,
+            "label_confs": self._label_confs,
         })
 
     @eventmanager.register(EventType.SubscribeAdded)
@@ -470,36 +493,67 @@ class SubscribeGroup(_PluginBase):
                             if self._debug:
                                 logger.info(f"特效填充: {resource_effect}")
 
-                # 规则匹配（副标题优先，Web源次之）
+                # 规则匹配（标签优先，标题次之，Web源最后）
                 if "规则匹配" in self._update_details and not subscribe.include:
+                    title = _torrent.title if _torrent and hasattr(_torrent, 'title') else ""
                     description = _torrent.description if _torrent and hasattr(_torrent, 'description') else ""
                     web_source = _meta.web_source if _meta else None
+
+                    # 标签统一转为字符串用于匹配（labels 为列表时用空格拼接）
+                    labels_raw = _torrent.labels if _torrent and hasattr(_torrent, 'labels') else None
+                    if labels_raw:
+                        if isinstance(labels_raw, list):
+                            labels_str = " ".join([str(l) for l in labels_raw if l])
+                        else:
+                            labels_str = str(labels_raw)
+                    else:
+                        labels_str = ""
 
                     logger.info(f"========== 规则匹配开始 ==========")
                     logger.info(f"订阅名称: {subscribe.name}")
                     logger.info(f"Web源: {web_source}")
+                    logger.info(f"Title: {title}")
                     logger.info(f"Description: {description}")
-                    logger.info(f"副标题规则数量: {len(self._download_subtitle_rules)}")
+                    logger.info(f"Labels: {labels_str}")
+                    logger.info(f"标签规则数量: {len(self._download_label_rules)}")
+                    logger.info(f"标题规则数量: {len(self._download_title_rules)}")
                     logger.info(f"Web源规则数量: {len(self._download_web_source_rules)}")
-                    
+
                     include_value = None
                     match_source = None
 
-                    # 1. 优先副标题匹配规则
-                    if self._download_subtitle_rules and description:
-                        for rule in self._download_subtitle_rules:
+                    # 1. 优先标签匹配规则（匹配种子的 labels）
+                    if self._download_label_rules and labels_str:
+                        for rule in self._download_label_rules:
                             try:
-                                if re.search(rule, description, re.IGNORECASE):
+                                if re.search(rule, labels_str, re.IGNORECASE):
                                     include_value = rule
-                                    match_source = "副标题匹配"
-                                    logger.info(f"✅ 副标题匹配成功! 规则={rule}")
+                                    match_source = "标签匹配"
+                                    logger.info(f"✅ 标签匹配成功! 规则={rule}")
                                     break
                                 else:
-                                    logger.info(f"❌ 副标题匹配失败: {rule}")
+                                    logger.info(f"❌ 标签匹配失败: {rule}")
                             except re.error as e:
-                                logger.error(f"副标题规则执行错误: {rule}, 错误: {e}")
+                                logger.error(f"标签规则执行错误: {rule}, 错误: {e}")
 
-                    # 2. 如果没有副标题匹配，再尝试Web源规则
+                    # 2. 标题匹配规则（title 与 description 任一匹配即成功，或的关系）
+                    if not include_value and self._download_title_rules:
+                        for rule in self._download_title_rules:
+                            try:
+                                matched_in_title = bool(title and re.search(rule, title, re.IGNORECASE))
+                                matched_in_desc = bool(description and re.search(rule, description, re.IGNORECASE))
+                                if matched_in_title or matched_in_desc:
+                                    include_value = rule
+                                    match_source = "标题匹配"
+                                    match_pos = "title" if matched_in_title else "description"
+                                    logger.info(f"✅ 标题匹配成功! 规则={rule}, 匹配位置={match_pos}")
+                                    break
+                                else:
+                                    logger.info(f"❌ 标题匹配失败: {rule}")
+                            except re.error as e:
+                                logger.error(f"标题规则执行错误: {rule}, 错误: {e}")
+
+                    # 3. 如果标签、标题都未匹配，最后尝试Web源规则
                     if not include_value and web_source and web_source in self._download_web_source_rules:
                         include_value = self._download_web_source_rules.get(web_source)
                         match_source = "Web源规则"
@@ -689,22 +743,37 @@ class SubscribeGroup(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {'cols': 12, 'md': 6},
+                                'props': {'cols': 12, 'md': 4},
                                 'content': [
                                     {
                                         'component': 'VTextarea',
                                         'props': {
-                                            'model': 'subtitle_confs',
-                                            'label': '副标题匹配规则（优先级高）',
+                                            'model': 'label_confs',
+                                            'label': '标签匹配规则（优先级最高）',
                                             'rows': 5,
-                                            'placeholder': '无.*水印\n国粤双语\nH.*265\n4K.*重制\n\n规则说明：\n每行一个正则表达式，匹配种子的description字段\n匹配成功时，将该正则表达式填入include字段'
+                                            'placeholder': '纯净版|纯享版\n中配\n杜比视界\n\n规则说明：\n每行一个正则表达式，匹配种子的labels标签字段\n支持|或语法，如 纯净版|纯享版\n匹配成功时，将该行规则整体填入include字段'
                                         }
                                     }
                                 ]
                             },
                             {
                                 'component': 'VCol',
-                                'props': {'cols': 12, 'md': 6},
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {
+                                        'component': 'VTextarea',
+                                        'props': {
+                                            'model': 'title_confs',
+                                            'label': '标题匹配规则（优先级中）',
+                                            'rows': 5,
+                                            'placeholder': 'hfr|60fps\n无.*水印\n国粤双语\nH.*265\n\n规则说明：\n每行一个正则表达式，同时匹配种子的title和description字段\n两者任一命中即匹配成功（或的关系），支持|或语法\n匹配成功时，将该行规则整体填入include字段'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
                                 'content': [
                                     {
                                         'component': 'VTextarea',
@@ -751,9 +820,11 @@ class SubscribeGroup(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '规则优先级：副标题匹配 > Web源规则\n'
-                                                    '1. 副标题匹配：匹配种子的description字段，支持正则表达式\n'
-                                                    '2. Web源规则：匹配种子的web_source字段，仅当副标题未匹配时使用'
+                                            'text': '规则优先级：标签匹配 > 标题匹配 > Web源规则\n'
+                                                    '1. 标签匹配：匹配种子的labels标签字段，支持正则表达式（支持|或语法）\n'
+                                                    '2. 标题匹配：同时匹配种子的title和description字段，任一命中即成功（或的关系）\n'
+                                                    '3. Web源规则：匹配种子的web_source字段，仅当标签、标题均未匹配时使用\n'
+                                                    '注：标题/标签匹配成功后，将该行规则整体填入include字段'
                                         }
                                     }
                                 ]
@@ -809,7 +880,8 @@ class SubscribeGroup(_PluginBase):
             "update_details": [],
             "update_confs": "",
             "web_source_confs": "",
-            "subtitle_confs": "",
+            "title_confs": "",
+            "label_confs": "",
         }
 
     def get_page(self) -> List[dict]:

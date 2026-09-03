@@ -93,11 +93,12 @@
         "name": "订阅规则自动填充",
         "description": "电视剧下载后自动添加官组等信息到订阅；添加订阅后根据二级分类名称自定义订阅规则。",
         "labels": "订阅",
-        "version": "3.4.3",
+        "version": "3.5.0",
         "icon": "teamwork.png",
         "author": "Lyzd1,thsrite",
         "level": 2,
         "history": {
+          "v3.5.0": "规则匹配重构：新增标签匹配（labels字段）；副标题匹配升级为标题匹配（title与description任一命中即成功，或关系）；优先级：标签匹配>标题匹配>Web源；标题/标签规则支持|或语法，匹配成功后整行规则写入include；兼容旧版subtitle_confs配置自动迁移",
           "v3.4.3": "修复重复订阅时清除history_handle失效的bug：清除逻辑从调试模式块中移出，确保始终执行",
           "v3.4.2": "调试模式增强：DownloadAdded事件打印所有可获取的字段信息（torrent_info/meta_info/media_info完整属性）",
           "v3.4.1": "修正逻辑：仅在新增订阅时清除history_handle，而非每次下载时清除",
