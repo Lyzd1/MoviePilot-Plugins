@@ -172,3 +172,5 @@ date-*
 runtime-*
 .reasonix/
 bak/
+# local reference clones
+.ref/
