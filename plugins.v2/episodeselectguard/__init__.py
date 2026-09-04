@@ -1,9 +1,8 @@
 """
 剧集选集守卫插件（EpisodeSelectGuard，MoviePilot V2）
 
-针对「预订阅 / 试看」场景：当用户只对一部剧订阅了部分集数
-（通过订阅的 start_episode ~ total_episode 表达，例如"只看前 3 集"），
-而 MoviePilot 最终选中了覆盖更多集数的大包种子下载时，
+针对「预订阅 / 试看」场景：当用户只对一部剧订阅了前 N 集（总集数小于 TMDB 整季，
+例如只看前 3 集），而 MoviePilot 最终选中了覆盖整季的大包种子下载时，
 本插件在 DownloadAdded 事件后接管 qBittorrent 下载任务：
 
 1. 识别下载来源是否为订阅（source 前缀 Subscribe| 或能匹配到订阅记录）；
@@ -23,8 +22,9 @@
 决策前若记录的 TMDB 总集数缺失或 < 5（TMDB 对连载中剧集更新不及时），会重拉一次 TMDB 总集数再判断。
 
 设计约束（源码核实，MoviePilot v2）：
-- v2 下载链对"整季缺失 + 只设总集数"不会下发 episodes 给下载器做原生拆包，
-  因此采用 DownloadAdded 事后纠正（暂停 -> 读文件 -> 剔除 -> 恢复）；
+- 本插件只覆盖 MoviePilot 原生的空档：start_episode=1 且订阅总集数小于 TMDB 整季的
+  「前 N 集试看」。start_episode>1（从第 N 集开始追某段）与全集订阅均交给 MoviePilot
+  原生按集拆包，不重复拦截；
 - 只处理订阅来源下载；手动搜索/辅种/刷流等非订阅下载不做改动；
 - 事件 hash 即 qBittorrent infohash；
 - 对多集合并单文件/无法解析集号的文件保守保留（避免漏下目标集），面板标记。
@@ -60,7 +60,7 @@ class EpisodeSelectGuard(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -279,12 +279,12 @@ class EpisodeSelectGuard(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "拦截「订阅」触发的电视剧下载：当订阅只设置了部分集数"
-                                                   "（start_episode ~ total_episode，例如只看前 3 集），而选中的种子"
-                                                   "是大包时，自动把不在订阅范围内的集对应的文件设为不下载，并打上"
-                                                   "自定义标签（默认 Losing，防自动辅种）。单集单文件包可直接剔除；"
-                                                   "多集合并单文件/无法识别集号的文件会保守保留并标记。面板「补全下载」"
-                                                   "会自动判断：该种子覆盖 TMDB 全集则直接恢复整包补全；否则自动重新"
+                                            "text": "拦截「订阅」触发的电视剧下载中的「前 N 集试看」：当订阅从第 1 集起、"
+                                                   "总集数小于 TMDB 整季（例如只看前 3 集）而选中的种子是大包时，自动把不在"
+                                                   "订阅范围内的集对应的文件设为不下载，并打上自定义标签（默认 Losing，防自动辅种）。"
+                                                   "从第 N 集开始追（start>1）与全集订阅由 MoviePilot 原生按集拆包，本插件不干预。"
+                                                   "单集单文件包可直接剔除；多集合并单文件/无法识别集号的文件会保守保留并标记。"
+                                                   "面板「补全下载」会自动判断：该种子覆盖 TMDB 全集则直接恢复整包补全；否则自动重新"
                                                    "全集订阅（不带集数限制）。",
                                         },
                                     }
@@ -572,10 +572,18 @@ class EpisodeSelectGuard(_PluginBase):
         if not total_episode or total_episode < start_episode:
             logger.debug(f"{self._LOG_TAG}订阅 {subscribe.name} 未设置有效集数范围，跳过")
             return
-        # 仅拦截“部分集数”订阅：start>1 或订阅范围小于 TMDB 当前整季。
-        # 全集订阅（start=1 且 total>=TMDB 整季）交给 MoviePilot 原生处理，
-        # 避免本插件误剔除连载剧随 TMDB 总集数增长后仍需下载的集。
-        if start_episode <= 1 and (not tmdb_total or total_episode >= tmdb_total):
+        # start_episode > 1（从第 N 集开始追某段）：MoviePilot 原生会把该段集数作为
+        # episodes 白名单下发给下载器做文件级拆包，本插件不重复拦截。
+        if start_episode > 1:
+            logger.debug(
+                f"{self._LOG_TAG}订阅 {subscribe.name} 第{season}季 start_episode={start_episode} > 1，"
+                f"MoviePilot 原生按集拆包处理，跳过"
+            )
+            return
+        # start = 1：仅拦截「前 N 集试看」订阅（总集数小于 TMDB 整季）。
+        # 全集订阅（total >= TMDB 当前整季）或 TMDB 总集数未知时交给 MoviePilot 原生
+        # （避免误剔连载剧随 TMDB 总集数增长后仍需下载的集）。
+        if not tmdb_total or total_episode >= tmdb_total:
             logger.debug(
                 f"{self._LOG_TAG}订阅 {subscribe.name} 第{season}季为全集订阅"
                 f"（E{start_episode}-E{total_episode} >= TMDB 共 {tmdb_total} 集），交给 MoviePilot 原生，跳过"
@@ -583,7 +591,7 @@ class EpisodeSelectGuard(_PluginBase):
             return
         target_episodes = set(range(start_episode, total_episode + 1))
         logger.info(
-            f"{self._LOG_TAG}订阅 {subscribe.name} 第{season}季 目标集范围 E{start_episode}-E{total_episode}"
+            f"{self._LOG_TAG}订阅 {subscribe.name} 第{season}季为前 {total_episode} 集试看"
             f"（TMDB 整季共 {tmdb_total} 集），检查下载 {download_hash} ..."
         )
 
