@@ -179,11 +179,12 @@
         "name": "剧集选集守卫",
         "description": "拦截订阅触发的电视剧下载，按订阅的集数范围对 qBittorrent 大包种子自动执行文件级选集（仅下载订阅范围内的集，超范围文件剔除并打标防辅种）；详情面板展示当前处于选集状态的种子，「补全下载」自动判断：种子覆盖 TMDB 全集则恢复整包，否则重新全集订阅。",
         "labels": "下载管理,Qbittorrent,订阅,选集",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "icon": "Qbittorrent_A.png",
         "author": "Lyzd1",
         "level": 1,
         "history": {
+            "v1.0.1": "修复加载失败：模块导入缺少 Tuple 类型（方法返回注解 NameError）。",
             "v1.0.0": "首版：订阅部分集数（start_episode~total_episode，如只看前3集）的电视剧下载若选中大包，DownloadAdded 后自动对 qBittorrent 做文件级选集（超范围文件 priority=0、打 Losing 标签、恢复下载）；详情面板展示选集状态（保留集/种子覆盖集/TMDB 整季/覆盖判断）；「补全下载」智能决策：种子覆盖 TMDB 全集则恢复整包，否则自动重新全集订阅（不带集数限制，1分钟后自动搜索）；TMDB 总集数缺失或<5 时自动重拉。"
         }
     }

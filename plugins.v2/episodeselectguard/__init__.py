@@ -33,7 +33,7 @@
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app import schemas
 from app.chain.media import MediaChain
@@ -60,7 +60,7 @@ class EpisodeSelectGuard(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
