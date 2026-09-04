@@ -25,6 +25,11 @@
 - 本插件只覆盖 MoviePilot 原生的空档：start_episode=1 且订阅总集数小于 TMDB 整季的
   「前 N 集试看」。start_episode>1（从第 N 集开始追某段）与全集订阅均交给 MoviePilot
   原生按集拆包，不重复拦截；
+- 订阅触发的下载完成后，MoviePilot 会立即完成并删除该订阅（尤其手动锁定 total 的部分
+  订阅），而 DownloadAdded 是异步广播——处理时订阅记录可能已被删除；且搜索链在组包前会
+  mediainfo.clear() 清空 seasons，DownloadAdded context 的 TMDB 总集数不可靠。因此本插件
+  在 SubscribeAdded/SubscribeModified 时快照订阅范围到插件数据，DownloadAdded 时从
+  Subscribe|{...} source + 快照解析目标集范围；
 - 只处理订阅来源下载；手动搜索/辅种/刷流等非订阅下载不做改动；
 - 事件 hash 即 qBittorrent infohash；
 - 对多集合并单文件/无法解析集号的文件保守保留（避免漏下目标集），面板标记。
@@ -60,7 +65,7 @@ class EpisodeSelectGuard(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -101,6 +106,11 @@ class EpisodeSelectGuard(_PluginBase):
 
     # 数据键
     _SELECTED_KEY = "selected_records"
+    # 订阅范围快照：{tmdbid_season: {"id","tmdbid","season","name","year","start_episode","total_episode",
+    # "manual_total_episode","doubanid","media_source","media_id","ts"}}
+    _SUBSCRIBE_SNAPSHOT_KEY = "subscribe_snapshots"
+    # 快照保留条数
+    _SNAPSHOT_MAX = 500
 
     # 视频文件后缀
     _VIDEO_SUFFIXES = {".mkv", ".mp4", ".ts", ".avi", ".rmvb", ".mov", ".wmv", ".flv", ".m2ts", ".iso"}
@@ -447,6 +457,128 @@ class EpisodeSelectGuard(_PluginBase):
 
     # ------------------------------------------------------------------ 事件
 
+    def _snapshot_key(self, tmdbid, season) -> str:
+        """构造订阅快照键：tmdbid_season。"""
+        return f"{tmdbid}_{season if season is not None else ''}"
+
+    def _subscribe_snapshots(self) -> Dict[str, Dict[str, Any]]:
+        """读取订阅范围快照表。"""
+        data = self.get_data(self._SUBSCRIBE_SNAPSHOT_KEY) or {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_snapshot(self, snap: Dict[str, Any]):
+        """写入/更新一条订阅快照；按 tmdbid+season 覆盖。"""
+        try:
+            snaps = self._subscribe_snapshots()
+            tmdbid = snap.get("tmdbid")
+            season = snap.get("season")
+            if not tmdbid:
+                return
+            key = self._snapshot_key(tmdbid, season)
+            snap["ts"] = time.time()
+            snaps[key] = snap
+            # 超限时按时间淘汰最旧的一半
+            if len(snaps) > self._SNAPSHOT_MAX:
+                ordered = sorted(snaps.values(), key=lambda x: x.get("ts") or 0)
+                for old in ordered[: len(snaps) - self._SNAPSHOT_MAX // 2]:
+                    snaps.pop(self._snapshot_key(old.get("tmdbid"), old.get("season")), None)
+            self.save_data(self._SUBSCRIBE_SNAPSHOT_KEY, snaps)
+        except Exception as err:
+            logger.warning(f"{self._LOG_TAG}保存订阅快照失败：{err}")
+
+    def _remove_snapshot(self, tmdbid, season):
+        """删除订阅快照（订阅被删后清理）。"""
+        try:
+            snaps = self._subscribe_snapshots()
+            key = self._snapshot_key(tmdbid, season)
+            if key in snaps:
+                snaps.pop(key, None)
+                self.save_data(self._SUBSCRIBE_SNAPSHOT_KEY, snaps)
+        except Exception as err:
+            logger.warning(f"{self._LOG_TAG}删除订阅快照失败：{err}")
+
+    def _snapshot_from_subscribe(self, subscribe: Any) -> Dict[str, Any]:
+        """从订阅对象/字典构造快照。"""
+        if subscribe is None:
+            return {}
+        if isinstance(subscribe, dict):
+            s = subscribe
+        else:
+            s = subscribe.to_dict() if hasattr(subscribe, "to_dict") else {}
+        return {
+            "id": s.get("id") or s.get("subscribe_id"),
+            "tmdbid": s.get("tmdbid") or s.get("tmdb_id"),
+            "season": s.get("season"),
+            "name": s.get("name") or "",
+            "year": s.get("year") or "",
+            "type": s.get("type") or "",
+            "start_episode": s.get("start_episode"),
+            "total_episode": s.get("total_episode"),
+            "manual_total_episode": s.get("manual_total_episode"),
+            "doubanid": s.get("doubanid") or s.get("douban_id"),
+            "media_source": s.get("media_source"),
+            "media_id": s.get("media_id"),
+        }
+
+    @eventmanager.register(EventType.SubscribeAdded)
+    def on_subscribe_added(self, event: Event = None):
+        """订阅新增事件：快照订阅范围，供 DownloadAdded 时（订阅可能已删）解析。"""
+        if not self._enabled or not event:
+            return
+        data = event.event_data or {}
+        if isinstance(data, dict):
+            subscribe_id = data.get("subscribe_id")
+            mediainfo = data.get("mediainfo") or {}
+        else:
+            try:
+                data = dict(data)
+            except Exception:
+                return
+            subscribe_id = data.get("subscribe_id")
+            mediainfo = data.get("mediainfo") or {}
+        try:
+            subscribe = self._subscribe_oper.get(subscribe_id) if subscribe_id else None
+            if subscribe:
+                snap = self._snapshot_from_subscribe(subscribe)
+                if snap.get("tmdbid"):
+                    self._save_snapshot(snap)
+                    logger.debug(f"{self._LOG_TAG}订阅新增快照：{snap.get('name')} "
+                                 f"tmdbid={snap.get('tmdbid')} S{snap.get('season')} "
+                                 f"E{snap.get('start_episode')}-E{snap.get('total_episode')} "
+                                 f"manual={snap.get('manual_total_episode')}")
+        except Exception as err:
+            logger.warning(f"{self._LOG_TAG}订阅新增快照失败：{err}")
+
+    @eventmanager.register(EventType.SubscribeModified)
+    def on_subscribe_modified(self, event: Event = None):
+        """订阅调整事件：更新快照（改总集数/开始集数等）。"""
+        if not self._enabled or not event:
+            return
+        data = event.event_data or {}
+        if isinstance(data, dict):
+            subscribe_info = data.get("subscribe_info") or {}
+            subscribe_id = data.get("subscribe_id")
+        else:
+            try:
+                data = dict(data)
+            except Exception:
+                return
+            subscribe_info = data.get("subscribe_info") or {}
+            subscribe_id = data.get("subscribe_id")
+        snap = self._snapshot_from_subscribe(subscribe_info if isinstance(subscribe_info, dict) else {})
+        if not snap.get("tmdbid") and subscribe_id:
+            try:
+                subscribe = self._subscribe_oper.get(subscribe_id)
+                if subscribe:
+                    snap = self._snapshot_from_subscribe(subscribe)
+            except Exception:
+                pass
+        if snap.get("tmdbid"):
+            self._save_snapshot(snap)
+            logger.debug(f"{self._LOG_TAG}订阅调整快照更新：tmdbid={snap.get('tmdbid')} "
+                         f"S{snap.get('season')} E{snap.get('start_episode')}-E{snap.get('total_episode')} "
+                         f"manual={snap.get('manual_total_episode')}")
+
     @eventmanager.register(EventType.DownloadAdded)
     def on_download_added(self, event: Event = None):
         """DownloadAdded 事件：识别订阅来源剧集下载，按订阅集数范围对大包种子做文件级选集。
@@ -469,11 +601,18 @@ class EpisodeSelectGuard(_PluginBase):
         source = str(event_data.get("source") or "").strip()
         context = event_data.get("context")
         downloader = str(event_data.get("downloader") or "").strip()
+        # DownloadAdded 的 episodes：MoviePilot 原生已做按集拆包时非空。
+        # 仅当 episodes 为空（原生未拆包、整包全下）才需要本插件干预，避免重复/误伤。
+        episodes = event_data.get("episodes") or []
 
         if self._only_subscribe:
             if not self._is_subscribe_source(source, context):
                 logger.debug(f"{self._LOG_TAG}非订阅来源，跳过 {download_hash}（source={source}）")
                 return
+
+        if episodes:
+            logger.debug(f"{self._LOG_TAG}MoviePilot 已按集拆包下载 {download_hash}（episodes={episodes}），跳过")
+            return
 
         with self._delay_lock:
             if download_hash in self._delay_jobs:
@@ -483,6 +622,7 @@ class EpisodeSelectGuard(_PluginBase):
                 "source": source,
                 "context": context,
                 "downloader": downloader,
+                "episodes": episodes,
                 "ts": time.time(),
             }
         threading.Thread(target=self._delayed_process, args=(download_hash,), daemon=True).start()
@@ -502,11 +642,63 @@ class EpisodeSelectGuard(_PluginBase):
         except Exception as err:
             logger.error(f"{self._LOG_TAG}处理下载 {download_hash} 异常：{err}")
 
+    @staticmethod
+    def _parse_subscribe_source(source: str) -> Optional[dict]:
+        """解析 Subscribe|{json} 订阅来源，返回 dict 或 None。"""
+        if not source or not str(source).startswith("Subscribe|"):
+            return None
+        try:
+            json_part = str(source).split("|", 1)[1]
+            import json
+            parsed = json.loads(json_part)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+
     def _is_subscribe_source(self, source: str, context: Any) -> bool:
         """判断下载是否为订阅来源：source 前缀 或 能匹配订阅记录。"""
         if source and str(source).startswith("Subscribe|"):
             return True
         return bool(self._find_subscribe(context))
+
+    def _resolve_subscribe_info(self, source: str, context: Any):
+        """解析下载对应的订阅信息，返回 (subscribe_dict, snapshot_dict)。
+
+        优先用 Subscribe| source 里的 tmdbid/season/id；再回退按 context 查订阅/快照。
+        """
+        parsed = self._parse_subscribe_source(source)
+        snaps = self._subscribe_snapshots()
+        # 1) source 带 tmdbid
+        if parsed and parsed.get("tmdbid"):
+            tmdbid = parsed.get("tmdbid")
+            season = parsed.get("season")
+            snap = snaps.get(self._snapshot_key(tmdbid, season)) or {}
+            # source 无 start/total，快照缺失时尝试按 id 查订阅记录（可能已删）
+            if not snap:
+                sid = parsed.get("id")
+                try:
+                    if sid:
+                        sub = self._subscribe_oper.get(sid)
+                        if sub:
+                            return self._snapshot_from_subscribe(sub), snap
+                except Exception:
+                    pass
+            return snap, snap
+        # 2) 回退：按 context 媒体身份
+        sub = self._find_subscribe(context)
+        if sub:
+            snap = self._snapshot_from_subscribe(sub)
+            return snap, snap
+        # 3) 仅快照命中（订阅已删，context 无订阅对象）
+        media = getattr(context, "media_info", None) if context else None
+        if media is not None:
+            tmdbid = getattr(media, "tmdb_id", None)
+            season = getattr(media, "season", None)
+            if tmdbid:
+                snap = snaps.get(self._snapshot_key(tmdbid, season)) or {}
+                if snap:
+                    return snap, snap
+        return None, None
 
     def _find_subscribe(self, context: Any):
         """从事件 context 解析媒体身份，返回匹配的订阅记录（无则 None）。"""
@@ -561,37 +753,60 @@ class EpisodeSelectGuard(_PluginBase):
         download_hash = job.get("hash")
         context = job.get("context")
         downloader_name = job.get("downloader")
+        source = job.get("source") or ""
 
-        subscribe = self._find_subscribe(context)
-        if not subscribe:
-            logger.debug(f"{self._LOG_TAG}未匹配到订阅记录，跳过 {download_hash}")
+        subscribe_dict, snapshot = self._resolve_subscribe_info(source, context)
+        if not subscribe_dict or not subscribe_dict.get("tmdbid"):
+            logger.debug(f"{self._LOG_TAG}无法解析下载 {download_hash} 的订阅信息，跳过")
             return
-        media, meta, season, tmdb_total = self._resolve_media_context(context)
-        start_episode = int(getattr(subscribe, "start_episode", None) or 1)
-        total_episode = int(getattr(subscribe, "total_episode", None) or 0)
+        media, meta, season, _tmdb_total = self._resolve_media_context(context)
+        # 订阅范围：优先快照/订阅记录里的 start_episode~total_episode
+        try:
+            start_episode = int(subscribe_dict.get("start_episode") or 1)
+        except (TypeError, ValueError):
+            start_episode = 1
+        try:
+            total_episode = int(subscribe_dict.get("total_episode") or 0)
+        except (TypeError, ValueError):
+            total_episode = 0
+        subscribe_name = subscribe_dict.get("name") or ""
+        if season is None:
+            season = subscribe_dict.get("season")
         if not total_episode or total_episode < start_episode:
-            logger.debug(f"{self._LOG_TAG}订阅 {subscribe.name} 未设置有效集数范围，跳过")
+            logger.debug(f"{self._LOG_TAG}订阅 {subscribe_name} 未设置有效集数范围，跳过")
             return
         # start_episode > 1（从第 N 集开始追某段）：MoviePilot 原生会把该段集数作为
         # episodes 白名单下发给下载器做文件级拆包，本插件不重复拦截。
         if start_episode > 1:
             logger.debug(
-                f"{self._LOG_TAG}订阅 {subscribe.name} 第{season}季 start_episode={start_episode} > 1，"
+                f"{self._LOG_TAG}订阅 {subscribe_name} 第{season}季 start_episode={start_episode} > 1，"
                 f"MoviePilot 原生按集拆包处理，跳过"
             )
             return
-        # start = 1：仅拦截「前 N 集试看」订阅（总集数小于 TMDB 整季）。
-        # 全集订阅（total >= TMDB 当前整季）或 TMDB 总集数未知时交给 MoviePilot 原生
-        # （避免误剔连载剧随 TMDB 总集数增长后仍需下载的集）。
-        if not tmdb_total or total_episode >= tmdb_total:
+        # 全集/连载订阅判定：DownloadAdded context 的 TMDB 整季数不可靠（mediainfo.clear
+        # 清空 seasons），因此整季数需要时现拉一次 TMDB（与 MoviePilot 自身口径一致：
+        # total = len(mediainfo.seasons[season])）。
+        # - 订阅 total < TMDB 当前整季 -> 「试看前 N 集」，拦截，按 range(1, total+1) 选集；
+        # - 订阅 total >= TMDB 整季（全集/连载自动追更）-> 交给 MoviePilot 原生按集拆包，
+        #   避免误剔后续仍需下载的集。
+        subscribe_name = subscribe_dict.get("name") or ""
+        tmdb_total = self._resolve_subscribe_tmdb_total(subscribe_dict, media)
+        if tmdb_total and total_episode >= tmdb_total:
             logger.debug(
-                f"{self._LOG_TAG}订阅 {subscribe.name} 第{season}季为全集订阅"
+                f"{self._LOG_TAG}订阅 {subscribe_name} 第{season}季为全集订阅"
                 f"（E{start_episode}-E{total_episode} >= TMDB 共 {tmdb_total} 集），交给 MoviePilot 原生，跳过"
+            )
+            return
+        # 拿不到 TMDB 整季数时无法证明是"试看"，保守交给原生
+        if not tmdb_total:
+            logger.debug(
+                f"{self._LOG_TAG}订阅 {subscribe_name} 第{season}季无法取得 TMDB 整季总集数，"
+                f"交给 MoviePilot 原生，跳过"
             )
             return
         target_episodes = set(range(start_episode, total_episode + 1))
         logger.info(
-            f"{self._LOG_TAG}订阅 {subscribe.name} 第{season}季为前 {total_episode} 集试看"
+            f"{self._LOG_TAG}订阅 {subscribe_name} 第{season}季为前 {total_episode} 集试看"
             f"（TMDB 整季共 {tmdb_total} 集），检查下载 {download_hash} ..."
         )
 
@@ -658,7 +873,7 @@ class EpisodeSelectGuard(_PluginBase):
                 f"保留集：{self._format_episodes(sorted(kept_episodes)) or '全部'}"
             )
             if currently_selected:
-                self._save_record(download_hash, subscribe, media, meta, season, downloader_name,
+                self._save_record(download_hash, subscribe_dict, media, meta, season, downloader_name,
                                   target_episodes, kept_episodes, seed_episodes, excluded_episodes,
                                   excluded=0, selected=True, tmdb_total=tmdb_total,
                                   unresolved=unresolved_files)
@@ -689,19 +904,19 @@ class EpisodeSelectGuard(_PluginBase):
             logger.error(f"{self._LOG_TAG}执行选集失败 {download_hash}: {err}")
             return
 
-        self._save_record(download_hash, subscribe, media, meta, season, downloader_name,
+        self._save_record(download_hash, subscribe_dict, media, meta, season, downloader_name,
                           target_episodes, kept_episodes, seed_episodes, excluded_episodes,
                           excluded=len(excluded_ids), selected=True, tmdb_total=tmdb_total,
                           unresolved=unresolved_files)
         logger.info(
-            f"{self._LOG_TAG}完成选集：{subscribe.name} 第{season}季，种子 {download_hash}，"
+            f"{self._LOG_TAG}完成选集：{subscribe_name} 第{season}季，种子 {download_hash}，"
             f"剔除 {len(excluded_ids)} 个超范围文件，保留 {self._format_episodes(sorted(kept_episodes)) or '全部'}"
         )
         if self._notify:
             try:
                 self.post_message(
                     mtype=NotificationType.Plugin,
-                    title=f"剧集选集守卫 - {subscribe.name}",
+                    title=f"剧集选集守卫 - {subscribe_name}",
                     text=f"第{season}季订阅范围 E{start_episode}-E{total_episode}\n"
                          f"已剔除 {len(excluded_ids)} 个超范围文件\n"
                          f"保留集：{self._format_episodes(sorted(kept_episodes)) or '全部'}",
@@ -755,16 +970,22 @@ class EpisodeSelectGuard(_PluginBase):
 
     # ------------------------------------------------------------------ 记录
 
-    def _save_record(self, download_hash: str, subscribe: Any, media: Any, meta: Any,
+    def _save_record(self, download_hash: str, subscribe_dict: Dict[str, Any], media: Any, meta: Any,
                      season: Optional[int], downloader: Optional[str],
                      target_episodes: Set[int], kept_episodes: Set[int], seed_episodes: Set[int],
                      excluded_episodes: Set[int], excluded: int, selected: bool,
-                     tmdb_total: int, unresolved: int = 0):
+                     unresolved: int = 0, tmdb_total: Optional[int] = None):
         """保存/更新选集状态记录。"""
         try:
             records = self.get_data(self._SELECTED_KEY) or []
-            name = getattr(media, "title", None) or getattr(subscribe, "name", None) or ""
-            year = getattr(media, "year", None)
+            name = ""
+            year = None
+            if media is not None:
+                name = getattr(media, "title", None) or ""
+                year = getattr(media, "year", None)
+            name = name or (subscribe_dict or {}).get("name") or ""
+            if not year:
+                year = (subscribe_dict or {}).get("year")
             torrent_name = ""
             if meta is not None:
                 torrent_name = getattr(meta, "org_string", "") or ""
@@ -773,8 +994,10 @@ class EpisodeSelectGuard(_PluginBase):
                 "title": f"{name} ({year})" if year else name,
                 "year": str(year or ""),
                 "season": season,
-                "tmdbid": getattr(media, "tmdb_id", None) or getattr(subscribe, "tmdbid", None),
-                "subscribe_id": getattr(subscribe, "id", None),
+                "tmdbid": (getattr(media, "tmdb_id", None) if media is not None else None)
+                          or (subscribe_dict or {}).get("tmdbid"),
+                "subscribe_id": (subscribe_dict or {}).get("id")
+                                or (subscribe_dict or {}).get("subscribe_id"),
                 "start_episode": min(target_episodes) if target_episodes else None,
                 "total_episode": max(target_episodes) if target_episodes else None,
                 "downloader": downloader,
@@ -831,6 +1054,51 @@ class EpisodeSelectGuard(_PluginBase):
         return (f"种子未覆盖全集（最大到 E{max(seed_eps)}，TMDB 共 {total} 集）"
                 f"→ 点「补全下载」将自动重新全集订阅")
 
+    def _recognize_tmdb_season_total(self, tmdbid, season, title: str = "") -> int:
+        """现拉 TMDB 该季总集数（与 MoviePilot 口径一致：len(seasons[season])）。"""
+        if not tmdbid:
+            return 0
+        try:
+            meta = MetaInfo(title or "")
+            mediainfo = self._media_chain.recognize_media(
+                meta=meta,
+                mtype=MediaType.TV,
+                tmdbid=int(tmdbid),
+                cache=False,
+            )
+            if mediainfo and getattr(mediainfo, "seasons", None):
+                if season is not None and season in mediainfo.seasons:
+                    return len(mediainfo.seasons[season] or [])
+                if mediainfo.seasons:
+                    return len(next(iter(mediainfo.seasons.values())) or [])
+        except Exception as err:
+            logger.warning(f"{self._LOG_TAG}识别 TMDB 总集数失败：{err}")
+        return 0
+
+    def _resolve_subscribe_tmdb_total(self, subscribe_dict: Dict[str, Any], media: Any) -> int:
+        """解析订阅对应整季的 TMDB 总集数。
+
+        优先用事件 context 里未清空的 seasons；否则现拉一次 TMDB。
+        """
+        tmdbid = (subscribe_dict or {}).get("tmdbid")
+        season = (subscribe_dict or {}).get("season")
+        # context 的 seasons 在下载事件里通常已被 mediainfo.clear() 清空，但仍尝试一次
+        try:
+            if media is not None:
+                seasons = getattr(media, "seasons", None) or {}
+                if season is not None and seasons:
+                    total = len(seasons.get(season) or [])
+                    if total:
+                        return total
+                elif seasons:
+                    total = len(next(iter(seasons.values())) or [])
+                    if total:
+                        return total
+        except Exception:
+            pass
+        return self._recognize_tmdb_season_total(tmdbid, season,
+                                                 title=str((subscribe_dict or {}).get("name") or ""))
+
     def _resolve_tmdb_total(self, rec: Dict[str, Any]) -> int:
         """解析记录对应剧集整季总集数。
 
@@ -846,26 +1114,12 @@ class EpisodeSelectGuard(_PluginBase):
         season = rec.get("season")
         if not tmdbid:
             return stored
-        try:
-            title = (rec.get("title") or "").split(" (")[0]
-            meta = MetaInfo(title)
-            mediainfo = self._media_chain.recognize_media(
-                meta=meta,
-                mtype=MediaType.TV,
-                tmdbid=int(tmdbid),
-                cache=False,
-            )
-            if mediainfo and getattr(mediainfo, "seasons", None):
-                if season is not None and season in mediainfo.seasons:
-                    total = len(mediainfo.seasons[season] or [])
-                else:
-                    total = len(next(iter(mediainfo.seasons.values())) or [])
-                if total:
-                    logger.info(f"{self._LOG_TAG}重拉 TMDB 总集数：{rec.get('title')} 第{season}季 = {total} 集")
-                    rec["tmdb_total"] = total
-                    return total
-        except Exception as err:
-            logger.warning(f"{self._LOG_TAG}重拉 TMDB 总集数失败：{err}")
+        title = (rec.get("title") or "").split(" (")[0]
+        total = self._recognize_tmdb_season_total(tmdbid, season, title)
+        if total:
+            logger.info(f"{self._LOG_TAG}重拉 TMDB 总集数：{rec.get('title')} 第{season}季 = {total} 集")
+            rec["tmdb_total"] = total
+            return total
         return stored
 
     # ------------------------------------------------------------------ API

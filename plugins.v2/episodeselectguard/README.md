@@ -16,14 +16,25 @@ MoviePilot 原生只有在下载链能算出「本次缺哪些集」时才会下
 2. 媒体是**电视剧**；
 3. 订阅记录 **`start_episode = 1`**（从第 1 集起）；
 4. 订阅**总集数 < TMDB 当前整季总集数**（即「试看前 N 集」，而非全集订阅）；
-5. 下载的种子里存在**集号超出订阅范围**的视频文件。
+5. MoviePilot **未原生按集拆包**（DownloadAdded 事件的 `episodes` 为空）；
+6. 下载的种子里存在**集号超出订阅范围**的视频文件。
 
 **以下情况不拦截**（交给 MoviePilot 原生或不做改动）：
 
 - `start_episode > 1`（从第 N 集开始追某段）——原生会下发该段集数给下载器做文件级拆包；
-- 全集订阅（`total_episode ≥ TMDB 整季`）或 TMDB 总集数未知；
+- 全集订阅（`total_episode ≥ TMDB 整季`）；
+- DownloadAdded `episodes` 非空（MoviePilot 已做原生拆包）；
 - 非订阅来源下载（手动搜索 / 直接加种 / 辅种 / 刷流）；
 - 电影；订阅未设有效集数范围；种子集数本身都在订阅范围内。
+
+### 实现要点（v1.0.3）
+
+- **订阅快照**：订阅「前 N 集试看」下完 N 集后会被 MoviePilot 立即完成并删除，DownloadAdded
+  异步处理时已查不到订阅记录。插件在 `SubscribeAdded` / `SubscribeModified` 事件时把订阅的
+  tmdbid/季/start/total 快照到插件数据，DownloadAdded 时从 `Subscribe|{...}` source + 快照
+  解析目标范围，不受订阅删除影响。
+- **TMDB 整季数现拉**：DownloadAdded context 的 `seasons` 会被 MoviePilot 清空（不可靠），
+  判定「试看 vs 全集」时会按需现拉一次 TMDB（口径与 MoviePilot 一致：季集数长度）。
 
 ## 工作流程
 
@@ -75,5 +86,7 @@ MoviePilot 原生只有在下载链能算出「本次缺哪些集」时才会下
 
 ## 版本记录
 
+- v1.0.3：修复订阅试看场景插件无反应——订阅下完前 N 集即被删除改为快照方案；TMDB 整季数现拉；仅当 MoviePilot 未原生拆包时干预。
+- v1.0.2：收紧拦截边界——`start_episode>1` 与全集订阅交 MoviePilot 原生，仅拦「前 N 集试看」。
 - v1.0.1：修复加载失败（导入缺少 `Tuple` 类型）。
 - v1.0.0：首版。订阅部分集数的大包下载自动文件级选集；面板展示选集状态与覆盖判断；「补全下载」智能决策（覆盖全集→恢复整包 / 未覆盖→重新全集订阅），TMDB 总集数缺失或 <5 时自动重拉。
