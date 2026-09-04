@@ -174,20 +174,5 @@
             "v1.1.0": "移除「立即运行一次」按钮，仅由站点数据刷新事件（SiteRefreshed site_id=*）驱动更新站点分享率与档位；分享率读取改为与流量管理/魔力兑换一致的 SiteOper.get_userdata_by_date（按站点名，今天数据优先回退昨天）；详情面板仅保留站点状态表（分享率/数据日期/档位/已限速种子数），移除种子明细。",
             "v1.0.0": "初始版本：全局/站点分享率上下限配置；DownloadAdded 直接读取插件内部站点档位状态限速；SiteRefreshed 低于下限取消限速、高于上限批量补限速；档位变化才通知；详情面板展示站点分享率与上下限状态及种子限速标识。"
         }
-    },
-    "EpisodeSelectGuard": {
-        "name": "剧集选集守卫",
-        "description": "拦截订阅触发的电视剧下载，按订阅的集数范围对 qBittorrent 大包种子自动执行文件级选集（仅下载订阅范围内的集，超范围文件剔除并打标防辅种）；详情面板展示当前处于选集状态的种子，「补全下载」自动判断：种子覆盖 TMDB 全集则恢复整包，否则重新全集订阅。",
-        "labels": "下载管理,Qbittorrent,订阅,选集",
-        "version": "1.0.3",
-        "icon": "Qbittorrent_A.png",
-        "author": "Lyzd1",
-        "level": 1,
-        "history": {
-            "v1.0.3": "修复订阅试看场景插件无反应：①订阅下完前 N 集会被 MoviePilot 立即完成并删除，DownloadAdded 异步处理时查不到订阅记录——改为在 SubscribeAdded/SubscribeModified 时快照订阅范围到插件数据，DownloadAdded 时从 Subscribe|{...} source + 快照解析目标范围；②DownloadAdded context 的 TMDB 整季数被 mediainfo.clear 清空不可靠——改为现拉 TMDB 整季数判定「前N集试看 vs 全集」；③仅当 DownloadAdded episodes 为空（MoviePilot 未原生拆包）才干预，避免重复/误伤。",
-            "v1.0.2": "收紧拦截边界：仅拦截「前 N 集试看」（start_episode=1 且订阅总集数小于 TMDB 整季）的大包下载；start_episode>1（从第 N 集开始追）与全集订阅交给 MoviePilot 原生按集拆包，不再重复拦截。",
-            "v1.0.1": "修复加载失败：模块导入缺少 Tuple 类型（方法返回注解 NameError）。",
-            "v1.0.0": "首版：订阅部分集数（start_episode~total_episode，如只看前3集）的电视剧下载若选中大包，DownloadAdded 后自动对 qBittorrent 做文件级选集（超范围文件 priority=0、打 Losing 标签、恢复下载）；详情面板展示选集状态（保留集/种子覆盖集/TMDB 整季/覆盖判断）；「补全下载」智能决策：种子覆盖 TMDB 全集则恢复整包，否则自动重新全集订阅（不带集数限制，1分钟后自动搜索）；TMDB 总集数缺失或<5 时自动重拉。"
-        }
     }
 }
