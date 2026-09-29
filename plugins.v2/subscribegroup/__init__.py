@@ -10,6 +10,7 @@ from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, SystemConfigKey, MediaType
+from app.sdk.media import build_media_key, resolve_media_identity
 
 
 class SubscribeGroup(_PluginBase):
@@ -20,7 +21,7 @@ class SubscribeGroup(_PluginBase):
     # 插件图标
     plugin_icon = "teamwork.png"
     # 插件版本
-    plugin_version = "3.5.0"
+    plugin_version = "3.5.1"
     # 插件作者
     plugin_author = "Lyzd1,thsrite"
     # 作者主页
@@ -237,7 +238,9 @@ class SubscribeGroup(_PluginBase):
             subscribe = self._subscribeoper.get(sid)
             if subscribe:
                 history_handle: List[str] = self.get_data('history_handle') or []
-                exist_key = f"{subscribe.type}:{subscribe.tmdbid}"
+                # 媒体身份（v3 统一为 media_source + media_id）需与下载事件侧的键格式保持一致
+                media_source, media_id = resolve_media_identity(subscribe)
+                exist_key = f"{subscribe.type}:{build_media_key(media_source, media_id)}"
                 if exist_key in history_handle:
                     history_handle.remove(exist_key)
                     self.save_data('history_handle', history_handle)
@@ -259,11 +262,23 @@ class SubscribeGroup(_PluginBase):
                 return
 
             sid = event_data.get("subscribe_id")
-            category = event_data.get("mediainfo").get("category")
-            
+            media_payload = event_data.get("mediainfo")
+            category = media_payload.get("category")
+
             if not category:
-                media_info = self.chain.recognize_media(mtype=MediaType(event_data.get("mediainfo").get("type")),
-                                                        tmdbid=event_data.get("mediainfo").get("tmdb_id"))
+                # v3 统一媒体身份：只有 media_source + media_id，没有 tmdb_id
+                media_source, media_id = resolve_media_identity(media_payload)
+                if not media_source or not media_id:
+                    logger.error(f"订阅ID:{sid} 未获取到二级分类或有效媒体身份")
+                    return
+                try:
+                    media_type = MediaType(media_payload.get("type"))
+                except ValueError:
+                    logger.error(f"订阅ID:{sid} 包含无法识别的媒体类型")
+                    return
+                media_info = self.chain.recognize_media(mtype=media_type,
+                                                        media_source=media_source,
+                                                        media_id=media_id)
                 if media_info and media_info.category:
                     category = media_info.category
                     logger.info(f"订阅ID:{sid} 二级分类:{category} 已通过媒体信息识别")
@@ -392,7 +407,7 @@ class SubscribeGroup(_PluginBase):
                         logger.info(f"Media Info Title: {getattr(mdi, 'title', None)}")
                         logger.info(f"Media Info Year: {getattr(mdi, 'year', None)}")
                         logger.info(f"Media Info Category: {getattr(mdi, 'category', None)}")
-                        logger.info(f"Media Info TMDB ID: {getattr(mdi, 'tmdb_id', None)}")
+                        logger.info(f"Media Info Media ID: {getattr(mdi, 'media_id', None)}")
                         logger.info(f"Media Info IMDB ID: {getattr(mdi, 'imdb_id', None)}")
                         logger.info(f"Media Info Douban ID: {getattr(mdi, 'douban_id', None)}")
                         logger.info(f"Media Info TVDB ID: {getattr(mdi, 'tvdb_id', None)}")
@@ -429,9 +444,17 @@ class SubscribeGroup(_PluginBase):
                 logger.warning(f"种子hash:{download_hash} 对应下载记录不存在")
                 return
 
+            # v3 统一媒体身份：只有 media_source + media_id，没有 tmdbid
+            media_source, media_id = resolve_media_identity(download_history)
+            media_key = build_media_key(media_source, media_id)
+            if not media_key:
+                logger.warning(f"下载历史:{download_history.title} 缺少有效媒体身份")
+                return
+
             history_handle: List[str] = self.get_data('history_handle') or []
 
-            if f"{download_history.type}:{download_history.tmdbid}" in history_handle:
+            handle_key = f"{download_history.type}:{media_key}"
+            if handle_key in history_handle:
                 logger.info(f"下载历史:{download_history.title} 已处理过，不再重复处理")
                 return
 
@@ -440,15 +463,20 @@ class SubscribeGroup(_PluginBase):
                     logger.info(f"下载历史:{download_history.title} 不是电视剧，跳过")
                 return
 
-            subscribes = self._subscribeoper.list_by_tmdbid(tmdbid=download_history.tmdbid,
-                                                            season=int(download_history.seasons.replace('S', ''))
-                                                            if download_history.seasons and
-                                                               download_history.seasons.count('-') == 0 else None)
+            # 解析单季下载的范围，用于在 Python 侧过滤订阅（v3 查询接口不再支持 season 形参）
+            season = None
+            if download_history.seasons and re.fullmatch(r"S\d+", download_history.seasons):
+                season = int(download_history.seasons[1:])
+
+            subscribes = self._subscribeoper.list_by_media_identity(media_source=media_source,
+                                                                    media_id=media_id)
+            if season is not None:
+                subscribes = [subscribe for subscribe in subscribes if subscribe.season == season]
             if not subscribes or len(subscribes) == 0:
-                logger.warning(f"下载历史:{download_history.title} tmdbid:{download_history.tmdbid} 对应订阅记录不存在")
+                logger.warning(f"下载历史:{download_history.title} {media_key} 对应订阅记录不存在")
                 return
 
-            logger.info(f"获取到tmdbid {download_history.tmdbid} 订阅记录:{len(subscribes)} 个")
+            logger.info(f"获取到媒体 {media_key} 订阅记录:{len(subscribes)} 个")
 
             for subscribe in subscribes:
                 if subscribe.type != '电视剧':
@@ -590,10 +618,10 @@ class SubscribeGroup(_PluginBase):
                     })
                     self.save_data(key="history", value=history)
 
-                    history_handle.append(f"{download_history.type}:{download_history.tmdbid}")
+                    history_handle.append(handle_key)
                     self.save_data('history_handle', history_handle)
                     if self._debug:
-                        logger.info(f"已处理记录添加: {download_history.type}:{download_history.tmdbid}")
+                        logger.info(f"已处理记录添加: {handle_key}")
                 else:
                     logger.info(f"订阅记录:{subscribe.name} 无需填充")
 
