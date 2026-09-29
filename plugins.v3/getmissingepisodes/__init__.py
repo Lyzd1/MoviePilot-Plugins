@@ -6,7 +6,7 @@ from apscheduler.triggers.cron import CronTrigger
 import datetime
 import pytz
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict
 
 from app.chain.tmdb import TmdbChain
 from app.schemas.types import MediaType, MediaSource
@@ -80,6 +80,7 @@ class TvNoExistInfo(TypedDict):
     status: str
     status_cn: str
     exist_seasons: List[int]  # 媒体库中已有集的季列表（条件订阅判定用）
+    ignored_seasons: List[int]  # 被手动「标记为存在」的季列表（条件订阅判定用）
 
 
 default_poster_path = "/assets/no-image-CweBJ8Ee.jpeg"
@@ -97,6 +98,7 @@ def create_tv_no_exist_info(
     status: str = "Unknown",
     status_cn: str = "未知",
     exist_seasons: Optional[List[int]] = None,
+    ignored_seasons: Optional[List[int]] = None,
 ) -> TvNoExistInfo:
     logger.debug(f"season_episode_no_exist_info: {season_episode_no_exist_info}")
     return TvNoExistInfo(
@@ -111,6 +113,7 @@ def create_tv_no_exist_info(
         status=status,
         status_cn=status_cn,
         exist_seasons=exist_seasons or [],
+        ignored_seasons=ignored_seasons or [],
     )
 
 
@@ -125,6 +128,19 @@ def get_exist_seasons(seasoninfo: Optional[Dict[Any, Any]]) -> List[int]:
         except (ValueError, TypeError):
             continue
     return sorted(seasons)
+
+
+def normalize_seasons(seasons: Optional[Iterable[Any]]) -> List[int]:
+    """把季号集合规整成有序的去重整数列表（忽略名单里可能是字符串）。"""
+    result: List[int] = []
+    for season in seasons or []:
+        try:
+            season_int = int(season)
+        except (ValueError, TypeError):
+            continue
+        if season_int not in result:
+            result.append(season_int)
+    return sorted(result)
 
 
 class HistoryDetail(TypedDict, total=False):
@@ -195,7 +211,7 @@ class GetMissingEpisodes(_PluginBase):
     plugin_name = "剧集管家"
     plugin_desc = "检测指定剧集库，对有新季或存在集缺失的剧集自动订阅补全"
     plugin_icon = "https://raw.githubusercontent.com/boeto/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
-    plugin_version = "3.1.5"
+    plugin_version = "3.1.6"
     plugin_author = "左岸"
     author_url = "https://github.com/andyxu8023"
     plugin_config_prefix = "getmissingepisodes_"
@@ -875,6 +891,8 @@ class GetMissingEpisodes(_PluginBase):
             tv_no_exist_info["status_cn"] = status_cn
             # 条件订阅判定依据：媒体库中已有集的季列表（整季缺失时校验紧邻的上一季）
             tv_no_exist_info["exist_seasons"] = get_exist_seasons(exist_season_info)
+            # 条件订阅判定依据：被手动「标记为存在」的季（等价于已入库，可支撑后一季订阅）
+            tv_no_exist_info["ignored_seasons"] = normalize_seasons(ignored_seasons)
 
             # 检查tmdbinfo.seasons是否存在
             if not getattr(tmdbinfo, 'seasons', None):
@@ -1414,45 +1432,96 @@ class GetMissingEpisodes(_PluginBase):
         season: int,
         season_info: Optional[GetMissingEpisodesInfo],
         exist_seasons: List[int],
+        ignored_seasons: Optional[List[int]] = None,
+        blank_seasons_after_lib: Optional[List[int]] = None,
+        lib_max_season: int = 0,
+        prev_season_missing_count: int = 0,
     ) -> tuple[bool, str]:
-        """条件订阅：判断单个季是否通过「前季/前集已入库」校验。
+        """条件订阅（v3.1.6 定稿口径）：判断单个季是否通过「前季/前集已入库」校验。
 
         用户诉求：先看过/入库过前面的内容，才让它自动续订后面的新季/新集。
-        - 部分集缺失（单季复更/国漫加集）：媒体库该季已有集，且本次缺失集数不超过
-          _conditional_missing_limit → 通过
-        - 整季缺失（新季）：媒体库存在紧邻的上一季（s-1 且该季有集）→ 通过，
-          只要求紧邻上一季，不要求更早的季都在库
-        - 媒体库一集都没有的季（全新，没有可依据的前季）→ 不通过
+        判定分两条轨道（跨季规则由调用方 __add_subscribe_conditionally 算好传入）：
+
+        轨道 A（同季补集：媒体库该季已有集，本次只是缺几集，即同季复更/国漫加集）
+          - 缺口 <= _conditional_missing_limit → 通过（订阅补这几集）
+          - 缺口 >  _conditional_missing_limit → 不通过
+
+        轨道 B（新季空白：媒体库该季一集都没有）
+          - 只统计「媒体库已入库最高季 L(lib_max_season) 之后」的空白季；前面缺的季
+            (s <= L) 不参与判定、也不自动订阅
+          - L 之后的空白季数量 >= 2 → 全部不通过（交给手动订阅）
+          - 恰好 1 个空白季 s → 上一季 s-1 必须同时满足两条：
+              1) s-1 已入库，或 s-1 在忽略名单（用户手动「标记存在」，视为达标）
+              2) 上一季缺口 <= _conditional_missing_limit
+                 （完整在库 = 缺口 0，天然达标）——轨道 B 同样要过「3 集原则」
+            两条都满足 → 通过；否则不通过（日志写明是「上一季不在库」还是
+            「上一季缺 N 集 > 3」）
         """
         episode_no_exist = (season_info or {}).get("episode_no_exist") or []
         exist_episode_count = (season_info or {}).get("exist_episode_count") or 0
+        ignored_seasons = ignored_seasons or []
+        limit = self._conditional_missing_limit
 
         if exist_episode_count > 0:
-            # 该季媒体库已有集：复更/加集场景，只看缺失集数是否在阈值内
+            # 轨道 A：该季媒体库已有集，同季复更/加集场景，只看缺口是否在阈值内
             missing_count = len(episode_no_exist)
-            if missing_count <= self._conditional_missing_limit:
+            if missing_count <= limit:
                 return True, (
-                    f"媒体库该季已有 {exist_episode_count} 集, 本次缺失 {missing_count} 集"
-                    f"(<= {self._conditional_missing_limit})"
+                    f"轨道A(同季补集): 媒体库该季已有 {exist_episode_count} 集, "
+                    f"本次缺口 {missing_count} 集(<= {limit})"
                 )
             return False, (
-                f"媒体库该季已有 {exist_episode_count} 集, 本次缺失 {missing_count} 集"
-                f"(> {self._conditional_missing_limit}), 超出阈值"
+                f"轨道A(同季补集): 媒体库该季已有 {exist_episode_count} 集, "
+                f"本次缺口 {missing_count} 集(> {limit}), 超出阈值不订阅"
             )
 
-        # 该季媒体库一集都没有：新季场景，校验紧邻的上一季是否已入库
+        # 轨道 B：该季媒体库一集都没有（整季空白）
+        if season <= lib_max_season:
+            # 前面缺失的季（s <= L）：不参与判定，也不自动订阅
+            return False, (
+                f"轨道B(新季空白): S{season} 在媒体库已入库最高季 L=S{lib_max_season} "
+                f"之内(前面缺的季不参与条件订阅), 不订阅"
+            )
+
+        blank_seasons_after_lib = blank_seasons_after_lib or []
+        if len(blank_seasons_after_lib) >= 2:
+            return False, (
+                f"轨道B(新季空白): 媒体库已入库最高季 L=S{lib_max_season} 之后存在 "
+                f"{len(blank_seasons_after_lib)} 个空白季 {blank_seasons_after_lib}"
+                f"(>= 2), 多个空白季交给手动订阅, 全部不通过"
+            )
+
+        # 恰好 1 个空白季：要求紧邻的上一季「已入库或已手动标记存在」且「缺口 <= 3」
         prev_season = season - 1
-        if prev_season in exist_seasons:
-            return True, f"整季缺失, 紧邻的上一季 S{prev_season} 已入库"
-        return False, (
-            f"整季缺失, 紧邻的上一季 S{prev_season} 未入库"
-            f"(媒体库已有集的季: {exist_seasons or '无'})"
+        prev_in_lib = prev_season in exist_seasons
+        prev_ignored = prev_season in ignored_seasons
+        if not (prev_in_lib or prev_ignored):
+            return False, (
+                f"轨道B(新季空白): L=S{lib_max_season} 之后仅 1 个空白季 S{season}, "
+                f"但上一季 S{prev_season} 不在库(也不在忽略名单), 不订阅"
+                f"(媒体库已有集的季: {exist_seasons or '无'}, 忽略名单: {ignored_seasons or '无'})"
+            )
+        if prev_season_missing_count > limit:
+            return False, (
+                f"轨道B(新季空白): L=S{lib_max_season} 之后仅 1 个空白季 S{season}, "
+                f"上一季 S{prev_season} 虽有集但缺口 {prev_season_missing_count} 集"
+                f"(> {limit}), 不满足 3 集原则, 不订阅"
+            )
+        prev_source = "已入库" if prev_in_lib else "已在忽略名单(手动标记存在)"
+        return True, (
+            f"轨道B(新季空白): L=S{lib_max_season} 之后仅 1 个空白季 S{season}, "
+            f"上一季 S{prev_season} {prev_source}, 上一季缺口 {prev_season_missing_count} 集"
+            f"(<= {limit})"
         )
 
     def __add_subscribe_conditionally(
         self, tv_no_exist_info: TvNoExistInfo, unique: str
     ) -> bool:
         """条件订阅：逐季判定「前季/前集已入库」，只订阅通过校验的季。
+
+        跨季规则（只统计 L 之后的空白季、多个空白季全部不通过）无法由单季判定
+        表达，因此先把全局上下文（exist_seasons / L / L 之后的空白季集合 / 各季缺口）
+        算出来，再逐季调用 __is_season_pass_conditional。
 
         注意：这里直接调用 __check_and_add_subscribe，而不是复用
         __add_subscribe_by_tv_no_exist_info——后者对「整季缺失」的季有一条
@@ -1469,10 +1538,44 @@ class GetMissingEpisodes(_PluginBase):
             logger.warning(f"unique: {unique} 季集信息不完整, 跳过订阅")
             return False
 
-        exist_seasons = list(tv_no_exist_info.get("exist_seasons") or [])
+        exist_seasons = normalize_seasons(tv_no_exist_info.get("exist_seasons"))
+        ignored_seasons = normalize_seasons(tv_no_exist_info.get("ignored_seasons"))
+        # L = 媒体库已入库的最高季（媒体库一集都没有时为 0）
+        lib_max_season = max(exist_seasons) if exist_seasons else 0
+
+        # 逐季拆成两类：轨道A 同季补集（库里有集但缺几集）/ 轨道B 新季空白（一集都没有）
+        same_season_missing: List[int] = []
+        blank_seasons: List[int] = []
+        # 各季缺口（季 -> 本次缺失集数），用于轨道B 校验「上一季缺口 <= 3」
+        season_missing_count: Dict[int, int] = {}
+        for season_key in season_episode_no_exist_info.keys():
+            try:
+                season_int = int(season_key)
+            except (ValueError, TypeError):
+                continue
+            season_detail = season_episode_no_exist_info.get(season_key) or {}
+            exist_episode_count = season_detail.get("exist_episode_count") or 0
+            # 整季空白登记时 episode_no_exist 为空, 缺口按 0 记
+            season_missing_count[season_int] = len(season_detail.get("episode_no_exist") or [])
+            if exist_episode_count > 0:
+                same_season_missing.append(season_int)
+            else:
+                blank_seasons.append(season_int)
+        same_season_missing.sort()
+        blank_seasons.sort()
+        # 只统计 L 之后的空白季：前面缺的季既不参与「空白季数量」判定，也不自动订阅
+        blank_seasons_after_lib = [s for s in blank_seasons if s > lib_max_season]
+
         logger.info(
             f"【{title}】条件订阅校验开始, 待判定 {len(season_episode_no_exist_info)} 个季, "
-            f"媒体库已有集的季: {exist_seasons or '无'}"
+            f"媒体库已有集的季: {exist_seasons or '无'}(已入库最高季 L=S{lib_max_season}), "
+            f"忽略名单(手动标记存在)的季: {ignored_seasons or '无'}"
+        )
+        logger.info(
+            f"【{title}】条件订阅分类结果: 轨道A 同季补集(库里有集) {same_season_missing or '无'}, "
+            f"轨道B 整季空白 {blank_seasons or '无'}, "
+            f"其中 L(S{lib_max_season}) 之后的空白季 {blank_seasons_after_lib or '无'}"
+            f"(共 {len(blank_seasons_after_lib)} 个); 各季缺口 {season_missing_count or '无'}"
         )
 
         passed_seasons: List[int] = []
@@ -1487,6 +1590,11 @@ class GetMissingEpisodes(_PluginBase):
                 season=season_int,
                 season_info=season_episode_no_exist_info.get(season_key),
                 exist_seasons=exist_seasons,
+                ignored_seasons=ignored_seasons,
+                blank_seasons_after_lib=blank_seasons_after_lib,
+                lib_max_season=lib_max_season,
+                # 轨道B 用：紧邻上一季的缺口（不在缺失清单里即视为完整在库, 缺口 0）
+                prev_season_missing_count=season_missing_count.get(season_int - 1, 0),
             )
             if is_pass:
                 logger.info(f"【{title}】第 {season_int} 季条件订阅校验通过: {reason}, 将添加订阅")

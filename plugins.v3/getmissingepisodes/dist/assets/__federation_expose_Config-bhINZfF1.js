@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, S as SettingsPanel, u as unwrapResponse } from './SettingsPanel-CLHrf8ux.js';
+import { _ as _export_sfc, S as SettingsPanel, u as unwrapResponse } from './SettingsPanel-B1htllnv.js';
 
 const {createElementVNode:_createElementVNode,createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,createVNode:_createVNode,toDisplayString:_toDisplayString,withCtx:_withCtx,createElementBlock:_createElementBlock} = await importShared('vue');
 
