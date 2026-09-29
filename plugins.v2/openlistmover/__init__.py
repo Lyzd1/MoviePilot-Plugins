@@ -144,7 +144,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.6.6" 
+    plugin_version = "4.6.7"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -203,7 +203,7 @@ class OpenlistMover(_PluginBase):
     # Task tracking list
     # Format: [{"id": str, "file": str, "src_dir": str, "dst_dir": str, "start_time": datetime, "status": int,
     #           "error": str, "strm_status": str, "is_wash": bool, "progress": float, "api_status": str,
-    #           "last_activity": datetime}]
+    #           "last_activity": datetime, "counted": bool, "not_found_rounds": int}]
     _move_tasks: List[Dict[str, Any]] = []
     # 总时长兜底超时（秒），0 = 不限制（默认）。
     # 参考 taosync：任务成功/失败以 OpenList 返回状态为准，不再按固定墙钟时间误判（taosync 超时仅为作业级兜底，默认 72h）
@@ -216,7 +216,18 @@ class OpenlistMover(_PluginBase):
     _clear_api_threshold = 10    # 自动清空 Openlist API 任务记录的阈值 (已弃用，保留以兼容旧配置)
     _clear_panel_threshold = 30  # 自动清空成功任务面板记录的阈值 (默认 30 次成功)
     _keep_successful_tasks = 3   # 清空面板时保留的最新成功任务数量 (默认 3 个)
+
+    # === 清空面板/Openlist 任务记录的空闲门槛与防抖 ===
+    _clear_debounce_seconds = 60  # 两次清空之间的最小间隔（秒），防抖
+    _last_clear_time = 0.0        # 上次清空时间戳（秒），持久化到 plugin_state，兼容旧数据（缺失视为 0）
+    _inflight_followups = 0       # 在途后续流程（STRM 生成 / 额外文件复制）计数
+    _inflight_lock = Lock()       # 保护 _inflight_followups
     # ======================================
+
+    # === STRM 生成/复制的失败重试与任务记录不存在的确认策略 ===
+    _strm_retry_delays = (5, 15, 30)  # List/Copy API 失败后的退避重试间隔（秒），共重试 3 次
+    _not_found_confirm_rounds = 2     # 任务记录不存在时，连续确认轮数达到该值才判定失败
+    # ===========================================================
 
     # === 新增全局扫描配置 ===
     _global_scan_enabled = False
@@ -386,6 +397,11 @@ class OpenlistMover(_PluginBase):
         # 加载状态计数器
         state_data = self.get_data('plugin_state') or {}
         self._successful_moves_count = state_data.get('successful_moves_count', 0)
+        # 兼容旧数据：缺失 last_clear_time 时视为 0（从未清空过）
+        try:
+            self._last_clear_time = float(state_data.get('last_clear_time', 0) or 0)
+        except (ValueError, TypeError):
+            self._last_clear_time = 0.0
 
         logger.info(f"已加载 {len(self._move_tasks)} 个持久化任务，成功计数: {self._successful_moves_count}")
         # =====================
@@ -1280,7 +1296,8 @@ class OpenlistMover(_PluginBase):
         """
         try:
             state_data = {
-                'successful_moves_count': self._successful_moves_count
+                'successful_moves_count': self._successful_moves_count,
+                'last_clear_time': self._last_clear_time
             }
             self.save_data('plugin_state', state_data)
             logger.debug("已保存插件状态到持久化存储")
@@ -1332,6 +1349,79 @@ class OpenlistMover(_PluginBase):
                 text=text,
             )
 
+    # === 后续流程（STRM 生成 / 额外文件复制）的在途计数与收尾工具 ===
+
+    def _enter_followup(self):
+        """登记一个在途后续流程（进入 STRM / 额外复制流程时调用）"""
+        with self._inflight_lock:
+            self._inflight_followups += 1
+
+    def _exit_followup(self):
+        """注销一个在途后续流程（后续流程 finally 中调用）"""
+        with self._inflight_lock:
+            if self._inflight_followups > 0:
+                self._inflight_followups -= 1
+
+    def _inflight_followup_count(self) -> int:
+        """当前在途后续流程数（读快照，用于清空门槛判断与日志）"""
+        with self._inflight_lock:
+            return self._inflight_followups
+
+    def _is_task_tracked(self, task_id: str) -> bool:
+        """任务是否仍在任务列表中（清空裁剪后可能已不存在）"""
+        with task_lock:
+            return any(t.get('id') == task_id for t in self._move_tasks)
+
+    def _is_extra_extension_file(self, task: Dict[str, Any]) -> bool:
+        """是否为"额外后缀文件"（走额外复制流程，不计入成功计数）"""
+        file_ext = Path(task.get('file') or '').suffix.lower()
+        return bool(self._strm_copy_extensions_set) and file_ext in self._strm_copy_extensions_set
+
+    @staticmethod
+    def _is_strm_final(strm_status: Any) -> bool:
+        """后续流程是否已收尾（终态只认 成功 / 失败... / 跳过...）"""
+        status_text = str(strm_status or '')
+        return status_text == '成功' or status_text.startswith('失败') or status_text.startswith('跳过')
+
+    def _is_pending_followup(self, task: Dict[str, Any]) -> bool:
+        """任务移动是否已成功、但后续流程（STRM / 额外复制）尚未收尾（未收尾的任务不可裁剪）"""
+        return (
+            task.get('status') == TASK_STATUS_SUCCESS
+            and not self._is_strm_final(task.get('strm_status'))
+        )
+
+    def _retry_openlist_call(self, func: Any, args: Tuple, task_id: str, desc: str) -> bool:
+        """
+        带退避重试地调用 Openlist API（用于 STRM 的 List / Copy）
+
+        云盘侧目录或文件可能尚未可见（典型报错 object not found），因此按 5/15/30 秒退避重试 3 次；
+        每次重试前重新确认任务是否仍在任务列表中（可能已被清空裁剪），任务不存在则放弃重试。
+        """
+        delays = self._strm_retry_delays
+        for attempt in range(len(delays) + 1):
+            try:
+                if func(*args):
+                    if attempt > 0:
+                        logger.info(f"任务 {task_id} {desc} 第 {attempt} 次重试成功。")
+                    return True
+            except Exception as e:
+                logger.error(f"任务 {task_id} {desc} 调用时发生异常: {e}")
+
+            if attempt >= len(delays):
+                break
+
+            if not self._is_task_tracked(task_id):
+                logger.warning(f"任务 {task_id} 已不在任务列表中，放弃 {desc} 重试。")
+                return False
+
+            delay = delays[attempt]
+            logger.warning(f"任务 {task_id} {desc} 第 {attempt + 1} 次调用失败，{delay} 秒后重试...")
+            time.sleep(delay)
+
+        return False
+
+    # ==============================================================
+
     def _check_move_tasks(self):
         """
         定期检查 Openlist 移动任务的状态，并处理清空逻辑
@@ -1381,20 +1471,32 @@ class OpenlistMover(_PluginBase):
             not_found = task_info.get('not_found', False)
 
             # 3. 任务记录不存在时，通过目标文件是否已存在来确认结果
-            #    (taosync 直接视为失败；这里更稳妥：若目标文件已存在则视为成功)
+            #    (taosync 直接视为失败；这里更稳妥：单次 GET 结果不足以下结论，
+            #     判成功必须"目标文件确实存在"，判失败必须"连续 N 个检查周期都确认不存在"，
+            #     避免云盘侧尚未可见时误判成功(触发过早的 STRM 生成)或误杀在途任务)
             if not_found:
                 dst_check_path = f"{task['dst_dir'].rstrip('/')}/{task['file']}"
                 exists, _ = self._call_openlist_get_api(dst_check_path)
-                if exists:
+                if exists is True:
                     logger.info(f"任务 {task['id']} 记录不存在但目标文件已存在，判定为成功")
+                    with task_lock:
+                        task['not_found_rounds'] = 0
                     new_status = TASK_STATUS_SUCCESS
                     progress = 1.0
                 elif exists is None:
                     logger.warning(f"任务 {task['id']} 记录不存在，目标文件存在性检查结果不明确，继续观察")
                     new_status = TASK_STATUS_RUNNING
                 else:
-                    new_status = TASK_STATUS_FAILED
-                    error_msg = error_msg or "任务记录不存在，且目标文件不存在"
+                    with task_lock:
+                        task['not_found_rounds'] = int(task.get('not_found_rounds') or 0) + 1
+                        not_found_rounds = task['not_found_rounds']
+                    if not_found_rounds >= self._not_found_confirm_rounds:
+                        logger.error(f"任务 {task['id']} 连续 {not_found_rounds} 个检查周期任务记录不存在且目标文件不存在，判定为失败")
+                        new_status = TASK_STATUS_FAILED
+                        error_msg = error_msg or f"任务记录不存在，且目标文件不存在（已连续 {not_found_rounds} 个检查周期确认）"
+                    else:
+                        logger.warning(f"任务 {task['id']} 记录不存在且目标文件未找到，第 {not_found_rounds}/{self._not_found_confirm_rounds} 个检查周期确认中，继续观察")
+                        new_status = TASK_STATUS_RUNNING
 
             # 4. 在锁内更新状态
             with task_lock:
@@ -1402,19 +1504,19 @@ class OpenlistMover(_PluginBase):
                     task['status'] = TASK_STATUS_SUCCESS
                     task['progress'] = 1.0
                     task['api_status'] = ''
+                    task['not_found_rounds'] = 0
                     task['strm_status'] = '开始处理' # 标记开始后续流程
                     self._save_move_tasks()  # 保存任务状态变更
 
-                    # 增加成功计数
-                    self._successful_moves_count += 1
-                    self._save_plugin_state()  # 保存状态计数器
+                    # 注意：此处的成功计数已移除。
+                    # 计数口径改为"整条流程(含 STRM 生成/额外复制)收尾成功后才计数"，
+                    # 且额外后缀文件不计入，见 _update_task_strm_status()。
 
                     # 移动成功后目标目录内容已变化，将新文件增量加入洗版目录列表缓存（而非整体失效）
                     self._add_to_dir_cache(task['dst_dir'], task['file'])
 
                     # 判断文件后缀，选择处理方式
-                    file_ext = Path(task['file']).suffix.lower()
-                    if self._strm_copy_extensions_set and file_ext in self._strm_copy_extensions_set:
+                    if self._is_extra_extension_file(task):
                         # 额外后缀文件：移动后复制到 strm 本地目标
                         threading.Thread(
                             target=self._handle_extra_file_copy,
@@ -1426,7 +1528,7 @@ class OpenlistMover(_PluginBase):
                             target=self._process_strm_creation,
                             args=(task,)
                         ).start()
-                    
+
                 elif new_status == TASK_STATUS_FAILED and task['status'] != TASK_STATUS_FAILED:
                     task['status'] = TASK_STATUS_FAILED
                     task['error'] = error_msg if error_msg else "Openlist 报告失败"
@@ -1467,41 +1569,95 @@ class OpenlistMover(_PluginBase):
 
 
             # 2. 检查 插件面板 清空阈值 (达到设定值触发)
+            #    必须同时满足"完全空闲"门槛：没有进行中任务、没有在途/未收尾的后续流程、距上次清空已过防抖时间。
+            #    否则裁剪会吃掉后续流程正在更新状态的任务，清空 Openlist 任务记录会让仍在轮询的任务拿不到进度。
             if self._successful_moves_count >= self._clear_panel_threshold and self._clear_panel_threshold > 0:
-                logger.debug(f"成功移动任务达到 {self._successful_moves_count} 次，满足插件面板清空阈值 ({self._clear_panel_threshold})，准备清空插件面板成功记录，保留最新 {self._keep_successful_tasks} 条。")
+                active_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
+                pending_tasks = [t for t in self._move_tasks if self._is_pending_followup(t)]
+                inflight_followups = self._inflight_followup_count()
+                clear_elapsed = time.time() - (self._last_clear_time or 0)
 
-                tasks_to_keep = []
-                # 提取活跃任务和失败任务
-                tasks_to_keep.extend([t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]])
-                tasks_to_keep.extend([t for t in self._move_tasks if t['status'] == TASK_STATUS_FAILED])
+                if active_tasks:
+                    logger.info(
+                        f"成功计数 {self._successful_moves_count} 已达清空阈值 ({self._clear_panel_threshold})，"
+                        f"但仍有 {len(active_tasks)} 个进行中任务，推迟清空面板与 Openlist 任务记录。"
+                    )
+                elif inflight_followups > 0:
+                    logger.info(
+                        f"成功计数 {self._successful_moves_count} 已达清空阈值 ({self._clear_panel_threshold})，"
+                        f"但仍有 {inflight_followups} 个在途后续流程(STRM/额外复制)，推迟清空面板与 Openlist 任务记录。"
+                    )
+                elif pending_tasks:
+                    logger.info(
+                        f"成功计数 {self._successful_moves_count} 已达清空阈值 ({self._clear_panel_threshold})，"
+                        f"但仍有 {len(pending_tasks)} 个任务未收尾(STRM/额外复制未结束)，推迟清空面板与 Openlist 任务记录。"
+                    )
+                elif clear_elapsed < self._clear_debounce_seconds:
+                    logger.info(
+                        f"成功计数 {self._successful_moves_count} 已达清空阈值 ({self._clear_panel_threshold})，"
+                        f"但距上次清空仅 {int(clear_elapsed)} 秒(<{self._clear_debounce_seconds} 秒防抖)，推迟清空面板与 Openlist 任务记录。"
+                    )
+                else:
+                    logger.debug(f"成功移动任务达到 {self._successful_moves_count} 次，满足插件面板清空阈值 ({self._clear_panel_threshold})，准备清空插件面板成功记录，保留最新 {self._keep_successful_tasks} 条。")
 
-                # 提取所有成功任务并排序
-                successful_tasks = sorted(
-                    [t for t in self._move_tasks if t['status'] == TASK_STATUS_SUCCESS],
-                    key=lambda x: x['start_time'], reverse=True
-                )
+                    tasks_to_keep = []
+                    # 提取活跃任务和失败任务
+                    tasks_to_keep.extend([t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]])
+                    tasks_to_keep.extend([t for t in self._move_tasks if t['status'] == TASK_STATUS_FAILED])
+                    # 后续流程未收尾(或收尾失败)的任务：无论移动是否成功都必须保留，
+                    # 否则 _update_task_strm_status 找不到任务会静默丢弃状态更新
+                    tasks_to_keep.extend([
+                        t for t in self._move_tasks
+                        if not self._is_strm_final(t.get('strm_status')) or str(t.get('strm_status') or '').startswith('失败')
+                    ])
 
-                # 保留最新的成功任务
-                tasks_to_keep.extend(successful_tasks[:self._keep_successful_tasks])
+                    # 提取已收尾的成功任务并排序（仅这些才参与"保留最新 N 条"的裁剪）
+                    successful_tasks = sorted(
+                        [
+                            t for t in self._move_tasks
+                            if t['status'] == TASK_STATUS_SUCCESS
+                            and self._is_strm_final(t.get('strm_status'))
+                            and not str(t.get('strm_status') or '').startswith('失败')
+                        ],
+                        key=lambda x: x['start_time'], reverse=True
+                    )
 
-                self._move_tasks = tasks_to_keep
-                self._save_move_tasks()  # 保存清理后的任务列表
+                    # 保留最新的成功任务
+                    tasks_to_keep.extend(successful_tasks[:self._keep_successful_tasks])
 
-                logger.info(f"插件面板成功记录清空完毕，保留 {self._keep_successful_tasks} 条最新成功记录。")
-                clear_panel_triggered = True
+                    # 去重（同一任务可能命中多个保留条件），保持原有顺序
+                    seen_ids = set()
+                    deduped_tasks = []
+                    for t in tasks_to_keep:
+                        if id(t) not in seen_ids:
+                            seen_ids.add(id(t))
+                            deduped_tasks.append(t)
+
+                    removed_count = len(self._move_tasks) - len(deduped_tasks)
+                    self._move_tasks = deduped_tasks
+                    self._save_move_tasks()  # 保存清理后的任务列表
+
+                    logger.info(
+                        f"插件面板成功记录清空完毕，保留 {self._keep_successful_tasks} 条最新成功记录"
+                        f"（触发计数 {self._successful_moves_count}，活跃任务 {len(active_tasks)}，"
+                        f"未收尾任务 {len(pending_tasks)}，在途后续流程 {inflight_followups}，裁剪 {removed_count} 条）。"
+                    )
+                    clear_panel_triggered = True
 
             # 3. 仅在插件面板清空被触发时，重置计数器并清空Openlist API任务记录
+            #    （与面板清空同处判断：全部空闲门槛满足才清 Openlist 任务记录）
             if clear_panel_triggered:
-                 self._successful_moves_count = 0
-                 self._save_plugin_state()  # 保存重置后的计数器
-                 logger.info("成功计数器已重置。")
+                self._successful_moves_count = 0
+                self._last_clear_time = time.time()  # 记录清空时间用于防抖
+                self._save_plugin_state()  # 保存重置后的计数器与清空时间
+                logger.info(f"成功计数器已重置，清空时间已记录（{self._clear_debounce_seconds} 秒内不再清空）。")
 
-                 # 同时清空Openlist API任务记录
-                 try:
+                # 此时已确认无进行中任务、无在途后续流程，清空 Openlist API 任务记录不会影响任何任务取进度
+                try:
                     self._call_openlist_clear_tasks_api("copy")
                     self._call_openlist_clear_tasks_api("move")
                     logger.info("Openlist API 任务记录清空完毕。")
-                 except Exception as e:
+                except Exception as e:
                     logger.error(f"执行 Openlist API 任务清空时发生错误: {e}")
 
             # --- 已移除挂起的 API 清空逻辑 ---
@@ -1519,7 +1675,10 @@ class OpenlistMover(_PluginBase):
     def _update_task_strm_status(self, task_id: str, new_status: str, is_final: bool = False):
         """
         安全地更新任务列表中的 STRM 状态和发送通知。
+
+        收尾成功(is_final=True 且状态为"成功")时统一计入成功计数（额外后缀文件不计入，每个任务只计一次）。
         """
+        counted = False
         with task_lock:
             found_task = None
             for task in self._move_tasks:
@@ -1527,8 +1686,27 @@ class OpenlistMover(_PluginBase):
                     task['strm_status'] = new_status
                     found_task = task
                     break
+
+            # 整条流程(含 STRM 生成/额外复制)收尾成功后才计入成功计数：
+            # - 额外后缀文件不计入（只更新面板状态）
+            # - 每个任务只计一次（counted 标记），避免重复收尾重复计数
+            if is_final and found_task and new_status == '成功' and not found_task.get('counted'):
+                if self._is_extra_extension_file(found_task):
+                    logger.debug(f"任务 {task_id} 为额外后缀文件，完成收尾但不计入成功计数。")
+                else:
+                    found_task['counted'] = True
+                    self._successful_moves_count += 1
+                    counted = True
+                    self._save_plugin_state()  # 保存状态计数器
+
             self._save_move_tasks()  # 保存 STRM 状态变更
-        
+
+        if found_task is None:
+            # 任务已被清空裁剪时不再静默丢弃，便于定位"清空吃掉了未收尾任务"的问题
+            logger.warning(f"任务 {task_id} 已不在任务列表中，状态 '{new_status}' 更新被丢弃（可能已被清空裁剪）。")
+        elif counted:
+            logger.info(f"任务 {task_id} 收尾成功，成功计数 +1（当前 {self._successful_moves_count}）。")
+
         # 仅在 STRM 流程最终完成后发送通知
         if is_final and found_task:
             is_wash_text = "(洗版)" if found_task.get("is_wash", False) else ""
@@ -1548,6 +1726,17 @@ class OpenlistMover(_PluginBase):
         """
         处理 STRM 文件生成和复制 (包含洗版逻辑)
         注意：此方法在独立线程中运行，不需要获取 task_lock，但需要通过 _update_task_strm_status 来更新状态。
+        进入时登记在途后续流程计数，退出(含异常)时注销，确保清空逻辑能感知未收尾的流程。
+        """
+        self._enter_followup()
+        try:
+            self._do_process_strm_creation(task)
+        finally:
+            self._exit_followup()
+
+    def _do_process_strm_creation(self, task: Dict[str, Any]):
+        """
+        STRM 生成/复制的实际流程（在 _process_strm_creation 的在途后续流程计数保护下执行）
         """
         task_id = task['id']
         self._update_task_strm_status(task_id, '开始执行 STRM 流程')
@@ -1627,10 +1816,13 @@ class OpenlistMover(_PluginBase):
             self._update_task_strm_status(task_id, '调用 List API 生成 STRM')
 
             # 2. 调用 /api/fs/list 强制生成 .strm
-            list_success = self._call_openlist_list_api(list_path)
+            #    云盘侧目录可能尚未可见(object not found)，按 5/15/30 秒退避重试 3 次
+            list_success = self._retry_openlist_call(
+                self._call_openlist_list_api, (list_path,), task_id, f"STRM List API ({list_path})"
+            )
             if not list_success:
                 self._update_task_strm_status(task_id, '失败 (List API 失败)', is_final=True)
-                logger.error(f"任务 {task_id} STRM List API 失败，无法生成 .strm 文件。")
+                logger.error(f"任务 {task_id} STRM List API 重试后仍失败，无法生成 .strm 文件。")
                 return
 
             self._update_task_strm_status(task_id, '等待 STRM 文件生成')
@@ -1640,19 +1832,20 @@ class OpenlistMover(_PluginBase):
             
             self._update_task_strm_status(task_id, '调用 Copy API 复制 STRM')
 
-            # 4. 调用 /api/fs/copy 复制 .strm 文件
-            copy_success = self._call_openlist_copy_api(
-                src_dir=copy_src_dir,
-                dst_dir=copy_dst_dir,
-                names=[strm_file_name] # 仅复制 strm 文件
+            # 4. 调用 /api/fs/copy 复制 .strm 文件（同样按 5/15/30 秒退避重试 3 次）
+            copy_success = self._retry_openlist_call(
+                self._call_openlist_copy_api,
+                (copy_src_dir, copy_dst_dir, [strm_file_name]),
+                task_id,
+                f"STRM Copy API ({copy_dst_dir}/{strm_file_name})"
             )
-            
+
             if copy_success:
                 self._update_task_strm_status(task_id, '成功', is_final=True)
                 logger.debug(f"任务 {task_id} STRM 文件复制成功：{strm_file_name} -> {copy_dst_dir}")
             else:
                 self._update_task_strm_status(task_id, '失败 (Copy API 失败)', is_final=True)
-                logger.error(f"任务 {task_id} STRM 文件复制失败。")
+                logger.error(f"任务 {task_id} STRM 文件复制重试后仍失败。")
                 
         except Exception as e:
             self._update_task_strm_status(task_id, f'失败 (异常: {str(e)})', is_final=True)
@@ -1901,6 +2094,8 @@ class OpenlistMover(_PluginBase):
                     "progress": 0.0,            # 上传/移动进度 (0~1)，由任务监控轮询更新
                     "api_status": "",           # OpenList 返回的状态文本 (如 "getting src object")
                     "last_activity": datetime.now(),  # 最近一次进度/状态变化时间，用于卡死检测
+                    "counted": False,           # 是否已计入成功计数（整条流程收尾成功时置 True）
+                    "not_found_rounds": 0,      # 任务记录不存在时，连续确认的检查周期数
                 }
                 with task_lock:
                     self._move_tasks.append(new_task)
@@ -1938,6 +2133,17 @@ class OpenlistMover(_PluginBase):
     def _handle_extra_file_copy(self, task: Dict[str, Any]):
         """
         处理额外后缀文件：移动成功后复制到 strm 本地目标
+        进入时登记在途后续流程计数，退出(含异常)时注销，确保清空逻辑能感知未收尾的流程。
+        """
+        self._enter_followup()
+        try:
+            self._do_handle_extra_file_copy(task)
+        finally:
+            self._exit_followup()
+
+    def _do_handle_extra_file_copy(self, task: Dict[str, Any]):
+        """
+        额外后缀文件复制到 strm 本地目标的实际流程（在 _handle_extra_file_copy 的在途计数保护下执行）
         """
         task_id = task['id']
         self._update_task_strm_status(task_id, '开始复制到 STRM 本地目录')
