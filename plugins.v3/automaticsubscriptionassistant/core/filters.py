@@ -4,10 +4,11 @@
 每个过滤器阈值为 0 / None 时视为未启用，直接放行。
 
 同一个 ``filter_id`` 可以有 pre / post 两套实现，按来源择一：见
-``PROVIDER_FILTER_OVERRIDES``。典型是 ``vote``——豆瓣榜单 RSS 自带评分，识别前即可用
-``SourceVoteFilter`` 判定并省掉不达标条目的识别请求；其它来源没有榜单评分，只有识别后
-由宿主提供的 TMDB 评分，仍走 post 的 ``VoteFilter``。配置项的 key 不变，故用户已保存的
-阈值在两种口径间无缝沿用。
+``PROVIDER_FILTER_OVERRIDES``。典型是 ``vote``——豆瓣榜单 RSS 自带豆瓣评分，识别后由
+``SourceVoteFilter`` 按这份榜单评分判定；其它来源没有榜单评分，只有识别后由宿主提供的
+TMDB 评分，走 post 的 ``VoteFilter``。两者判定时机相同（都在识别后），差别只在评分来源：
+前者读榜单自带的豆瓣评分，后者读宿主识别出的 TMDB 评分。配置项的 key 不变，故用户已保存
+的阈值在两种口径间无缝沿用。
 """
 from __future__ import annotations
 
@@ -71,19 +72,26 @@ class VoteFilter(MediaFilter):
 
 
 class SourceVoteFilter(MediaFilter):
-    """评分过滤（pre）：用榜单自带的评分 ``item.source_vote`` >= 阈值。
+    """评分过滤（post）：用榜单自带的豆瓣评分 ``item.source_vote`` >= 阈值。
 
     与 ``VoteFilter`` 复用同一个 ``filter_id``（配置 key 不变），仅在豆瓣来源上覆写
-    （见 ``PROVIDER_FILTER_OVERRIDES``）：豆瓣榜单 RSS 的每个条目都自带豆瓣评分，识别前就能
-    判定，不达标的条目连识别请求都不用发；代价是豆瓣来源**不再有识别后的 TMDB 评分判定**
-    （两套口径不混用，避免同一条目被两种分数重复裁决）。
+    （见 ``PROVIDER_FILTER_OVERRIDES``）。**判定时机与 ``VoteFilter`` 相同（都在识别后）**，
+    区别只在评分来源：本实现读榜单自带的豆瓣评分，``VoteFilter`` 读识别后的 TMDB 评分。
+
+    本来源选择「先识别、再用榜单豆瓣评分判」：被过滤的条目也已经过识别，历史里因此带上封面
+    与媒体身份（``media_source/media_id``）；代价是每条都要发识别请求（不再靠提前拦截省掉
+    不达标条目的识别）。识别失败的条目落「未识别」，不进入本判定（与 ``VoteFilter`` 一致）。
+
+    判定位于 post（executor 第 5 步），仍**早于**「媒体库查重」「订阅查重」：故「已在媒体库
+    且豆瓣分不达标」的条目会记为「已过滤」而不是「媒体库已存在」（与原始代码的步骤顺序一致）。
+    ``mediainfo`` 在这里只表示识别已完成，**不参与判定**——豆瓣口径单一，不拿 TMDB 评分兜底。
 
     无评分的条目（暂无评分 / 值为 0.0）视为不达标——被拦下的条目只记历史、不标记已处理，
     下一轮榜单若给出评分可再被处理。
     """
 
     filter_id = "vote"
-    stage = "pre"
+    stage = "post"
 
     # 无可用评分时的统一原因（暂无评分与 0.0 同义）。
     NO_VOTE_REASON = "榜单未给评分（暂无/0.0）"
@@ -92,7 +100,7 @@ class SourceVoteFilter(MediaFilter):
         threshold = _to_float((config or {}).get("vote"))
         if threshold <= 0:
             return FilterVerdict.accept()
-        # pre 阶段 mediainfo 恒为 None，只看条目自带评分。
+        # post 阶段 mediainfo 必非 None，但本口径只看榜单自带评分，忽略识别结果。
         vote = item.source_vote if item is not None else None
         if vote is None:
             return FilterVerdict.reject(self.filter_id, self.NO_VOTE_REASON)
@@ -188,7 +196,7 @@ BUILTIN_FILTERS: Dict[str, Type[MediaFilter]] = {
 # 来源级过滤器覆写：provider_id -> {filter_id -> 过滤器类}（优先于 BUILTIN_FILTERS）。
 # 只覆写「该来源有更好的判定口径」的那一项，其余过滤器仍走通用实现。
 PROVIDER_FILTER_OVERRIDES: Dict[str, Dict[str, Type[MediaFilter]]] = {
-    # 豆瓣榜单 RSS 自带豆瓣评分 -> 识别前用它拦截，且不再做识别后的 TMDB 评分判定。
+    # 豆瓣榜单 RSS 自带豆瓣评分 -> 识别后按这份榜单评分判定（不用识别后的 TMDB 评分）。
     "douban": {SourceVoteFilter.filter_id: SourceVoteFilter},
 }
 

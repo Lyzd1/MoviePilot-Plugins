@@ -278,7 +278,7 @@ class NetflixRankProvider(RankProvider):
         媒体类型已由全球/国家的 category 选择区分、Netflix 无年份数据（``year=None``），故
         不提供年份/类型过滤；只提供「评分≥」，走通用 ``VoteFilter``（post，识别后的 TMDB
         评分口径——Netflix 数据集本身不含评分）。本来源**没有** ``PROVIDER_FILTER_OVERRIDES``，
-        不会用上豆瓣那套识别前的榜单评分口径。
+        不会用上豆瓣那套「按榜单自带豆瓣评分判定」的口径（二者同为识别后判定，区别只在评分来源）。
         """
         return ProviderSpec(
             provider_id=self.provider_id,

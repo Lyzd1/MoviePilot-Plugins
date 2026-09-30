@@ -201,7 +201,7 @@ class RankMediaItem:
     media_source: Any = None
     media_id: Optional[str] = None
     episode_group: Optional[str] = None
-    # 来源自带评分（如豆瓣榜单 RSS 的「评分：7.3分」）。有值时可在识别前用 SourceVoteFilter
+    # 来源自带评分（如豆瓣榜单 RSS 的「评分：7.3分」）。有值时由 SourceVoteFilter 在识别后
     # 按榜单口径过滤；无值（未提供/暂无评分）为 None。
     source_vote: Optional[float] = None
 

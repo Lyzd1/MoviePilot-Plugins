@@ -56,7 +56,7 @@ class AutomaticSubscriptionAssistant(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Aqr-K/MoviePilot-Plugins/main/icons/Auto_Subscribe_Assistant.png"
     # 插件版本
-    plugin_version = "3.1.1"
+    plugin_version = "3.1.2"
     # 插件作者
     plugin_author = "Aqr-K"
     # 作者主页
@@ -750,8 +750,8 @@ class AutomaticSubscriptionAssistant(_PluginBase):
             # 先删旧记录：识别成功后身份键可能由标题回退键升级为强标识键，避免残留孤儿记录。
             store.delete(unique)
             # 这里**故意不传** provider_id：重新识别是从历史记录重建的条目，历史不存榜单评分，
-            # 豆瓣那套「识别前用榜单评分」的覆写会因 source_vote 缺失而一律拦下。故走通用实现，
-            # 由识别后的 TMDB 评分判定（识别前无评分可用时的保守回退）。
+            # 豆瓣那套「用榜单豆瓣评分判定」的覆写会因 source_vote 缺失而一律拦下（阈值 >0 时）。
+            # 故走通用实现，由识别后的 TMDB 评分判定（榜单评分无从重建时的保守回退）。
             filter_chain = build_filter_chain([f.key for f in spec.filters_schema])
             executor = SubscribeExecutor(context, self._settings.global_config,
                                          self.__build_subscribed_index())

@@ -228,8 +228,8 @@ _HINTS: Dict[Any, Dict[str, str]] = {
         "en-US": "Only the top N entries of each list (set small for TOP250; 0 = no limit)",
     },
     ("douban", "vote"): {
-        "zh-TW": "按榜單自帶的豆瓣評分在識別前過濾；暫無評分/0.0 視為不達標",
-        "en-US": "Filtered before recognition using the list's own Douban rating; "
+        "zh-TW": "按榜單自帶的豆瓣評分過濾（識別後判定）；暫無評分/0.0 視為不達標",
+        "en-US": "Filters after recognition using the list's own Douban rating; "
                  "no rating / 0.0 counts as not passing",
     },
     ("maoyan", "web_platform_map"): {

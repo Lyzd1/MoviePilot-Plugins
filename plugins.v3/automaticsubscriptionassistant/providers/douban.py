@@ -7,9 +7,10 @@
 
 **评分口径**：豆瓣榜单 RSS 的 ``description`` 自带豆瓣评分（热度/口碑类为
 ``评分：7.3分``，TOP250 类为裸数字 ``<p>9.7</p>``），解析后写入 ``item.source_vote``；
-``评分：0.0分`` 与解析不到一律视为无评分（None）。因此豆瓣的「评分≥」由
-``SourceVoteFilter`` 在**识别前**按这份榜单评分判定（不达标者不进入识别流程），
-**不再**做识别后的 TMDB 评分判定（``item.year`` / ``media_type`` 过滤不受影响）。
+``评分：0.0分`` 与解析不到一律视为无评分（None）。豆瓣的「评分≥」由
+``SourceVoteFilter`` 在**识别后**按这份榜单评分判定（不达标者不进入订阅流程），
+**不使用**识别后的 TMDB 评分（``item.year`` / ``media_type`` 过滤不受影响）。
+先识别再判定意味着每条都要发识别请求，换来的是被过滤条目同样带封面与媒体身份。
 季号等信息仍由 executor 通过宿主媒体身份识别后提供。
 """
 from __future__ import annotations
@@ -154,7 +155,7 @@ class DoubanRankProvider(RankProvider):
                     label="评分≥",
                     kind="float",
                     default=0,
-                    hint="按榜单自带的豆瓣评分在识别前过滤；暂无评分/0.0 视为不达标",
+                    hint="按榜单自带的豆瓣评分过滤（识别后判定）；暂无评分/0.0 视为不达标",
                 ),
                 FieldSpec(key="year", label="年份≥", kind="number", default=0),
                 FieldSpec(
