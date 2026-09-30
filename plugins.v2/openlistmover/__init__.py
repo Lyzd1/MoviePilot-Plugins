@@ -144,7 +144,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.6.7"
+    plugin_version = "4.6.8"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -1367,6 +1367,24 @@ class OpenlistMover(_PluginBase):
         with self._inflight_lock:
             return self._inflight_followups
 
+    def _exit_followup_and_maybe_clear(self):
+        """
+        注销一个在途后续流程；若这是最后一个在途流程，补一次清空评估。
+
+        为什么需要它：清空评估原本只寄生在任务监控定时器的轮询里，而 _check_move_tasks() 在
+        没有活跃移动任务时会 _stop_task_monitor() 让轮询休眠。于是"最后一个移动任务跑完、STRM
+        还在后台生成"时轮询就睡了，等 STRM 收尾把成功计数推过阈值，已经没有任何一轮检查会去
+        判断"该不该清空"，计数长期挂着不归零。此处补上退出时机的评估。
+
+        ⚠️ 死锁红线：_exit_followup() 内部持有 _inflight_lock，而 _try_clear_panel_records() 会取
+        task_lock（_check_move_tasks 的加锁顺序是 task_lock → _inflight_lock）。因此必须在
+        _exit_followup() 返回之后（不再持有 _inflight_lock）才调用清空逻辑，顺序不可颠倒，
+        也不要把触发逻辑塞进 _exit_followup() 内部。
+        """
+        self._exit_followup()
+        if self._inflight_followup_count() == 0:
+            self._try_clear_panel_records('后续流程全部收尾')
+
     def _is_task_tracked(self, task_id: str) -> bool:
         """任务是否仍在任务列表中（清空裁剪后可能已不存在）"""
         with task_lock:
@@ -1560,118 +1578,147 @@ class OpenlistMover(_PluginBase):
                     self._save_move_tasks()  # 保存任务状态变更
         
         
-        # 任务清空逻辑 (在锁内执行)
+        # 任务清空逻辑 (判断与执行都在 _try_clear_panel_records 内部，由其自行持有 task_lock)
+        self._try_clear_panel_records('定时轮询')
+
         with task_lock:
+            # 获取当前活跃任务用于其他用途
+            active_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
+
+            logger.debug(f"Openlist Mover 任务检查完成，当前活跃任务数: {len(active_tasks)}")
+
+            # === 自动休眠：如果没有活跃任务，则停止监控 ===
+            if not active_tasks:
+                self._stop_task_monitor()
+
+    def _try_clear_panel_records(self, trigger: str) -> bool:
+        """
+        达到清空阈值且满足全部空闲门槛时，裁剪任务面板、重置成功计数并清空 Openlist 任务记录。
+
+        - 计数未达阈值(或未启用阈值)时**静默**返回 False，不打印任何日志（避免每轮轮询噪声）；
+        - 达标但门槛不满足时，按具体原因打印一条 INFO "推迟清空" 日志；
+        - 判断与执行(裁剪 → 重置计数 → 写 _last_clear_time → 清 Openlist copy/move 记录)
+          在同一 task_lock 临界区内完成，保持原子性。
+
+        本方法被两处调用：定时轮询(_check_move_tasks)与最后一个在途后续流程收尾
+        (_exit_followup_and_maybe_clear)——后者用于补上"轮询已休眠、计数却刚越过阈值"的时机缺口。
+        并发进入时：持锁串行化 + 进锁后复核计数，保证只会真正清空一次。
+
+        :param trigger: 触发来源，追加到日志末尾便于定位
+        :return: 是否真正执行了清空
+        """
+        # 快速路径：未达阈值时不取锁、不打任何日志
+        if self._clear_panel_threshold <= 0 or self._successful_moves_count < self._clear_panel_threshold:
+            return False
+
+        with task_lock:
+            # 进锁后复核：可能已被并发的另一次评估(轮询/收尾)清空归零
+            if self._clear_panel_threshold <= 0 or self._successful_moves_count < self._clear_panel_threshold:
+                return False
+
             clear_panel_triggered = False
 
-            # 1. 检查 API 任务清空阈值 (倍数触发) - 已移除此功能，改为在面板清空时同时清空API任务记录
-            # (此部分已被移除)
-
-
-            # 2. 检查 插件面板 清空阈值 (达到设定值触发)
+            # 检查 插件面板 清空阈值 (达到设定值触发)
             #    必须同时满足"完全空闲"门槛：没有进行中任务、没有在途/未收尾的后续流程、距上次清空已过防抖时间。
             #    否则裁剪会吃掉后续流程正在更新状态的任务，清空 Openlist 任务记录会让仍在轮询的任务拿不到进度。
-            if self._successful_moves_count >= self._clear_panel_threshold and self._clear_panel_threshold > 0:
-                active_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
-                pending_tasks = [t for t in self._move_tasks if self._is_pending_followup(t)]
-                inflight_followups = self._inflight_followup_count()
-                clear_elapsed = time.time() - (self._last_clear_time or 0)
+            active_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
+            pending_tasks = [t for t in self._move_tasks if self._is_pending_followup(t)]
+            inflight_followups = self._inflight_followup_count()
+            clear_elapsed = time.time() - (self._last_clear_time or 0)
 
-                if active_tasks:
-                    logger.info(
-                        f"成功计数 {self._successful_moves_count} 已达清空阈值 ({self._clear_panel_threshold})，"
-                        f"但仍有 {len(active_tasks)} 个进行中任务，推迟清空面板与 Openlist 任务记录。"
-                    )
-                elif inflight_followups > 0:
-                    logger.info(
-                        f"成功计数 {self._successful_moves_count} 已达清空阈值 ({self._clear_panel_threshold})，"
-                        f"但仍有 {inflight_followups} 个在途后续流程(STRM/额外复制)，推迟清空面板与 Openlist 任务记录。"
-                    )
-                elif pending_tasks:
-                    logger.info(
-                        f"成功计数 {self._successful_moves_count} 已达清空阈值 ({self._clear_panel_threshold})，"
-                        f"但仍有 {len(pending_tasks)} 个任务未收尾(STRM/额外复制未结束)，推迟清空面板与 Openlist 任务记录。"
-                    )
-                elif clear_elapsed < self._clear_debounce_seconds:
-                    logger.info(
-                        f"成功计数 {self._successful_moves_count} 已达清空阈值 ({self._clear_panel_threshold})，"
-                        f"但距上次清空仅 {int(clear_elapsed)} 秒(<{self._clear_debounce_seconds} 秒防抖)，推迟清空面板与 Openlist 任务记录。"
-                    )
-                else:
-                    logger.debug(f"成功移动任务达到 {self._successful_moves_count} 次，满足插件面板清空阈值 ({self._clear_panel_threshold})，准备清空插件面板成功记录，保留最新 {self._keep_successful_tasks} 条。")
+            if active_tasks:
+                logger.info(
+                    f"成功计数 {self._successful_moves_count} 已达清空阈值 ({self._clear_panel_threshold})，"
+                    f"但仍有 {len(active_tasks)} 个进行中任务，推迟清空面板与 Openlist 任务记录。"
+                    f"（触发来源：{trigger}）"
+                )
+            elif inflight_followups > 0:
+                logger.info(
+                    f"成功计数 {self._successful_moves_count} 已达清空阈值 ({self._clear_panel_threshold})，"
+                    f"但仍有 {inflight_followups} 个在途后续流程(STRM/额外复制)，推迟清空面板与 Openlist 任务记录。"
+                    f"（触发来源：{trigger}）"
+                )
+            elif pending_tasks:
+                logger.info(
+                    f"成功计数 {self._successful_moves_count} 已达清空阈值 ({self._clear_panel_threshold})，"
+                    f"但仍有 {len(pending_tasks)} 个任务未收尾(STRM/额外复制未结束)，推迟清空面板与 Openlist 任务记录。"
+                    f"（触发来源：{trigger}）"
+                )
+            elif clear_elapsed < self._clear_debounce_seconds:
+                logger.info(
+                    f"成功计数 {self._successful_moves_count} 已达清空阈值 ({self._clear_panel_threshold})，"
+                    f"但距上次清空仅 {int(clear_elapsed)} 秒(<{self._clear_debounce_seconds} 秒防抖)，推迟清空面板与 Openlist 任务记录。"
+                    f"（触发来源：{trigger}）"
+                )
+            else:
+                logger.debug(f"成功移动任务达到 {self._successful_moves_count} 次，满足插件面板清空阈值 ({self._clear_panel_threshold})，准备清空插件面板成功记录，保留最新 {self._keep_successful_tasks} 条。（触发来源：{trigger}）")
 
-                    tasks_to_keep = []
-                    # 提取活跃任务和失败任务
-                    tasks_to_keep.extend([t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]])
-                    tasks_to_keep.extend([t for t in self._move_tasks if t['status'] == TASK_STATUS_FAILED])
-                    # 后续流程未收尾(或收尾失败)的任务：无论移动是否成功都必须保留，
-                    # 否则 _update_task_strm_status 找不到任务会静默丢弃状态更新
-                    tasks_to_keep.extend([
+                tasks_to_keep = []
+                # 提取活跃任务和失败任务
+                tasks_to_keep.extend([t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]])
+                tasks_to_keep.extend([t for t in self._move_tasks if t['status'] == TASK_STATUS_FAILED])
+                # 后续流程未收尾(或收尾失败)的任务：无论移动是否成功都必须保留，
+                # 否则 _update_task_strm_status 找不到任务会静默丢弃状态更新
+                tasks_to_keep.extend([
+                    t for t in self._move_tasks
+                    if not self._is_strm_final(t.get('strm_status')) or str(t.get('strm_status') or '').startswith('失败')
+                ])
+
+                # 提取已收尾的成功任务并排序（仅这些才参与"保留最新 N 条"的裁剪）
+                successful_tasks = sorted(
+                    [
                         t for t in self._move_tasks
-                        if not self._is_strm_final(t.get('strm_status')) or str(t.get('strm_status') or '').startswith('失败')
-                    ])
+                        if t['status'] == TASK_STATUS_SUCCESS
+                        and self._is_strm_final(t.get('strm_status'))
+                        and not str(t.get('strm_status') or '').startswith('失败')
+                    ],
+                    key=lambda x: x['start_time'], reverse=True
+                )
 
-                    # 提取已收尾的成功任务并排序（仅这些才参与"保留最新 N 条"的裁剪）
-                    successful_tasks = sorted(
-                        [
-                            t for t in self._move_tasks
-                            if t['status'] == TASK_STATUS_SUCCESS
-                            and self._is_strm_final(t.get('strm_status'))
-                            and not str(t.get('strm_status') or '').startswith('失败')
-                        ],
-                        key=lambda x: x['start_time'], reverse=True
-                    )
+                # 保留最新的成功任务
+                tasks_to_keep.extend(successful_tasks[:self._keep_successful_tasks])
 
-                    # 保留最新的成功任务
-                    tasks_to_keep.extend(successful_tasks[:self._keep_successful_tasks])
+                # 去重（同一任务可能命中多个保留条件），保持原有顺序
+                seen_ids = set()
+                deduped_tasks = []
+                for t in tasks_to_keep:
+                    if id(t) not in seen_ids:
+                        seen_ids.add(id(t))
+                        deduped_tasks.append(t)
 
-                    # 去重（同一任务可能命中多个保留条件），保持原有顺序
-                    seen_ids = set()
-                    deduped_tasks = []
-                    for t in tasks_to_keep:
-                        if id(t) not in seen_ids:
-                            seen_ids.add(id(t))
-                            deduped_tasks.append(t)
+                removed_count = len(self._move_tasks) - len(deduped_tasks)
+                self._move_tasks = deduped_tasks
+                self._save_move_tasks()  # 保存清理后的任务列表
 
-                    removed_count = len(self._move_tasks) - len(deduped_tasks)
-                    self._move_tasks = deduped_tasks
-                    self._save_move_tasks()  # 保存清理后的任务列表
+                logger.info(
+                    f"插件面板成功记录清空完毕，保留 {self._keep_successful_tasks} 条最新成功记录"
+                    f"（触发计数 {self._successful_moves_count}，活跃任务 {len(active_tasks)}，"
+                    f"未收尾任务 {len(pending_tasks)}，在途后续流程 {inflight_followups}，裁剪 {removed_count} 条）。"
+                    f"（触发来源：{trigger}）"
+                )
+                clear_panel_triggered = True
 
-                    logger.info(
-                        f"插件面板成功记录清空完毕，保留 {self._keep_successful_tasks} 条最新成功记录"
-                        f"（触发计数 {self._successful_moves_count}，活跃任务 {len(active_tasks)}，"
-                        f"未收尾任务 {len(pending_tasks)}，在途后续流程 {inflight_followups}，裁剪 {removed_count} 条）。"
-                    )
-                    clear_panel_triggered = True
-
-            # 3. 仅在插件面板清空被触发时，重置计数器并清空Openlist API任务记录
+            # 仅在插件面板清空被触发时，重置计数器并清空Openlist API任务记录
             #    （与面板清空同处判断：全部空闲门槛满足才清 Openlist 任务记录）
             if clear_panel_triggered:
                 self._successful_moves_count = 0
                 self._last_clear_time = time.time()  # 记录清空时间用于防抖
                 self._save_plugin_state()  # 保存重置后的计数器与清空时间
-                logger.info(f"成功计数器已重置，清空时间已记录（{self._clear_debounce_seconds} 秒内不再清空）。")
+                logger.info(f"成功计数器已重置，清空时间已记录（{self._clear_debounce_seconds} 秒内不再清空）。（触发来源：{trigger}）")
 
                 # 此时已确认无进行中任务、无在途后续流程，清空 Openlist API 任务记录不会影响任何任务取进度
                 try:
                     self._call_openlist_clear_tasks_api("copy")
                     self._call_openlist_clear_tasks_api("move")
-                    logger.info("Openlist API 任务记录清空完毕。")
+                    logger.info(f"Openlist API 任务记录清空完毕。（触发来源：{trigger}）")
                 except Exception as e:
                     logger.error(f"执行 Openlist API 任务清空时发生错误: {e}")
 
             # --- 已移除挂起的 API 清空逻辑 ---
             # 原来的挂起机制已被移除，改为在面板清空时直接清空API任务记录
 
-            # 获取当前活跃任务用于其他用途
-            active_tasks = [t for t in self._move_tasks if t['status'] in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]]
-            
-            logger.debug(f"Openlist Mover 任务检查完成，当前活跃任务数: {len(active_tasks)}")
+            return clear_panel_triggered
 
-            # === 自动休眠：如果没有活跃任务，则停止监控 ===
-            if not active_tasks:
-                self._stop_task_monitor()
-            
     def _update_task_strm_status(self, task_id: str, new_status: str, is_final: bool = False):
         """
         安全地更新任务列表中的 STRM 状态和发送通知。
@@ -1726,13 +1773,14 @@ class OpenlistMover(_PluginBase):
         """
         处理 STRM 文件生成和复制 (包含洗版逻辑)
         注意：此方法在独立线程中运行，不需要获取 task_lock，但需要通过 _update_task_strm_status 来更新状态。
-        进入时登记在途后续流程计数，退出(含异常)时注销，确保清空逻辑能感知未收尾的流程。
+        进入时登记在途后续流程计数，退出(含异常)时注销，确保清空逻辑能感知未收尾的流程；
+        若本次退出的是最后一个在途流程，则补一次清空评估（见 _exit_followup_and_maybe_clear）。
         """
         self._enter_followup()
         try:
             self._do_process_strm_creation(task)
         finally:
-            self._exit_followup()
+            self._exit_followup_and_maybe_clear()
 
     def _do_process_strm_creation(self, task: Dict[str, Any]):
         """
@@ -2133,13 +2181,14 @@ class OpenlistMover(_PluginBase):
     def _handle_extra_file_copy(self, task: Dict[str, Any]):
         """
         处理额外后缀文件：移动成功后复制到 strm 本地目标
-        进入时登记在途后续流程计数，退出(含异常)时注销，确保清空逻辑能感知未收尾的流程。
+        进入时登记在途后续流程计数，退出(含异常)时注销，确保清空逻辑能感知未收尾的流程；
+        若本次退出的是最后一个在途流程，则补一次清空评估（见 _exit_followup_and_maybe_clear）。
         """
         self._enter_followup()
         try:
             self._do_handle_extra_file_copy(task)
         finally:
-            self._exit_followup()
+            self._exit_followup_and_maybe_clear()
 
     def _do_handle_extra_file_copy(self, task: Dict[str, Any]):
         """
