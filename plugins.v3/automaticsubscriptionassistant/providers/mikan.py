@@ -355,7 +355,9 @@ class MikanRankProvider(RankProvider):
                 FieldSpec(key="proxy", label="使用代理访问", kind="switch", default=False),
             ],
             filters_schema=[
-                FieldSpec(key="year", label="年份≥", kind="number", default=0),
+                # 年份控制统一走 options 里的「首播年份下限」：通用「年份≥」过滤器在
+                # 「取前 N」之后才生效，挡不住靠累积热度霸榜的跨年老番（会让真正该订的
+                # 番被顶掉名额），故本来源不再声明 year 过滤器。
                 FieldSpec(
                     key="vote",
                     label="评分≥",
