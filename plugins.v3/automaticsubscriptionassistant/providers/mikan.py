@@ -24,6 +24,30 @@ key 恒为 放送日期/放送开始/官方网站/Bangumi番组计划链接。�
 ``media_source=bangumi, media_id=...`` 识别；抓不到 bgm id 时退化为 title+year 名称识别。
 封面 ``cover`` 同时落到 ``RankMediaItem.poster`` 与 ``source_meta``。
 冷门番若 TMDB 名称匹配不到需注意（见 README 已知限制）。
+
+**两阶段流程（默认开启）**：本来源默认「先评估整季、再产出入选者」，而不是逐条抓完就
+订阅。顺序为：
+
+1. 抓蜜柑当季列表（去重后的全部候选）；
+2. 逐条取详情，拿到 ``bgm_id`` 与「放送开始」年；
+3. **年份过滤**：首播年 < ``min_year``（0 = 跟随配置/当前年）→ 剔除（跨年老番如名侦探柯南
+   1996 在这里出局，不必浪费后面的热度请求与识别请求）；
+4. 取 **Bangumi 热度**（``collection.doing`` 在看人数 / ``rating.total`` 打分人数 /
+   ``rating.score`` 评分），走宿主自带的 ``app.chain.bangumi.BangumiChain``（自带代理与
+   缓存），本模块不新写 HTTP 客户端；取数失败的番剧本轮跳过；
+5. **样本门槛**：在看人数 < ``min_doing`` 或打分人数 < ``min_votes`` → 剔除（避免刚开播、
+   样本太少时评分不可信；下周样本涨上来会自动重新评估）；
+6. 按 **在看人数降序** 排序，取前 ``top_n`` 部（0 = 不限）；
+7. 只有入选的条目 yield 进既有管线（识别 → 「评分≥」按识别出的 Bangumi 评分过滤 →
+   查重 → 订阅），**被粗筛剔除的番剧不产出、不记历史**。
+
+即：整季粗筛在 provider 内完成，评分过滤仍复用现成的 ``VoteFilter``（读
+``mediainfo.vote_average``，即识别到的 Bangumi 评分），不新增过滤器类，也不改动
+executor/filters 的行为。
+
+``resolve_bangumi_id`` 关闭时拿不到 bgm id、也就取不到热度：此时若配置了热度相关的
+选项（``top_n``/``min_doing``/``min_votes``/``min_year`` 任一非 0），记一条 warn 日志
+并退化为旧的「逐条抓详情 → 逐条产出整季」行为（不排序、不设门槛），不抛异常。
 """
 from __future__ import annotations
 
@@ -61,6 +85,8 @@ SEASON_AUTO = "当前"
 _REQUEST_TIMEOUT = 30
 # 逐条抓详情时的礼貌间隔（秒），避免压站。
 _DETAIL_SLEEP = 0.6
+# 逐条取 Bangumi 热度时的礼貌间隔（秒）；宿主链自带缓存，命中缓存时同样短暂让出。
+_HEAT_SLEEP = 0.2
 
 # bgm.tv / bangumi.tv subject id 正则（详情页 .bangumi-info 内链接）。
 _BGM_ID_PATTERN = re.compile(r"b(?:gm|angumi)\.tv/subject/(\d+)")
@@ -262,6 +288,11 @@ class MikanRankProvider(RankProvider):
     真实放送年（解析到才）覆盖配置/当前年；``original_title``/``aliases`` 仅存
     ``source_meta``（executor 识别仍用主标题，未接入别名识别）。封面 ``cover`` 同时落到
     ``poster`` 与 ``source_meta``。番剧统一按 ``MediaType.TV`` 处理。
+
+    默认走「两阶段」流程（详见模块 docstring）：先聚合整季候选 + 热度，按
+    「年份下限 → 在看/打分门槛 → 在看人数降序取前 N」粗筛，再 yield 入选条目；只有入选
+    的前 N 部会进入识别/评分过滤/订阅并记历史。热度取自宿主 ``BangumiChain``。
+    ``resolve_bangumi_id`` 关闭时无 bgm id、取不到热度，自动退化为旧的逐条产出行为。
     """
 
     provider_id = "mikan"
@@ -292,20 +323,61 @@ class MikanRankProvider(RankProvider):
                     kind="switch",
                     default=True,
                 ),
+                FieldSpec(
+                    key="min_year",
+                    label="首播年份下限(0=跟随目标年)",
+                    kind="number",
+                    default=0,
+                    hint="首播年份早于该值的番剧直接跳过，用于排除名侦探柯南这类跨年老番；"
+                         "0=自动跟随上方填的年份（抓 2026 夏即 2026）",
+                ),
+                FieldSpec(
+                    key="min_doing",
+                    label="最少在看人数(0=不限)",
+                    kind="number",
+                    default=0,
+                    hint="在看人数不足的番剧本周跳过，下周人数涨上来会自动重新评估",
+                ),
+                FieldSpec(
+                    key="min_votes",
+                    label="最少打分人数(0=不限)",
+                    kind="number",
+                    default=0,
+                    hint="打分人数不足的番剧本周跳过，避免刚开播、样本太少导致评分不可信",
+                ),
+                FieldSpec(
+                    key="top_n",
+                    label="按热度取前N部(0=不限)",
+                    kind="number",
+                    default=10,
+                    hint="按 Bangumi 在看人数降序排序后只取前 N 部进入订阅；0=不限",
+                ),
                 FieldSpec(key="proxy", label="使用代理访问", kind="switch", default=False),
             ],
             filters_schema=[
                 FieldSpec(key="year", label="年份≥", kind="number", default=0),
+                FieldSpec(
+                    key="vote",
+                    label="评分≥",
+                    kind="float",
+                    default=0,
+                    hint="按识别后的 Bangumi 评分过滤；识别失败的条目不会进入评分判定",
+                ),
             ],
         )
 
     def fetch(self, options: dict, context: ProviderContext) -> Iterator[RankMediaItem]:
-        """抓取蜜柑季度番剧列表，逐条产出 ``RankMediaItem``。
+        """抓取蜜柑季度番剧列表，产出 ``RankMediaItem``（默认走两阶段粗筛）。
 
-        ``resolve_bangumi_id`` 为 True 时逐条抓详情补 bgm subject id + 真实放送年 +
-        原名/别名，每条之间短暂 sleep 避免压站，并响应 ``context.event`` 退出信号；
-        为 False 时不抓详情（年份用配置/当前年、无 bgm id）。单条失败 try/except
-        continue，整源抓取失败向上抛出（由 runner 捕获）。
+        两阶段（``resolve_bangumi_id`` 且需粗筛时）：先聚合整季候选——逐条抓详情补
+        bgm subject id + 真实放送年，按 ``min_year`` 剔除跨年老番，逐条取 Bangumi 热度
+        并按 ``min_doing``/``min_votes`` 门槛剔除，再按在看人数降序取前 ``top_n``（0=不限），
+        最后只 yield 入选条目；被剔除者不产出、不记历史。每条详情/热度之间短暂 sleep
+        避免压站，两个阶段都响应 ``context.event`` 退出信号。
+
+        ``resolve_bangumi_id`` 为 False（无 bgm id、取不到热度）而配置了热度相关选项时，
+        记一条 warn 并退化为旧的逐条产出行为；热度相关选项全为 0 时同样走旧行为。
+        单条失败 try/except continue，整源抓取失败向上抛出（由 runner 捕获）。
         """
         options = options or {}
         year = self._resolve_year(options.get("year"))
@@ -314,26 +386,126 @@ class MikanRankProvider(RankProvider):
         # 可选代理：开启则本次抓取的 HTTP 请求（季度列表 + 详情）走系统代理。
         proxies = settings.PROXY if bool(options.get("proxy")) else None
 
+        min_year = self._resolve_min_year(options.get("min_year"), year)
+        min_doing = _to_int(options.get("min_doing"))
+        min_votes = _to_int(options.get("min_votes"))
+        top_n = _to_int(options.get("top_n"))
+        # 是否需要「先聚合整季再产出」：年份过滤要先把整季详情看完才能统计剔除，
+        # 热度排序/门槛还要先把热度取齐；任一开启即走两阶段。
+        # ``min_year`` 为 0 时解析成目标年（> 0），故默认配置恒走两阶段粗筛。
+        need_heat = (top_n > 0) or (min_doing > 0) or (min_votes > 0) or (min_year > 0)
+
         api = MikanApi(proxies=proxies)
         entries = api.season(year, season_str)
         logger.info(
             f"{self.provider_name}：{year} 年 {season_str} 季 共 {len(entries)} 部番剧"
         )
         config_year = str(year)
+
+        if not resolve_bgm or not need_heat:
+            if not resolve_bgm and need_heat:
+                logger.warn(
+                    f"{self.provider_name}：已关闭「抓详情补 Bangumi ID/放送年」，"
+                    f"取不到 Bangumi 热度，本次退化为逐条订阅整季"
+                    f"（不排序、不设在看/打分/年份门槛）"
+                )
+            # 旧行为：逐条抓详情（仅 resolve_bgm 时）→ 逐条产出。
+            for entry in entries:
+                if self._stopped(context):
+                    break
+                try:
+                    detail: dict = {}
+                    if resolve_bgm:
+                        detail = self._safe_detail(api, entry)
+                        sleep(_DETAIL_SLEEP)
+                    yield self._build_item(entry, config_year, detail)
+                except Exception as err:  # noqa: BLE001 - 单条兜底，不影响其余番剧
+                    logger.error(f"{self.provider_name}：解析番剧条目失败：{err}")
+                    continue
+            return
+
+        # ---- 阶段一：聚合整季候选并粗筛（详情 → 年份 → 热度 → 门槛 → 排序 → 取前 N）----
+        candidates: List[Tuple[dict, dict, dict]] = []
+        year_dropped = heat_failed = doing_short = votes_short = 0
         for entry in entries:
-            # 响应退出信号。
-            if context is not None and getattr(context, "event", None) is not None \
-                    and context.event.is_set():
+            if self._stopped(context):
                 break
             try:
-                detail: dict = {}
-                if resolve_bgm:
-                    detail = self._safe_detail(api, entry)
-                    sleep(_DETAIL_SLEEP)
-                yield self._build_item(entry, config_year, detail)
+                detail = self._safe_detail(api, entry)
+                sleep(_DETAIL_SLEEP)
+                # 年份过滤：年份解析不出来按「未知」处理，不因年份剔除（它同时也没有
+                # bgm id，会在下一步取热度时自然出局）。
+                detail_year = _to_int(detail.get("year"))
+                if detail_year and detail_year < min_year:
+                    year_dropped += 1
+                    continue
+                heat = self._safe_heat(detail.get("bgm_id")) if detail.get("bgm_id") else None
+                sleep(_HEAT_SLEEP)
+                if heat is None:
+                    heat_failed += 1
+                    continue
+                if min_doing > 0 and _to_int(heat.get("doing")) < min_doing:
+                    doing_short += 1
+                    continue
+                if min_votes > 0 and _to_int(heat.get("votes")) < min_votes:
+                    votes_short += 1
+                    continue
+                candidates.append((entry, detail, heat))
             except Exception as err:  # noqa: BLE001 - 单条兜底，不影响其余番剧
                 logger.error(f"{self.provider_name}：解析番剧条目失败：{err}")
                 continue
+
+        # 按在看人数降序（稳定排序：同为 0 或相同人数时保持季度列表原序）。
+        candidates.sort(key=lambda item: _to_int(item[2].get("doing")), reverse=True)
+        selected = candidates[:top_n] if top_n > 0 else candidates
+        logger.info(
+            f"Mikan 季度新番：{year} {season_str} 共 {len(entries)} 部；"
+            f"年份过滤剔除 {year_dropped}；热度取数失败 {heat_failed}；"
+            f"在看不足 {doing_short}；打分不足 {votes_short}；"
+            f"入选 {len(selected)}/{len(candidates)}"
+        )
+
+        # ---- 阶段二：只产出入选条目（进入识别 → 评分过滤 → 查重 → 订阅）----
+        for entry, detail, heat in selected:
+            if self._stopped(context):
+                break
+            try:
+                yield self._build_item(entry, config_year, detail, heat)
+            except Exception as err:  # noqa: BLE001 - 单条兜底，不影响其余番剧
+                logger.error(f"{self.provider_name}：解析番剧条目失败：{err}")
+                continue
+
+    @staticmethod
+    def _stopped(context) -> bool:
+        """退出信号是否已置位（``context``/``event`` 允许缺省，便于测试直接调用）。"""
+        event = getattr(context, "event", None) if context is not None else None
+        return event is not None and event.is_set()
+
+    def _safe_heat(self, bgm_id) -> Optional[dict]:
+        """取单部番的 Bangumi 热度：``{'doing': int, 'votes': int, 'score': float|None}``。
+
+        走宿主自带的 ``BangumiChain``（自带代理与缓存），本模块不新写 HTTP 客户端；
+        延迟 import 便于单元测试注入桩。任何异常（含 import 失败、id 非法）都只记
+        warn 并返回 ``None``，由调用方按「热度取数失败」跳过该番。
+        """
+        try:
+            from app.chain.bangumi import BangumiChain
+
+            info = BangumiChain().bangumi_info(int(bgm_id))
+        except Exception as err:  # noqa: BLE001 - 单条热度失败不影响主流程
+            logger.warn(f"{self.provider_name}：获取 Bangumi 热度失败（bgm {bgm_id}）：{err}")
+            return None
+        if not info:
+            logger.warn(f"{self.provider_name}：获取 Bangumi 热度为空（bgm {bgm_id}）")
+            return None
+        collection = info.get("collection") or {}
+        rating = info.get("rating") or {}
+        score = rating.get("score")
+        return {
+            "doing": _to_int(collection.get("doing")),
+            "votes": _to_int(rating.get("total")),
+            "score": float(score) if score else None,
+        }
 
     def _safe_detail(self, api: "MikanApi", entry: dict) -> dict:
         """抓详情补 bgm id + 放送年 + 名称，失败仅告警并返回 ``{}``（退化名称识别）。"""
@@ -347,14 +519,18 @@ class MikanRankProvider(RankProvider):
             return {}
 
     @staticmethod
-    def _build_item(entry: dict, config_year: str, detail: dict) -> RankMediaItem:
-        """把单部番剧 dict + 详情 dict 构造为 ``RankMediaItem``。
+    def _build_item(entry: dict, config_year: str, detail: dict,
+                    heat: Optional[dict] = None) -> RankMediaItem:
+        """把单部番剧 dict + 详情 dict（+ 热度 dict）构造为 ``RankMediaItem``。
 
         真实放送年（``detail['year']``，解析到才）覆盖配置/当前年；封面同时落到
         ``poster`` 与 ``source_meta``；``original_title``/``aliases``/``air_date``
         存入 ``source_meta``（供历史展示/未来用，识别仍用主标题）。
+        ``heat`` 为 ``_safe_heat`` 的结果（缺省 None，兼容未取热度的旧调用路径），
+        其 ``doing``/``votes``/``score`` 一并存入 ``source_meta`` 供展示与排查。
         """
         detail = detail or {}
+        heat = heat or {}
         cover = entry.get("cover")
         year = detail.get("year") or config_year
         return RankMediaItem(
@@ -372,9 +548,21 @@ class MikanRankProvider(RankProvider):
                 "original_title": detail.get("original_title"),
                 "aliases": detail.get("aliases") or [],
                 "air_date": detail.get("air_date"),
+                # Bangumi 热度（未取热度/取数失败时为 None）。
+                "doing": heat.get("doing"),
+                "votes": heat.get("votes"),
+                "score": heat.get("score"),
             },
             unique_seed=entry["mikan_id"],
         )
+
+    @staticmethod
+    def _resolve_min_year(raw, target_year: int) -> int:
+        """解析首播年份下限：``0``（跟随目标年）/非法 -> 本次抓取的目标年。"""
+        value = _to_int(raw)
+        if value <= 0:
+            return _to_int(target_year)
+        return value
 
     @staticmethod
     def _resolve_year(raw) -> int:

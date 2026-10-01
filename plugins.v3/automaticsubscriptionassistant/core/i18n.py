@@ -105,6 +105,22 @@ _TEXT: Dict[str, Dict[str, str]] = {
         "zh-TW": "抓詳情補 Bangumi ID/放送年(更準但更慢)",
         "en-US": "Fetch Bangumi ID & air year (more accurate, slower)",
     },
+    "首播年份下限(0=跟随目标年)": {
+        "zh-TW": "首播年份下限(0=跟隨目標年)",
+        "en-US": "Min first-air year (0 = follow target)",
+    },
+    "最少在看人数(0=不限)": {
+        "zh-TW": "最少在看人數(0=不限)",
+        "en-US": "Min 'watching' count (0 = no limit)",
+    },
+    "最少打分人数(0=不限)": {
+        "zh-TW": "最少打分人數(0=不限)",
+        "en-US": "Min rating count (0 = no limit)",
+    },
+    "按热度取前N部(0=不限)": {
+        "zh-TW": "按熱度取前 N 部(0=不限)",
+        "en-US": "Top N by popularity (0 = no limit)",
+    },
     "全球榜": {"zh-TW": "全球榜", "en-US": "Global list"},
     "全球数据源": {"zh-TW": "全球資料源", "en-US": "Global dataset"},
     "全球媒体类型": {"zh-TW": "全球媒體類型", "en-US": "Global media types"},
@@ -280,6 +296,33 @@ _HINTS: Dict[Any, Dict[str, str]] = {
     ("popular", "tv_popularity"): {
         "zh-TW": "0=不限；按統計訂閱人次過濾",
         "en-US": "0 = no limit; filtered locally by subscriber count",
+    },
+    ("mikan", "min_year"): {
+        "zh-TW": "首播年份早於該值的番劇直接跳過，用於排除名偵探柯南這類跨年老番；"
+                 "0=自動跟隨上方填的年份（抓 2026 夏即 2026）",
+        "en-US": "Anime whose first-air year is earlier than this is skipped — excludes "
+                 "long-running shows like Detective Conan; 0 = follow the year above "
+                 "(2026 summer → 2026)",
+    },
+    ("mikan", "min_doing"): {
+        "zh-TW": "在看人數不足的番劇本週跳過，下週人數漲上來會自動重新評估",
+        "en-US": "Anime with fewer 'watching' users is skipped this week; "
+                 "re-evaluated automatically once the count grows",
+    },
+    ("mikan", "min_votes"): {
+        "zh-TW": "打分人數不足的番劇本週跳過，避免剛開播、樣本太少導致評分不可信",
+        "en-US": "Anime with too few ratings is skipped this week, avoiding unreliable "
+                 "scores from tiny samples",
+    },
+    ("mikan", "top_n"): {
+        "zh-TW": "按 Bangumi 在看人數降序排序後只取前 N 部進入訂閱；0=不限",
+        "en-US": "Sort by Bangumi 'watching' count (desc) and only subscribe the top N; "
+                 "0 = no limit",
+    },
+    ("mikan", "vote"): {
+        "zh-TW": "按識別後的 Bangumi 評分過濾；識別失敗的條目不會進入評分判定",
+        "en-US": "Filters by the post-recognition Bangumi rating; entries that fail "
+                 "recognition are never rating-judged",
     },
 }
 
