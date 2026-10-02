@@ -250,11 +250,12 @@ _HINTS: Dict[Any, Dict[str, str]] = {
                  "no rating / 0.0 counts as not passing",
     },
     ("douban", "season_exclude"): {
-        "zh-TW": "開啟後不訂閱「第2季及以後」的劇集（按條目標題裡的「第X季」判定，"
-                 "電影與無季號條目不受影響）；預設關閉",
+        "zh-TW": "開啟後不訂閱「第2季及以後」的劇集（按條目標題裡的「第X季/第X期/第X部」"
+                 "判定，與 Mikan 口徑一致；電影與無季號條目不受影響）；預設關閉",
         "en-US": "When on, TV entries for season 2 and later are not subscribed "
-                 "(detected from the 'Season N' marker in the entry title; movies and "
-                 "entries without a season are unaffected); off by default",
+                 "(detected from the '第X季/第X期/第X部' marker in the entry title, "
+                 "same as Mikan; movies and entries without a season are unaffected); "
+                 "off by default",
     },
     ("maoyan", "web_platform_map"): {
         "zh-TW": "依平台分別選擇要監聽的網播類型（可各不相同）；網路電影僅騰訊視頻/愛奇藝/優酷有資料",

@@ -43,9 +43,10 @@ key 恒为 放送日期/放送开始/官方网站/Bangumi番组计划链接。�
 
 即：整季粗筛在 provider 内完成，评分过滤仍复用现成的 ``VoteFilter``（读
 ``mediainfo.vote_average``，即识别到的 Bangumi 评分）；「排除第2季及以后」开关
-（``season_exclude``，默认关）由 ``core.filters.MikanSeasonExcludeFilter`` 在 post
-阶段按**条目标题**（「第X季 / 第X期 / 第X部」，含「第X部分」）判定，本模块不改动
-executor/filters 的行为。
+（``season_exclude``，默认关）由 ``core.filters.TitleSeasonExcludeFilter`` 在 post
+阶段按**条目标题**（「第X季 / 第X期 / 第X部」，含「第X部分」）判定——该标题口径与豆瓣
+**共用同一个实现**，故同一标题在两个来源下的判定一致；本模块不改动 executor/filters
+的行为。
 
 ``resolve_bangumi_id`` 关闭时拿不到 bgm id、也就取不到热度：此时若配置了热度相关的
 选项（``top_n``/``min_doing``/``min_votes``/``min_year`` 任一非 0），记一条 warn 日志
@@ -371,8 +372,8 @@ class MikanRankProvider(RankProvider):
                     default=0,
                     hint="按识别后的 Bangumi 评分过滤；识别失败的条目不会进入评分判定",
                 ),
-                # 季号只能从条目标题解析（Mikan 不提供 item.season），故走 Mikan 专属
-                # 口径的 MikanSeasonExcludeFilter（见 core/filters.py 的
+                # 季号只能从条目标题解析（Mikan 不提供 item.season），走标题口径的
+                # TitleSeasonExcludeFilter（与豆瓣共用，见 core/filters.py 的
                 # PROVIDER_FILTER_OVERRIDES）。排在 vote 之后，即 post 过滤链末尾。
                 FieldSpec(
                     key="season_exclude",
