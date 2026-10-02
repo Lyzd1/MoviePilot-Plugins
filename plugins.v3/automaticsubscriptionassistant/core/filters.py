@@ -10,9 +10,11 @@ TMDB 评分，走 post 的 ``VoteFilter``。两者判定时机相同（都在识
 前者读榜单自带的豆瓣评分，后者读宿主识别出的 TMDB 评分。配置项的 key 不变，故用户已保存
 的阈值在两种口径间无缝沿用。
 
-``season_exclude``（「排除第 2 季及以后」，post，**默认关闭**）同样按来源分派两套实现：
-``DoubanSeasonExcludeFilter`` 从**条目标题**解析「第X季」（豆瓣不提供季号）；``NetflixSeasonExcludeFilter``
-取**榜单自带的 ``item.season``**（数据源 ``season_title`` 的 ``Season N``）。二者只作用于
+``season_exclude``（「排除第 2 季及以后」，post，**默认关闭**）按来源分派**三套**实现：
+``DoubanSeasonExcludeFilter`` 从**条目标题**解析「第X季」，``MikanSeasonExcludeFilter``
+同样从条目标题解析、但单位词额外认「期 / 部（含第X部分）」，二者都因数据源不提供季号
+而只能看标题；``NetflixSeasonExcludeFilter`` 取**榜单自带的 ``item.season``**
+（数据源 ``season_title`` 的 ``Season N``）。三者只作用于
 **剧集**（``mediainfo.type == MediaType.TV``）——电影、综艺及无季号的条目一律放行，故不会
 误伤电影续集。它排在 post 过滤链末尾（评分过滤之后），被排除的条目记 ``FILTERED`` 且不标记
 已处理，与其它过滤器一致。
@@ -62,6 +64,8 @@ def _is_truthy(value) -> bool:
 
 # 「第X季」季号正则：同时接受中文数字（``第六季``）与阿拉伯数字（``第2季``）。
 _SEASON_CN_PATTERN = re.compile(r"第\s*([一二三四五六七八九十百零两\d]+)\s*季")
+# Mikan 口径的标题季号正则：单位词除「季」外还认「期 / 部」（「部」天然覆盖「第2部分」）。
+_SEASON_UNIT_PATTERN = re.compile(r"第\s*([一二三四五六七八九十百零两\d]+)\s*[季期部]")
 # 中文数字查表（仅用于季号解析，覆盖到「百」足够）。
 _CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
               "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
@@ -91,9 +95,13 @@ def _cn_number(text: str) -> Optional[int]:
     return section + number
 
 
-def _parse_title_season(title: str) -> Optional[int]:
-    """从标题解析「第X季」的季号；无匹配或解析不出数字返回 None（= 不作判定）。"""
-    match = _SEASON_CN_PATTERN.search(str(title or ""))
+def _parse_title_season(title: str, pattern: re.Pattern = _SEASON_CN_PATTERN) -> Optional[int]:
+    """从标题解析季号；无匹配或解析不出数字返回 None（= 不作判定）。
+
+    ``pattern`` 决定单位词口径：缺省只认「第X季」（豆瓣口径），Mikan 口径传入
+    ``_SEASON_UNIT_PATTERN``，额外认「第X期」「第X部」（``第2部分`` 由「部」命中）。
+    """
+    match = pattern.search(str(title or ""))
     if not match:
         return None
     return _cn_number(match.group(1))
@@ -261,6 +269,20 @@ class DoubanSeasonExcludeFilter(_SeasonExcludeFilter):
         return _parse_title_season(getattr(item, "title", ""))
 
 
+class MikanSeasonExcludeFilter(_SeasonExcludeFilter):
+    """Mikan 口径：季号从**条目标题**解析，单位词除「季」外还认「期 / 部」。
+
+    Mikan provider 不提供 ``item.season``（恒为 None），故只能靠标题；除「第X季」外
+    还认「第X期」「第X部」（``石纪元 科学与未来 第3部分`` 由「部」命中解析出 3）。
+    用于挡「关于我转生变成史莱姆这档事 第四季」这类**当年开播、年份下限挡不住**的续作。
+    无季号的剧场版等条目（``剧场版 … 苍海之泪篇``、``花样少年少女``）不含「第…季/期/部」，
+    自然放行。
+    """
+
+    def _season_of(self, item) -> Optional[int]:
+        return _parse_title_season(getattr(item, "title", ""), _SEASON_UNIT_PATTERN)
+
+
 class NetflixSeasonExcludeFilter(_SeasonExcludeFilter):
     """奈飞口径：季号取榜单自带的 ``item.season``（数据源 ``season_title`` 的 ``Season N``）。
 
@@ -301,15 +323,17 @@ BUILTIN_FILTERS: Dict[str, Type[MediaFilter]] = {
 
 # 来源级过滤器覆写：provider_id -> {filter_id -> 过滤器类}（优先于 BUILTIN_FILTERS）。
 # 只覆写「该来源有更好的判定口径」的那一项，其余过滤器仍走通用实现。
-# 注意：``season_exclude`` **不注册**进 BUILTIN_FILTERS——只有豆瓣/奈飞两个来源声明它，
-# 且两套实现季号来源不同，故只在此按来源分派。
+# 注意：``season_exclude`` **不注册**进 BUILTIN_FILTERS——只有豆瓣/Mikan/奈飞三个来源声明它，
+# 且三套实现季号来源不同，故只在此按来源分派。
 PROVIDER_FILTER_OVERRIDES: Dict[str, Dict[str, Type[MediaFilter]]] = {
     # 豆瓣榜单 RSS 自带豆瓣评分 -> 识别后按这份榜单评分判定（不用识别后的 TMDB 评分）；
-    # 季号则只能从条目标题解析（豆瓣不提供 item.season）。
+    # 季号则只能从条目标题解析（豆瓣不提供 item.season），只认「第X季」。
     "douban": {
         SourceVoteFilter.filter_id: SourceVoteFilter,
         "season_exclude": DoubanSeasonExcludeFilter,
     },
+    # Mikan 同样不提供 item.season，季号从标题解析，单位词额外认「期 / 部」（见 providers/mikan.py）。
+    "mikan": {"season_exclude": MikanSeasonExcludeFilter},
     # 奈飞季号来自榜单数据自带的 item.season（见 providers/netflix.py）。
     "netflix": {"season_exclude": NetflixSeasonExcludeFilter},
 }

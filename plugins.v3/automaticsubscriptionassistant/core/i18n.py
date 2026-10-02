@@ -260,6 +260,15 @@ _HINTS: Dict[Any, Dict[str, str]] = {
         "zh-TW": "依平台分別選擇要監聽的網播類型（可各不相同）；網路電影僅騰訊視頻/愛奇藝/優酷有資料",
         "en-US": "Choose streaming types per platform; web films only on Tencent / iQIYI / Youku",
     },
+    ("mikan", "season_exclude"): {
+        "zh-TW": "開啟後不訂閱「第2季/第2期/第2部分」及以後的番劇（按條目標題判定，"
+                 "如「關於我轉生變成史萊姆這檔事 第四季」）；無季號條目與劇場版不受影響；"
+                 "預設關閉",
+        "en-US": "When on, entries for season 2 / part 2 and later are not subscribed "
+                 "(detected from the entry title, e.g. '关于我转生变成史莱姆这档事 第四季'); "
+                 "entries without a season number and movies are unaffected; "
+                 "off by default",
+    },
     ("netflix", "vote"): {
         "zh-TW": "按識別後的 TMDB 評分過濾；識別失敗的條目不會進入評分判定",
         "en-US": "Filters by the post-recognition TMDB rating; entries that fail "
