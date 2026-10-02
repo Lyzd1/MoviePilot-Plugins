@@ -9,9 +9,17 @@
 TMDB 评分，走 post 的 ``VoteFilter``。两者判定时机相同（都在识别后），差别只在评分来源：
 前者读榜单自带的豆瓣评分，后者读宿主识别出的 TMDB 评分。配置项的 key 不变，故用户已保存
 的阈值在两种口径间无缝沿用。
+
+``season_exclude``（「排除第 2 季及以后」，post，**默认关闭**）同样按来源分派两套实现：
+``DoubanSeasonExcludeFilter`` 从**条目标题**解析「第X季」（豆瓣不提供季号）；``NetflixSeasonExcludeFilter``
+取**榜单自带的 ``item.season``**（数据源 ``season_title`` 的 ``Season N``）。二者只作用于
+**剧集**（``mediainfo.type == MediaType.TV``）——电影、综艺及无季号的条目一律放行，故不会
+误伤电影续集。它排在 post 过滤链末尾（评分过滤之后），被排除的条目记 ``FILTERED`` 且不标记
+已处理，与其它过滤器一致。
 """
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Dict, List, Optional, Type
 
@@ -41,6 +49,54 @@ def _to_float(value) -> float:
         return float(value)
     except (ValueError, TypeError):
         return 0.0
+
+
+def _is_truthy(value) -> bool:
+    """开关值解析：bool 直接取；字符串接受 true/on/yes/1（大小写不敏感）；其余为假。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "on", "yes", "1")
+    return bool(value)
+
+
+# 「第X季」季号正则：同时接受中文数字（``第六季``）与阿拉伯数字（``第2季``）。
+_SEASON_CN_PATTERN = re.compile(r"第\s*([一二三四五六七八九十百零两\d]+)\s*季")
+# 中文数字查表（仅用于季号解析，覆盖到「百」足够）。
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_UNITS = {"十": 10, "百": 100}
+
+
+def _cn_number(text: str) -> Optional[int]:
+    """把捕获到的数字串转成 int：纯阿拉伯数字直接转，中文数字按位累加。
+
+    ``二十``→20、``六``→6、``一百零五``→105、``12``→12；含未知字符返回 None。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return int(raw)
+    section, number = 0, 0
+    for ch in raw:
+        if ch in _CN_DIGITS:
+            number = _CN_DIGITS[ch]
+        elif ch in _CN_UNITS:
+            # 「十二」的十位省略了数字，按 1 计。
+            section += (number or 1) * _CN_UNITS[ch]
+            number = 0
+        else:
+            return None
+    return section + number
+
+
+def _parse_title_season(title: str) -> Optional[int]:
+    """从标题解析「第X季」的季号；无匹配或解析不出数字返回 None（= 不作判定）。"""
+    match = _SEASON_CN_PATTERN.search(str(title or ""))
+    if not match:
+        return None
+    return _cn_number(match.group(1))
 
 
 class MediaFilter(ABC):
@@ -167,6 +223,56 @@ class MediaTypeFilter(MediaFilter):
         return FilterVerdict.accept()
 
 
+class _SeasonExcludeFilter(MediaFilter):
+    """「排除第 2 季及以后」过滤（post）的公共判定骨架，季号来源由子类给出。
+
+    只作用于剧集：``mediainfo is None``（未识别）或 ``mediainfo.type != MediaType.TV``
+    一律放行——不做反向猜测，避免误伤电影续集。开关未开 / 未设置 / 值非真也一律放行。
+    排在 post 过滤链末尾（评分过滤之后），命中的条目记 ``FILTERED`` 且不标记已处理。
+    """
+
+    filter_id = "season_exclude"
+    stage = "post"
+
+    def accept(self, item, mediainfo, config):
+        if not _is_truthy((config or {}).get(self.filter_id)):
+            return FilterVerdict.accept()
+        if mediainfo is None or getattr(mediainfo, "type", None) != MediaType.TV:
+            return FilterVerdict.accept()
+        season = self._season_of(item)
+        if season is not None and season >= 2:
+            return FilterVerdict.reject(self.filter_id, f"第 {season} 季（仅保留第 1 季）")
+        return FilterVerdict.accept()
+
+    def _season_of(self, item) -> Optional[int]:
+        """返回条目的季号；无法判定返回 None（= 放行）。"""
+        raise NotImplementedError
+
+
+class DoubanSeasonExcludeFilter(_SeasonExcludeFilter):
+    """豆瓣口径：季号从**条目标题**解析（``流人 第六季`` / ``某某 第2季``）。
+
+    豆瓣 provider 不提供 ``item.season``（恒为 None），故只能靠标题；只认「第X季」，
+    不认「部/辑/期」。标题里的年份或尾部数字（``说唱巅峰对决2026``、``一饭封神2``）
+    都不带「第…季」，不会被误判。
+    """
+
+    def _season_of(self, item) -> Optional[int]:
+        return _parse_title_season(getattr(item, "title", ""))
+
+
+class NetflixSeasonExcludeFilter(_SeasonExcludeFilter):
+    """奈飞口径：季号取榜单自带的 ``item.season``（数据源 ``season_title`` 的 ``Season N``）。
+
+    ``item.season`` 为 None（电影 / ``Collection N`` / ``Limited Series`` 等）时放行，
+    **不回退**标题正则——奈飞条目的季号只在榜单数据里，识别结果与英文标题都拿不到。
+    """
+
+    def _season_of(self, item) -> Optional[int]:
+        season = getattr(item, "season", None)
+        return season if isinstance(season, int) else None
+
+
 class FilterChain:
     """按阶段顺序执行过滤器，短路于首个拒绝。"""
 
@@ -195,9 +301,17 @@ BUILTIN_FILTERS: Dict[str, Type[MediaFilter]] = {
 
 # 来源级过滤器覆写：provider_id -> {filter_id -> 过滤器类}（优先于 BUILTIN_FILTERS）。
 # 只覆写「该来源有更好的判定口径」的那一项，其余过滤器仍走通用实现。
+# 注意：``season_exclude`` **不注册**进 BUILTIN_FILTERS——只有豆瓣/奈飞两个来源声明它，
+# 且两套实现季号来源不同，故只在此按来源分派。
 PROVIDER_FILTER_OVERRIDES: Dict[str, Dict[str, Type[MediaFilter]]] = {
-    # 豆瓣榜单 RSS 自带豆瓣评分 -> 识别后按这份榜单评分判定（不用识别后的 TMDB 评分）。
-    "douban": {SourceVoteFilter.filter_id: SourceVoteFilter},
+    # 豆瓣榜单 RSS 自带豆瓣评分 -> 识别后按这份榜单评分判定（不用识别后的 TMDB 评分）；
+    # 季号则只能从条目标题解析（豆瓣不提供 item.season）。
+    "douban": {
+        SourceVoteFilter.filter_id: SourceVoteFilter,
+        "season_exclude": DoubanSeasonExcludeFilter,
+    },
+    # 奈飞季号来自榜单数据自带的 item.season（见 providers/netflix.py）。
+    "netflix": {"season_exclude": NetflixSeasonExcludeFilter},
 }
 
 

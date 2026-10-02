@@ -11,7 +11,11 @@
 ``SourceVoteFilter`` 在**识别后**按这份榜单评分判定（不达标者不进入订阅流程），
 **不使用**识别后的 TMDB 评分（``item.year`` / ``media_type`` 过滤不受影响）。
 先识别再判定意味着每条都要发识别请求，换来的是被过滤条目同样带封面与媒体身份。
-季号等信息仍由 executor 通过宿主媒体身份识别后提供。
+
+**排除第 2 季及以后**：``filters_schema`` 的 ``season_exclude`` 开关（默认关）开启后，
+按条目标题里的「第X季」（中文数字/阿拉伯数字均可）排除第 2 季及以后的**剧集**；豆瓣不提供
+季号（``item.season`` 恒为 None），故只能从标题解析，且只认「季」（不认「部/辑/期」）。
+电影、综艺与无季号条目不受影响。
 """
 from __future__ import annotations
 
@@ -164,6 +168,15 @@ class DoubanRankProvider(RankProvider):
                     kind="select",
                     default="all",
                     options=media_type_options,
+                ),
+                # 排在最后：post 链上位于评分过滤之后（取前 N → 识别 → 评分过滤 → 本项）。
+                FieldSpec(
+                    key="season_exclude",
+                    label="排除第2季及以后",
+                    kind="switch",
+                    default=False,
+                    hint="开启后不订阅「第2季及以后」的剧集（按条目标题里的「第X季」判定，"
+                         "电影与无季号条目不受影响）；默认关闭",
                 ),
             ],
         )

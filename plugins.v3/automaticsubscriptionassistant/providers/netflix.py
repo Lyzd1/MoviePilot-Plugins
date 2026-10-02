@@ -267,6 +267,10 @@ class NetflixRankProvider(RankProvider):
 
     开启 ``rich_metadata`` 则改走富元数据模式：并发抓 Tudum 榜单页内嵌 GraphQL，带年份/干净剧名/
     videoId 显著提升识别；全球非英语两类无稳定富页，回退现有 TSV title-only（见 ``_fetch_rich``）。
+
+    「排除第 2 季及以后」（``filters_schema`` 的 ``season_exclude``，默认关）复用榜单数据抽出的
+    季号（``item.season``，即 ``_extract_season`` 的结果），只作用于剧集；``Collection``/``Part``
+    这类抽不出 ``Season N`` 的写法不识别，电影不受影响。
     """
 
     provider_id = "netflix"
@@ -276,9 +280,12 @@ class NetflixRankProvider(RankProvider):
         """返回本来源的元描述（选项与过滤器 schema）。
 
         媒体类型已由全球/国家的 category 选择区分、Netflix 无年份数据（``year=None``），故
-        不提供年份/类型过滤；只提供「评分≥」，走通用 ``VoteFilter``（post，识别后的 TMDB
-        评分口径——Netflix 数据集本身不含评分）。本来源**没有** ``PROVIDER_FILTER_OVERRIDES``，
-        不会用上豆瓣那套「按榜单自带豆瓣评分判定」的口径（二者同为识别后判定，区别只在评分来源）。
+        不提供年份/类型过滤；「评分≥」走通用 ``VoteFilter``（post，识别后的 TMDB 评分口径
+        ——Netflix 数据集本身不含评分），**不覆写**为豆瓣那套「按榜单自带豆瓣评分判定」的口径。
+
+        另有「排除第 2 季及以后」（``season_exclude``，post，默认关）：季号取本来源榜单数据
+        抽出的 ``item.season``，在 ``PROVIDER_FILTER_OVERRIDES`` 里覆写为
+        ``NetflixSeasonExcludeFilter``（与豆瓣的标题口径不同）。
         """
         return ProviderSpec(
             provider_id=self.provider_id,
@@ -352,6 +359,15 @@ class NetflixRankProvider(RankProvider):
                     kind="float",
                     default=0,
                     hint="按识别后的 TMDB 评分过滤；识别失败的条目不会进入评分判定",
+                ),
+                # 排在最后：post 链上位于评分过滤之后（取前 N → 识别 → 评分过滤 → 本项）。
+                FieldSpec(
+                    key="season_exclude",
+                    label="排除第2季及以后",
+                    kind="switch",
+                    default=False,
+                    hint="开启后不订阅「第2季及以后」的剧集（按奈飞数据自带的季号 Season N 判定；"
+                         "Collection/Part 这类写法不识别；电影不受影响）；默认关闭",
                 ),
             ],
         )

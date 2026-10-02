@@ -93,6 +93,7 @@ _TEXT: Dict[str, Dict[str, str]] = {
     "评分≥": {"zh-TW": "評分≥", "en-US": "Rating ≥"},
     "年份≥": {"zh-TW": "年份≥", "en-US": "Year ≥"},
     "媒体类型": {"zh-TW": "媒體類型", "en-US": "Media type"},
+    "排除第2季及以后": {"zh-TW": "排除第2季及以後", "en-US": "Exclude season 2+"},
     "订阅类型": {"zh-TW": "訂閱類型", "en-US": "Subscription type"},
     "播出平台": {"zh-TW": "播出平台", "en-US": "Platform"},
     "每榜条数": {"zh-TW": "每榜條數", "en-US": "Items per list"},
@@ -248,6 +249,13 @@ _HINTS: Dict[Any, Dict[str, str]] = {
         "en-US": "Filters after recognition using the list's own Douban rating; "
                  "no rating / 0.0 counts as not passing",
     },
+    ("douban", "season_exclude"): {
+        "zh-TW": "開啟後不訂閱「第2季及以後」的劇集（按條目標題裡的「第X季」判定，"
+                 "電影與無季號條目不受影響）；預設關閉",
+        "en-US": "When on, TV entries for season 2 and later are not subscribed "
+                 "(detected from the 'Season N' marker in the entry title; movies and "
+                 "entries without a season are unaffected); off by default",
+    },
     ("maoyan", "web_platform_map"): {
         "zh-TW": "依平台分別選擇要監聽的網播類型（可各不相同）；網路電影僅騰訊視頻/愛奇藝/優酷有資料",
         "en-US": "Choose streaming types per platform; web films only on Tencent / iQIYI / Youku",
@@ -256,6 +264,14 @@ _HINTS: Dict[Any, Dict[str, str]] = {
         "zh-TW": "按識別後的 TMDB 評分過濾；識別失敗的條目不會進入評分判定",
         "en-US": "Filters by the post-recognition TMDB rating; entries that fail "
                  "recognition are never rating-judged",
+    },
+    ("netflix", "season_exclude"): {
+        "zh-TW": "開啟後不訂閱「第2季及以後」的劇集（按 Netflix 資料自帶的季號 Season N "
+                 "判定；Collection/Part 這類寫法不識別；電影不受影響）；預設關閉",
+        "en-US": "When on, TV entries for season 2 and later are not subscribed "
+                 "(detected from the 'Season N' value in the Netflix data; "
+                 "'Collection'/'Part' numbering is not recognised; movies are unaffected); "
+                 "off by default",
     },
     ("netflix", "country_selections"): {
         "zh-TW": "依地區分別選擇要監聽的媒體類型（可各不相同）",
