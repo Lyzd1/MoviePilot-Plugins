@@ -211,7 +211,7 @@ class GetMissingEpisodes(_PluginBase):
     plugin_name = "剧集管家"
     plugin_desc = "检测指定剧集库，对有新季或存在集缺失的剧集自动订阅补全"
     plugin_icon = "https://raw.githubusercontent.com/boeto/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
-    plugin_version = "3.1.6"
+    plugin_version = "3.1.7"
     plugin_author = "左岸"
     author_url = "https://github.com/andyxu8023"
     plugin_config_prefix = "getmissingepisodes_"
@@ -520,7 +520,11 @@ class GetMissingEpisodes(_PluginBase):
             history = self.get_data("history")
 
         history_data: Dict[str, Any] = history if history else {"details": {}}
-        
+
+        # 迁移历史记录主键（幂等）：老版本的 key 由 Emby 的库/条目 ID 拼成，
+        # 重建媒体库后全部失效，这里统一改写为不依赖 Emby ID 的规范 key。
+        self.__migrate_history_keys(history_data)
+
         # 新增：记录本次扫描到的所有电视剧唯一标识
         seen_flags = set()
 
@@ -651,7 +655,7 @@ class GetMissingEpisodes(_PluginBase):
                         continue
 
                     item_title = item.title or item.original_title or f"ItemID: {item.item_id}"
-                    item_unique_flag = f"{mediaserver}_{item.library}_{item.item_id}_{item_title}"
+                    item_unique_flag, _item_tmdbid = self.__build_unique_flag(mediaserver, item)
                     
                     # 新增：将本次扫描到的有效电视剧加入集合
                     seen_flags.add(item_unique_flag)
@@ -674,15 +678,8 @@ class GetMissingEpisodes(_PluginBase):
                         logger.warning(f"【{item_title}】为{MediaType.MOVIE.value}, 跳过")
                         continue
 
-                    # 获取季信息
+                    # 获取季信息（TMDB ID 已在计算记录主键时取得，此处不重复取）
                     seasoninfo = {}
-                    _item_tmdbid = 0
-                    if getattr(item, 'media_source', None) and getattr(item, 'media_id', None):
-                        try:
-                            if str(item.media_source) == 'themoviedb':
-                                _item_tmdbid = int(item.media_id)
-                        except (ValueError, TypeError):
-                            pass
                     if item_type == MediaType.TV.value and _item_tmdbid:
                         try:
                             espisodes_info = self._msChain.episodes(mediaserver, item.item_id) or []
@@ -795,6 +792,121 @@ class GetMissingEpisodes(_PluginBase):
             else:
                 logger.debug("历史记录同步完成，无需删除")
         # ==== 结束新增 ====
+
+    @staticmethod
+    def __build_unique_flag(mediaserver: str, item: Any) -> Tuple[str, int]:
+        """由媒体库条目生成历史记录主键，并顺带返回 TMDB ID。
+
+        主键优先使用 TMDB ID：TMDB ID 是剧本身的属性，Emby 重建媒体库
+        （目录/条目 ID 全部重分配）后依然不变；无 TMDB ID 时兜底用「剧名 + 年份」。
+        两种口径均不含 Emby 的库/条目 ID。
+        """
+        item_title = item.title or item.original_title or f"ItemID: {item.item_id}"
+
+        item_tmdbid = 0
+        if getattr(item, 'media_source', None) and getattr(item, 'media_id', None):
+            try:
+                if str(item.media_source) == 'themoviedb':
+                    item_tmdbid = int(item.media_id)
+            except (ValueError, TypeError):
+                pass
+
+        if item_tmdbid:
+            item_unique_flag = f"{mediaserver}_{item_tmdbid}_{item_title}"
+        else:
+            item_unique_flag = f"{mediaserver}_{item_title}_{item.year or ''}"
+        return item_unique_flag, item_tmdbid
+
+    @staticmethod
+    def __canonical_history_key(server: str, tv_info: Dict[str, Any]) -> Optional[str]:
+        """由记录自身字段算出规范主键；字段不足无法判定时返回 None。
+
+        有 TMDB ID：f"{server}_{tmdbid}_{title}"
+        无 TMDB ID：f"{server}_{title}_{year}"
+        规范 key 与扫描时生成的主键口径完全一致（均不含 Emby 的库/条目 ID）。
+        """
+        if not isinstance(tv_info, dict):
+            tv_info = {}
+        tmdbid = tv_info.get("tmdbid") or 0
+        try:
+            tmdbid = int(tmdbid)
+        except (ValueError, TypeError):
+            tmdbid = 0
+        title = tv_info.get("title") or ""
+        year = tv_info.get("year", "")
+        if tmdbid:
+            return f"{server}_{tmdbid}_{title}"
+        if title:
+            return f"{server}_{title}_{year}"
+        # 既无 tmdbid 也无标题：无法判定，保持原样，避免多条记录被误判为同一部剧
+        return None
+
+    @staticmethod
+    def __merge_history_record(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+        """合并同一部剧的两条历史记录：ignored_seasons 取并集去重排序，skip 取 or，
+        其余字段取 last_check_full 较新的那条。"""
+        newer, _older = (a, b) if (a.get("last_check_full") or "") >= (b.get("last_check_full") or "") else (b, a)
+        merged = dict(newer)
+
+        ignored_seasons: List[Any] = []
+        for season in list(a.get("ignored_seasons") or []) + list(b.get("ignored_seasons") or []):
+            if season not in ignored_seasons:
+                ignored_seasons.append(season)
+        try:
+            merged["ignored_seasons"] = sorted(ignored_seasons)
+        except TypeError:
+            merged["ignored_seasons"] = ignored_seasons
+
+        merged["skip"] = bool(a.get("skip")) or bool(b.get("skip"))
+        return merged
+
+    def __migrate_history_keys(self, history_data: Dict[str, Any]) -> None:
+        """把历史记录主键迁移为规范格式（幂等，每次启动都会执行）。
+
+        老版本主键为 f"{mediaserver}_{library}_{item_id}_{title}"，含 Emby 的库/条目 ID，
+        重建媒体库（ID 全部重分配）后全部对不上。这里按记录自身字段改挂到规范 key；
+        目标 key 已存在（同一部剧出现在两个媒体库文件夹、旧记录重复）时合并而非覆盖。
+        判定完全依赖记录自身字段，不依赖 key 的段数/格式。
+        """
+        details = history_data.get("details")
+        if not isinstance(details, dict) or not details:
+            return
+
+        original_count = len(details)
+        migrated: Dict[str, Any] = {}
+        renamed_count = 0
+        merged_count = 0
+
+        for old_key, record in details.items():
+            if not isinstance(record, dict):
+                # 无法识别的记录原样保留
+                migrated[old_key] = record
+                continue
+
+            # key 第一段即媒体服务器名（新老格式一致）
+            server = str(old_key).split("_", 1)[0] if old_key else ""
+            canonical_key = self.__canonical_history_key(server, record.get("tv_no_exist_info"))
+            if not canonical_key:
+                migrated[old_key] = record
+                continue
+
+            if canonical_key in migrated:
+                migrated[canonical_key] = self.__merge_history_record(migrated[canonical_key], record)
+                merged_count += 1
+            else:
+                migrated[canonical_key] = record
+                if canonical_key != old_key:
+                    renamed_count += 1
+
+        if not renamed_count and not merged_count:
+            return  # 幂等：无任何变化时不写盘、不打日志
+
+        history_data["details"] = migrated
+        logger.info(
+            f"历史记录主键迁移完成：原 {original_count} 条 → 现 {len(migrated)} 条，"
+            f"改名 {renamed_count} 条，合并 {merged_count} 组"
+        )
+        self.save_data("history", history_data)
 
     def __get_item_no_exist_info(
         self,
