@@ -30,12 +30,19 @@
 
 安全护栏（防止误删种子）：
 - 每删完一组重新检查剩余空间，达到停止阈值立即停止（绝不超删）；
+- 删除后先等文件系统「空间结算」再读剩余空间：qBittorrent 的 delete_torrents(delete_file=True)
+  是服务端异步删文件，接口返回时空间尚未归还，直接读「删除瞬间」的剩余空间会把正常删除
+  误判成「没有释放空间」（本插件 v1.0.0 的真实事故即由此而来）；
 - 停止阈值必须大于触发阈值，配置非法时自动修正为「触发阈值 +10」；
 - 未开启「同时删除文件」时不删除任何内容（删种子不删文件无法释放空间，删除毫无意义）；
-- 若连续 3 组删除后磁盘剩余空间都没有增加（媒体库是硬链接、监控路径不在下载文件所在分区等），
-  立即中止本轮，并置位跨会话「无释放空间」闭锁：在用户修正配置（改动「同时删除文件」或
+- 若连续 3 组删除、且「空间结算」后本轮剩余空间的累计增量仍明显不足
+  （小于 max(200MB, 该组去重后大小 * 20%)），且本轮累计已尝试释放量达到 2GB
+  （媒体库是硬链接、监控路径不在下载文件所在分区等），立即中止本轮，
+  并置位跨会话「无释放空间」闭锁：在用户修正配置（改动「同时删除文件」或
   「监控路径」）或空间恢复到触发阈值以上之前，不再自动删除任何内容，
-  避免定时任务一轮一轮地把种子删光。闭锁状态在详情页展示。
+  避免定时任务一轮一轮地把种子删光。闭锁状态在详情页展示；
+- 闭锁自愈：置位时记录的剩余空间若已明显小于当前剩余空间（相差 ≥ max(1GB, 当前的 5%)），
+  说明此前被判定的「没有释放」其实只是延迟兑现，自动解除暂停并记日志。
 
 磁盘剩余空间以容器内路径（默认 /downloads，对应宿主 /mnt/storage/media/downloads）为准；
 路径不存在或无权限时记录 error 日志 + 通知，本轮跳过、不删除任何东西。
@@ -76,7 +83,7 @@ class SpaceCleaner(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -128,6 +135,18 @@ class SpaceCleaner(_PluginBase):
 
     # 无进展护栏：连续这么多组删除后磁盘剩余空间都没有增加，就中止本轮（避免把种子删光）
     _NO_PROGRESS_LIMIT = 3
+    # 单组「无进展」判定的容忍下限（字节）：本轮累计增量低于「该下限」与
+    # 「本组去重后大小 * _NO_PROGRESS_RATIO」的较大者时，才算这一组无进展
+    # （容忍并发写入带来的其它增量与小文件噪声，避免误判）
+    _NO_PROGRESS_FLOOR = 200 * 1024 ** 2
+    _NO_PROGRESS_RATIO = 0.2
+    # 本轮累计已尝试释放量不足该值时不允许中止：小文件噪声不触发护栏，留待下一轮观察
+    _MIN_ABORT_RELEASE = 2 * 1024 ** 3
+    # 删除后等待文件系统「空间结算」的超时（秒）与轮询间隔（秒）
+    _SETTLE_TIMEOUT = 12.0
+    _SETTLE_INTERVAL = 2.0
+    # 结算等待的「已明显开始归还」判定上限（字节）：预期归还量的 50% 与该值取小
+    _SETTLE_EARLY_CAP = 2 * 1024 ** 3
 
     # ---- 运行时状态 ----
     # 「立即运行一次」的一次性调度器
@@ -252,13 +271,35 @@ class SpaceCleaner(_PluginBase):
         return {"delete_files": bool(self._delete_files), "monitor_path": self._monitor_path}
 
     def _latch_active(self) -> bool:
-        """当前是否处于「删除不释放空间」闭锁状态（配置未变化时才生效）。"""
+        """
+        当前是否处于「删除不释放空间」闭锁状态（配置未变化时才生效）。
+
+        自动解除的两条路径：
+        1. 用户已修改「同时删除文件」或「监控路径」——视为已修正配置；
+        2. 闭锁自愈：置位时记录的剩余空间比当前剩余空间小至少 max(1GB, 当前的 5%)，
+           说明此前被判定的「没有释放」其实只是延迟兑现（qBittorrent 删文件是异步的），
+           自动解除暂停，避免正常删除被长期误停。
+        """
         if not self._latch.get("active"):
             return False
         # 用户已修改「同时删除文件」或「监控路径」：视为已修正配置，自动解除闭锁
         if self._latch.get("signature") != self._latch_signature():
             self._clear_latch()
             return False
+        # 闭锁自愈：延迟释放已兑现（当前剩余空间明显高于置位时记录的剩余空间）-> 自动解除
+        usage = self._disk_usage(silent=True)
+        if usage:
+            current_gb = usage[1] / 1024 ** 3
+            recorded_gb = float(self._latch.get("free_gb") or 0.0)
+            tolerance_gb = max(1.0, current_gb * 0.05)
+            if recorded_gb and current_gb - recorded_gb >= tolerance_gb:
+                logger.info(
+                    f"{self.LOG_TAG}检测到此前删除的延迟释放已兑现：闭锁置位时剩余空间 "
+                    f"{recorded_gb:.1f} GB，当前已升至 {current_gb:.1f} GB"
+                    f"（相差 ≥ {tolerance_gb:.1f} GB），自动解除「删除未释放空间」暂停"
+                )
+                self._clear_latch()
+                return False
         return True
 
     def _set_latch(self, reason: str):
@@ -484,11 +525,15 @@ class SpaceCleaner(_PluginBase):
         逐组删除内容，每删一组重新检查剩余空间，达到停止阈值立即停止（绝不超删）。
 
         预演模式下不调用删除接口，用「初始剩余 + 去重后释放量」模拟剩余空间，
-        以便预览清理到哪一组会达到停止阈值。
+        以便预览清理到哪一组会达到停止阈值（预演不等待空间结算）。
 
-        额外护栏：若连续多组删除后剩余空间都没有增加（例如未开启「同时删除文件」、
-        媒体库是硬链接、监控路径不在下载文件所在分区），说明删种子并不能释放空间，
-        此时立即中止本轮（记错误 + 通知），避免把种子一路删光。
+        真实删除时，每次读完剩余空间先等一次「空间结算」（qBittorrent 删文件是异步的，
+        接口返回时空间尚未归还），再用于「停止阈值」与「无进展」判定，避免用删除瞬间的
+        瞬时读数误判为「没有释放空间」。
+
+        额外护栏：若连续多组删除、且「空间结算」后本轮剩余空间的累计增量仍明显不足
+        （例如未开启「同时删除文件」、媒体库是硬链接、监控路径不在下载文件所在分区），
+        说明删种子并不能释放空间，此时立即中止本轮（记错误 + 通知），避免把种子一路删光。
         """
         deleted_seeds = 0
         deleted_groups = 0
@@ -498,7 +543,6 @@ class SpaceCleaner(_PluginBase):
         reached = False
         aborted = False
         current_free = start_free
-        last_free = start_free
         no_progress = 0
         failed = 0
 
@@ -545,23 +589,29 @@ class SpaceCleaner(_PluginBase):
 
             # 每删一组重新检查剩余空间：达到停止阈值立即停止
             if self._dry_run:
-                # 预演模式：用去重后的释放量模拟，便于预估清理范围
+                # 预演模式：用去重后的释放量模拟，便于预估清理范围（不等待空间结算）
                 current_free = start_free + freed_dedup
             else:
-                usage = self._disk_usage(silent=True)
-                if usage:
-                    current_free = usage[1]
-                else:
+                # 删除后先等文件系统「空间结算」再判定（qBittorrent 异步删文件，接口返回时空间尚未归还）
+                current_free = self._read_free_settled(
+                    current_free, item["dedup_size"], self._SETTLE_TIMEOUT, self._SETTLE_INTERVAL
+                )
+                if self._disk_usage(silent=True) is None:
                     # 读不到空间时不继续删，避免超删
                     logger.error(f"{self.LOG_TAG}删除后读取剩余空间失败，本轮提前结束（避免超删）")
                     break
-                # 无进展护栏：连续多组删除后剩余空间一点没涨 -> 删种子并未释放空间，立即中止
-                no_progress = no_progress + 1 if current_free <= last_free else 0
-                last_free = current_free
-                if no_progress >= self._NO_PROGRESS_LIMIT:
+                # 无进展护栏（累计口径）：结算等待后「本轮剩余空间的累计增量」仍低于
+                # max(200MB, 本组去重后大小 * 20%) 才算这一组无进展；累计口径 + 容忍阈值
+                # 可以容忍并发写入与小文件噪声，不会被单次瞬时读数误判
+                increment = current_free - start_free
+                expected = max(self._NO_PROGRESS_FLOOR, int(item["dedup_size"] * self._NO_PROGRESS_RATIO))
+                no_progress = no_progress + 1 if increment < expected else 0
+                if no_progress >= self._NO_PROGRESS_LIMIT and freed_dedup >= self._MIN_ABORT_RELEASE:
                     aborted = True
                     reason = (
-                        f"已连续 {no_progress} 组删除后磁盘剩余空间没有增加。常见原因："
+                        f"已连续 {no_progress} 组删除、等待空间结算后磁盘剩余空间仍未明显增加"
+                        f"（本轮累计仅增加 {self._fmt_size(max(increment, 0))}，"
+                        f"已尝试释放 {self._fmt_size(freed_dedup)}）。常见原因："
                         "①未开启「同时删除文件」；②媒体库使用硬链接（删除下载侧文件不释放空间）；"
                         "③监控路径不在下载文件所在分区"
                     )
@@ -572,6 +622,14 @@ class SpaceCleaner(_PluginBase):
                     # 置位跨会话闭锁：避免下一轮定时任务继续一批一批地删种子
                     self._set_latch(reason)
                     break
+                if no_progress >= self._NO_PROGRESS_LIMIT:
+                    # 无进展组数够了，但本轮累计尝试释放量还不到 _MIN_ABORT_RELEASE：
+                    # 小文件噪声不触发护栏，继续观察后续组再决定是否中止
+                    logger.warning(
+                        f"{self.LOG_TAG}已连续 {no_progress} 组删除、等待空间结算后剩余空间仍未明显增加，"
+                        f"但本轮累计已尝试释放仅 {self._fmt_size(freed_dedup)}"
+                        f"（不足 {self._fmt_size(self._MIN_ABORT_RELEASE)}），暂不中止，继续观察"
+                    )
             if current_free / 1024 ** 3 >= self._target_gb:
                 reached = True
                 logger.info(
@@ -580,19 +638,26 @@ class SpaceCleaner(_PluginBase):
                 )
                 break
 
-        # 实际释放量 = 磁盘剩余空间前后差值（可能因其它进程写入而不精确，仅作参考）
+        # 实际释放量 = 磁盘剩余空间前后差值：统计前先等一次「空间结算」（最后一组可能仍在
+        # 异步归还中，不等待会少算释放量，也让下面的兜底护栏拿到结算后的真实读数）；
+        # 基准取本轮开始前的剩余空间、预期量取本轮去重后释放量：正常情况下本轮空间已归还，
+        # 第一次读取就满足条件、不会额外等待；
+        # 可能因其它进程写入而不精确，仅作参考
         freed_actual = 0
-        if not self._dry_run:
-            usage = self._disk_usage(silent=True)
-            if usage:
-                freed_actual = max(usage[1] - start_free, 0)
+        if not self._dry_run and deleted_groups:
+            current_free = self._read_free_settled(
+                start_free, freed_dedup, self._SETTLE_TIMEOUT, self._SETTLE_INTERVAL
+            )
+            freed_actual = max(current_free - start_free, 0)
 
         # 兜底：删了内容但磁盘一点都没释放、且未达到停止阈值 -> 与无进展护栏同因（硬链接等），
-        # 同样中止并置位闭锁（候选不足 3 组时上面的连续计数护栏不会触发，靠这里兜住）
-        if not self._dry_run and not aborted and not reached and deleted_groups and freed_actual <= 0:
+        # 同样中止并置位闭锁（候选不足 3 组时上面的连续计数护栏不会触发，靠这里兜住）；
+        # 累计尝试释放量不足 _MIN_ABORT_RELEASE 时不中止，小文件噪声不触发护栏
+        if (not self._dry_run and not aborted and not reached and deleted_groups
+                and freed_actual <= 0 and freed_dedup >= self._MIN_ABORT_RELEASE):
             aborted = True
             reason = (
-                f"已删除 {deleted_groups} 组内容，但监控路径的剩余空间没有增加。常见原因："
+                f"已删除 {deleted_groups} 组内容并等待空间结算后，监控路径的剩余空间仍未增加。常见原因："
                 "①未开启「同时删除文件」；②媒体库使用硬链接（删除下载侧文件不释放空间）；"
                 "③监控路径不在下载文件所在分区"
             )
@@ -922,6 +987,44 @@ class SpaceCleaner(_PluginBase):
         except Exception as err:
             return self._disk_error(f"读取磁盘空间失败：{path}（{err}）", silent)
         return int(usage.total), int(usage.free)
+
+    def _read_free_settled(self, base_free: int, expected_bytes: int,
+                           timeout: float = 12.0, interval: float = 2.0) -> int:
+        """
+        删除后等待文件系统「空间结算」，返回结算后的剩余空间（字节）。
+
+        qBittorrent 的 delete_torrents(delete_file=True) 是服务端异步删文件：接口返回后
+        文件系统空间尚未归还（大文件尤其明显），若立刻读取剩余空间就会被误判为
+        「删除未释放空间」。因此删除后轮询监控路径：一旦剩余空间 >= base_free +
+        min(expected_bytes * 0.5, 2GB)（说明已明显开始归还）就提前返回；否则每隔
+        interval 秒读一次，最多等 timeout 秒，返回最后一次读到的剩余空间。
+
+        base_free：删除前的剩余空间（字节）；
+        expected_bytes：本次删除预期归还的字节数（去重后大小）。
+        磁盘读取失败时返回 base_free（调用方按需自行判断是否继续）。
+        """
+        started = time.time()
+        target = base_free + min(max(int(expected_bytes or 0), 0) // 2, self._SETTLE_EARLY_CAP)
+        last_free = base_free
+        while True:
+            usage = self._disk_usage(silent=True)
+            if usage:
+                last_free = usage[1]
+                if last_free >= target:
+                    logger.info(
+                        f"{self.LOG_TAG}等待空间结算：预期归还 {self._fmt_size(expected_bytes)}，"
+                        f"删除后 {time.time() - started:.1f} 秒内已归还"
+                        f"（剩余空间 {base_free / 1024 ** 3:.1f} GB → {last_free / 1024 ** 3:.1f} GB）"
+                    )
+                    return last_free
+            if time.time() - started >= timeout:
+                logger.warning(
+                    f"{self.LOG_TAG}等待空间结算：预期归还 {self._fmt_size(expected_bytes)}，"
+                    f"删除后等待 {timeout:g} 秒超时仍未归还"
+                    f"（剩余空间 {base_free / 1024 ** 3:.1f} GB → {last_free / 1024 ** 3:.1f} GB）"
+                )
+                return last_free
+            time.sleep(interval)
 
     def _disk_error(self, message: str, silent: bool = False) -> None:
         """统一的路径/权限错误处理：记 error 日志、更新状态，（非 silent 时）发通知。"""
