@@ -100,5 +100,19 @@
         "history": {
             "v0.1.0": "首个版本：启动时自动检测宿主 Feishu._upload_remote_image 是否已修复（含 Referer/代理或改用 ImageHelper）——未修复则同进程打补丁，取图优先复用宿主 ImageHelper、回退自建下载器（豆瓣补 Referer 且不走代理，其它 URL 走 PROXY_HOST）；已修复则只提示、不动宿主；插件详情页显示当前状态；停用插件自动还原。"
         }
+    },
+    "NotifyFilter": {
+        "name": "通知过滤器",
+        "description": "按自定义正则规则拦截指定内容的通知：命中即不推送任何渠道，消息中心历史仍保留",
+        "labels": "工具",
+        "version": "0.1.0",
+        "icon": "https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/icons/contract.png",
+        "author": "Lyzd1",
+        "level": 1,
+        "release": true,
+        "system_version": ">=3.0.1",
+        "history": {
+            "v0.1.0": "首个版本：在宿主通知派发出口（NotificationMixin._dispatch_notification_steps / _async_dispatch_notification_steps）打补丁，按用户自定义的 Python 正则（忽略大小写）拦截通知内容——命中即不发送 NoticeMessage 事件、不投递任何渠道（飞书/TG/webhook 与第三方通知插件一并生效），消息中心历史仍由上游正常写入；支持限定标题/内容匹配范围与通知类型、非法正则自动跳过并在详情页列出；默认空规则且不启用，装好对现有行为零影响；停用插件自动还原宿主方法。"
+        }
     }
 }
