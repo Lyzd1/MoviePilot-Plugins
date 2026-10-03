@@ -1,7 +1,7 @@
 """歌手作品订阅（MusicArtistSubscribe）——MoviePilot v3 单文件插件。
 
 按用户配置的歌手名单，定期检查歌手在 MusicBrainz 上的新发行物
-（专辑 / EP / 单曲 / 原声带 / 现场 / 合辑），对落在「追新窗口」内的作品
+（专辑 / EP / 单曲），对落在「追新窗口」内的作品
 自动创建 MoviePilot 订阅。只追新发行，不回补历史。
 
 以下事实均已在宿主 moviepilot-v3 上核实，实现严格按此口径：
@@ -74,13 +74,16 @@ STATUS_LABELS: Dict[str, str] = {
 }
 
 # 订阅类型多选（值需与 MusicBrainz 浏览接口的 type 参数一致）
+#
+# 只保留主类型三项，与宿主前端艺术家页（mpfront 的 resources.vue 按
+# album / ep / single 拉取）保持一致。「原声带 / 现场 / 合辑」在 MusicBrainz 里
+# 是**附属标签（secondary type）而非并列类型**：按 soundtrack 检索返回的条目，
+# 其主类型仍是 EP / Single（实测 5 条全是），勾选 ep 时照样命中；compilation
+# 返回的条目主类型全是 Album。它们与前三项重复，故移除。
 ALBUM_TYPE_OPTIONS: List[Dict[str, str]] = [
     {"title": "专辑", "value": "album"},
     {"title": "EP", "value": "ep"},
     {"title": "单曲", "value": "single"},
-    {"title": "原声带", "value": "soundtrack"},
-    {"title": "现场", "value": "live"},
-    {"title": "合辑", "value": "compilation"},
 ]
 
 # 歌手名单输入提示
@@ -292,33 +295,23 @@ def normalize_album_types(value: Any) -> List[str]:
 
 def album_type_tokens(item: Any) -> Set[str]:
     """
-    取条目的全部类型标记（小写）：主类型 + 副类型。
+    取条目的类型标记（小写）：**只取主类型**，不再合并 ``secondary_types``。
 
-    MusicBrainz 按副类型检索时（``type=soundtrack`` / ``live`` / ``compilation``），
-    返回条目的 ``primary-type`` 仍是 ``Single`` / ``EP`` / ``Album``，真正的检索类型
-    落在 ``secondary_types`` 里。只比对主类型会让「原声带 / 现场 / 合辑」三项永不命中，
-    所以这里把两者合并成同一个标记集合。
+    取舍说明：MusicBrainz 的副类型（``Soundtrack`` / ``Live`` / ``Compilation`` 等）
+    是**附属标签而非并列类型**，取值里根本不含 album / ep / single，合并进来加不出
+    任何命中；而「原声带 / 现场 / 合辑」这类条目本身的主类型就是 Album / EP / Single，
+    勾选前三项时天然会被选中。删掉的是「把副类型当并列类型用」，不是排除这类条目——
+    例如《在暴雪时分》是 ``EP`` + ``Soundtrack``，勾选 ``ep`` 时靠主类型照样命中。
 
     :param item: 音乐条目（dict 或宿主对象）
-    :return: 小写的类型标记集合
+    :return: 小写的类型标记集合（主类型为空时是空集合）
     """
-    tokens: Set[str] = set()
     primary = str(field_of(item, "album_type") or "").strip().lower()
-    if primary:
-        tokens.add(primary)
-    secondary = field_of(item, "secondary_types") or []
-    if isinstance(secondary, str):
-        secondary = [secondary]
-    if isinstance(secondary, (list, tuple, set, frozenset)):
-        for part in secondary:
-            text = str(part or "").strip().lower()
-            if text:
-                tokens.add(text)
-    return tokens
+    return {primary} if primary else set()
 
 
 def matches_album_type(item: Any, allowed: Sequence[str]) -> bool:
-    """条目的主类型或副类型命中配置集合即算通过。"""
+    """条目的主类型命中配置集合即算通过（小写后单维比对）。"""
     if not allowed:
         return False
     return bool(album_type_tokens(item) & set(allowed))
@@ -399,7 +392,7 @@ class MusicArtistSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/icons/musicartistsubscribe.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -419,7 +412,6 @@ class MusicArtistSubscribe(_PluginBase):
         self._enabled = False
         self._onlyonce = False
         self._dry_run = True
-        self._notify = True
         self._cron = ""
         self._artists = ""
         self._album_types: List[str] = ["album", "ep"]
@@ -441,7 +433,6 @@ class MusicArtistSubscribe(_PluginBase):
         self._enabled = bool(config.get("enabled", False))
         self._onlyonce = bool(config.get("onlyonce", False))
         self._dry_run = bool(config.get("dry_run", True))
-        self._notify = bool(config.get("notify", True))
         self._cron = str(config.get("cron") or "").strip()
         self._artists = str(config.get("artists") or "")
         configured_types = config.get("album_types")
@@ -509,7 +500,6 @@ class MusicArtistSubscribe(_PluginBase):
                 "enabled": self._enabled,
                 "onlyonce": self._onlyonce,
                 "dry_run": self._dry_run,
-                "notify": self._notify,
                 "cron": self._cron,
                 "artists": self._artists,
                 "album_types": self._album_types,
@@ -860,7 +850,8 @@ class MusicArtistSubscribe(_PluginBase):
                 music_type="album",
                 exist_ok=True,
                 username=self.plugin_name,
-                message=self._notify,
+                # 用户明确要求本插件不发送订阅通知，固定关闭（不做成配置项）
+                message=False,
             )
         except Exception as err:
             logger.error(f"歌手作品订阅：添加订阅异常 {artist} - {title}：{err}")
@@ -1019,7 +1010,7 @@ class MusicArtistSubscribe(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VSwitch",
@@ -1034,7 +1025,7 @@ class MusicArtistSubscribe(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VSwitch",
@@ -1049,7 +1040,7 @@ class MusicArtistSubscribe(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VSwitch",
@@ -1057,21 +1048,6 @@ class MusicArtistSubscribe(_PluginBase):
                                             "model": "dry_run",
                                             "label": "预演模式",
                                             "hint": "只识别、筛选并记录将要订阅的清单，不真正创建订阅",
-                                            "persistent-hint": True,
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "notify",
-                                            "label": "发送订阅通知",
-                                            "hint": "创建订阅时是否发送通知",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -1190,7 +1166,8 @@ class MusicArtistSubscribe(_PluginBase):
                                             "items": ALBUM_TYPE_OPTIONS,
                                             "multiple": True,
                                             "chips": True,
-                                            "hint": "音乐以 release-group 为单位订阅；原声带/现场/合辑按副类型匹配",
+                                            "hint": "音乐以 release-group 为单位订阅；按 MusicBrainz 主类型匹配"
+                                                    "（专辑/EP/单曲），与宿主前端艺术家页一致",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -1254,7 +1231,6 @@ class MusicArtistSubscribe(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "dry_run": True,
-            "notify": True,
             "cron": "0 */6 * * *",
             "artists": "",
             "album_types": ["album", "ep"],
@@ -1269,7 +1245,12 @@ class MusicArtistSubscribe(_PluginBase):
     # 详情页
     # ------------------------------------------------------------------ #
     def get_page(self) -> List[dict]:
-        """返回插件详情页：统计卡 + 歌手解析结果 + 已订阅历史表。"""
+        """
+        返回插件详情页：统计卡 + 按歌手分组的订阅情况。
+
+        不再有独立的「已订阅历史」区块：解析结果与订阅记录按歌手合并成一块，
+        每位歌手一个分组（解析行只占一行），组内列出该歌手订阅到的作品。
+        """
         history = self.get_data(KEY_HISTORY)
         history = history if isinstance(history, list) else []
         handled = self.get_data(KEY_HANDLED)
@@ -1278,9 +1259,18 @@ class MusicArtistSubscribe(_PluginBase):
         resolved = resolved if isinstance(resolved, list) else []
         last_run = self.get_data(KEY_LAST_RUN) or "尚未运行"
 
-        subscribed = sum(1 for item in history if item.get("status") == STATUS_SUBSCRIBED)
-        dry_run = sum(1 for item in history if item.get("status") == STATUS_DRY_RUN)
-        failed = sum(1 for item in history if item.get("status") == STATUS_FAILED)
+        subscribed = sum(
+            1 for item in history
+            if isinstance(item, dict) and item.get("status") == STATUS_SUBSCRIBED
+        )
+        dry_run = sum(
+            1 for item in history
+            if isinstance(item, dict) and item.get("status") == STATUS_DRY_RUN
+        )
+        failed = sum(
+            1 for item in history
+            if isinstance(item, dict) and item.get("status") == STATUS_FAILED
+        )
 
         page: List[dict] = [
             {
@@ -1295,43 +1285,12 @@ class MusicArtistSubscribe(_PluginBase):
             }
         ]
 
-        page.append({
-            "component": "VCard",
-            "props": {"variant": "tonal", "class": "mb-2"},
-            "content": [
-                {
-                    "component": "VCardTitle",
-                    "props": {"class": "text-subtitle-1"},
-                    "text": f"歌手解析结果（{len(resolved)} 位）",
-                },
-                {
-                    "component": "VCardText",
-                    "content": (
-                        [self.__artist_row(item) for item in resolved]
-                        if resolved else [self.__text_line(
-                            "还没有解析结果。填好「歌手名单」并启用插件后运行一次，"
-                            "这里会显示每位歌手实际采用的 MusicBrainz 艺术家。"
-                        )]
-                    ),
-                },
-            ],
-        })
-
-        page.append({
-            "component": "VCard",
-            "props": {"variant": "tonal", "class": "mb-2"},
-            "content": [
-                {
-                    "component": "VCardTitle",
-                    "props": {"class": "text-subtitle-1"},
-                    "text": f"已订阅历史（{len(history)} 条，新在前）",
-                },
-                {
-                    "component": "VCardText",
-                    "content": self.__history_content(history),
-                },
-            ],
-        })
+        groups = self.__artist_groups(resolved, history)
+        if groups:
+            for group in groups:
+                page.append(self.__artist_group_card(group))
+        else:
+            page.append(self.__empty_card())
 
         if self._dry_run:
             page.append({
@@ -1340,11 +1299,293 @@ class MusicArtistSubscribe(_PluginBase):
                     "type": "warning",
                     "variant": "tonal",
                     "style": "white-space: pre-line;",
-                    "text": "当前处于预演模式：命中的作品只记录在历史里，不会真正创建订阅。"
+                    "text": "当前处于预演模式：命中的作品只记录在分组里，不会真正创建订阅。"
                             "确认清单无误后，请在配置里关闭「预演模式」。",
                 },
             })
         return page
+
+    def __artist_groups(self, resolved: List[Any], history: List[Any]) -> List[dict]:
+        """
+        按歌手把「解析结果」与「订阅记录」合并成展示分组。
+
+        归组键取解析记录的展示名（``name`` 优先，回退 ``config_name``）；历史记录的
+        ``artist`` 字段写的就是这个展示名（见 ``__run_once_inner`` 的 ``artist_label``），
+        两者天然一致，无需额外存键。先按配置/解析顺序排列，再补上只出现在历史里的
+        （老记录里的）歌手，确保每位处理过的歌手都有一组。
+
+        :param resolved: ``artists_resolved`` 里的解析记录
+        :param history: ``history`` 里的订阅记录
+        :return: ``[{"key", "record", "entries"}, ...]``
+        """
+        groups: List[dict] = []
+        index: Dict[str, dict] = {}
+        for record in resolved:
+            if not isinstance(record, dict):
+                continue
+            key = str(record.get("name") or record.get("config_name") or "").strip()
+            if not key or key in index:
+                continue
+            group = {"key": key, "record": record, "entries": []}
+            index[key] = group
+            groups.append(group)
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("artist") or "").strip() or "未知歌手"
+            group = index.get(key)
+            if group is None:
+                group = {"key": key, "record": None, "entries": []}
+                index[key] = group
+                groups.append(group)
+            group["entries"].append(entry)
+        for group in groups:
+            group["entries"].sort(
+                key=lambda item: str(item.get("time") or ""), reverse=True
+            )
+        return groups
+
+    def __artist_group_card(self, group: dict) -> dict:
+        """构造一位歌手的分组卡片：解析行（一行）+ 异常提示 + 该歌手的作品清单。"""
+        record = group.get("record") or {}
+        entries: List[dict] = group.get("entries") or []
+
+        counts = {
+            status: sum(1 for item in entries if item.get("status") == status)
+            for status in STATUS_LABELS
+        }
+        summary = (
+            f"已订阅 {counts.get(STATUS_SUBSCRIBED, 0)} · "
+            f"预演 {counts.get(STATUS_DRY_RUN, 0)} · "
+            f"失败 {counts.get(STATUS_FAILED, 0)}"
+        )
+
+        content: List[dict] = [self.__artist_header(group, record, summary)]
+        issue = self.__artist_issue(record)
+        if issue:
+            content.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "warning",
+                    "variant": "tonal",
+                    "density": "compact",
+                    "class": "text-caption mb-2",
+                    "style": "white-space: pre-line;",
+                    "text": issue,
+                },
+            })
+        content.append({"component": "VDivider", "props": {"class": "my-2"}})
+        if entries:
+            for entry in entries:
+                content.append(self.__work_row(entry))
+        else:
+            content.append(self.__text_line("暂无记录", "text-caption text-medium-emphasis py-1"))
+
+        return {
+            "component": "VCard",
+            "props": {"variant": "tonal", "class": "mb-2"},
+            "content": content,
+        }
+
+    def __artist_header(self, group: dict, record: dict, summary: str) -> dict:
+        """
+        构造歌手分组的一行标题：``配置名 → 解析名（国家 · 类型）`` + 状态 chip
+        + 可点击的艺术家 ID/链接 + 计数摘要。
+
+        正常情况（精确同名唯一命中 / 已按 ID 锁定）只用一个极短 chip 表示，
+        不再占用整行文字；异常情况由 ``__artist_issue`` 单独以 warning 醒目提示。
+        """
+        name = str(group.get("key") or "未知歌手")
+        config_name = str(record.get("config_name") or "") if record else ""
+        media_id = str(record.get("media_id") or "") if record else ""
+        country = str(record.get("country") or "未知") if record else ""
+        artist_type = str(record.get("artist_type") or "未知") if record else ""
+
+        if record and media_id:
+            # 配置名与解析名一致时省略箭头，避免「许嵩 → 许嵩」这类冗余
+            if config_name and normalize_name(config_name) != normalize_name(name):
+                head = f"{config_name} → {name}（{country} · {artist_type}）"
+            else:
+                head = f"{name}（{country} · {artist_type}）"
+        elif record:
+            head = f"{config_name or name} → 未解析到艺术家"
+        else:
+            head = name
+
+        nodes: List[dict] = [
+            {"component": "span", "props": {"class": "text-subtitle-2"}, "text": head},
+        ]
+        if record:
+            if record.get("locked"):
+                nodes.append(self.__chip("已按ID锁定", "info"))
+            elif record.get("exact_match") and not record.get("multiple"):
+                nodes.append(self.__chip("精确匹配", "success"))
+        if media_id:
+            link = str(record.get("detail_link") or "") or self.__artist_link(media_id)
+            nodes.append({
+                "component": "a",
+                "props": {
+                    "href": link,
+                    "target": "_blank",
+                    "class": "text-caption text-medium-emphasis",
+                },
+                "text": media_id,
+            })
+        nodes.append({
+            "component": "span",
+            "props": {"class": "text-caption text-medium-emphasis ml-auto"},
+            "text": summary,
+        })
+        return {
+            "component": "div",
+            "props": {"class": "d-flex align-center flex-wrap ga-2"},
+            "content": nodes,
+        }
+
+    @staticmethod
+    def __chip(text: str, color: str) -> dict:
+        """构造一个极短标记用的 chip（如「已按ID锁定」「精确匹配」）。"""
+        return {
+            "component": "VChip",
+            "props": {
+                "size": "x-small",
+                "color": color,
+                "variant": "tonal",
+                "label": True,
+            },
+            "text": text,
+        }
+
+    @staticmethod
+    def __artist_issue(record: dict) -> str:
+        """
+        判断解析结果是否需要**显眼提示**，返回说明文字；正常情况返回空串。
+
+        正常情况（精确同名唯一命中 / 已按 ID 锁定）不再单独用一行文字重复说明；
+        只有以下异常才返回文案，由调用方用 warning 配色醒目展示：
+        未解析到艺术家ID、多个同名候选、无精确同名匹配、搜索失败。
+        """
+        if not isinstance(record, dict):
+            return ""
+        note = str(record.get("note") or "").strip()
+        media_id = str(record.get("media_id") or "").strip()
+        if not media_id:
+            return note or "未解析到艺术家ID，已跳过"
+        if record.get("multiple"):
+            return note or "存在多个同名候选，如订错请改用「名字@艺术家ID」锁定"
+        if record.get("locked"):
+            return ""
+        if not record.get("exact_match"):
+            return note or "无精确同名匹配，如订错请改用「名字@艺术家ID」锁定"
+        return ""
+
+    def __work_row(self, item: dict) -> dict:
+        """
+        一位歌手名下的一条作品记录（紧凑一行）。
+
+        标题即 MusicBrainz release-group 详情链接；后面内联「类型 · 发行日期 ·
+        处理结果 · 处理时间」。订阅失败时把 ``message`` 里的错误原因一并显示。
+        """
+        title = str(item.get("title") or "")
+        detail_link = str(item.get("detail_link") or "")
+        album_type = str(item.get("album_type") or "专辑")
+        release_date = str(item.get("release_date") or "无日期")
+        status = str(item.get("status") or "")
+        status_label = STATUS_LABELS.get(status, status or "未知")
+        message = str(item.get("message") or "")
+        handle_time = str(item.get("time") or "")
+
+        title_node: dict
+        if detail_link:
+            title_node = {
+                "component": "a",
+                "props": {"href": detail_link, "target": "_blank"},
+                "text": title,
+            }
+        else:
+            title_node = {"component": "span", "text": title}
+
+        status_class = {
+            STATUS_SUBSCRIBED: "text-caption text-success",
+            STATUS_DRY_RUN: "text-caption text-warning",
+            STATUS_FAILED: "text-caption text-error",
+        }.get(status, "text-caption")
+
+        meta: List[dict] = [
+            {
+                "component": "span",
+                "props": {"class": "text-caption text-medium-emphasis"},
+                "text": f" · {album_type} · {release_date} · ",
+            },
+            {"component": "span", "props": {"class": status_class}, "text": status_label},
+        ]
+        if status == STATUS_FAILED and message:
+            meta.append({
+                "component": "span",
+                "props": {"class": "text-caption text-error"},
+                "text": f"：{message}",
+            })
+        if handle_time:
+            meta.append({
+                "component": "span",
+                "props": {"class": "text-caption text-medium-emphasis"},
+                "text": f" · {handle_time}",
+            })
+
+        unique = item.get("unique") or history_unique(title, item.get("media_id"))
+        return {
+            "component": "VRow",
+            "props": {"class": "align-center py-1"},
+            "content": [
+                {
+                    "component": "VCol",
+                    "props": {"cols": 10, "md": 11, "class": "text-body-2"},
+                    "content": [title_node, *meta],
+                },
+                {
+                    "component": "VCol",
+                    "props": {"cols": 2, "md": 1, "class": "text-right"},
+                    "content": [
+                        {
+                            "component": "VBtn",
+                            "props": {
+                                "size": "small",
+                                "variant": "tonal",
+                                "color": "error",
+                                "text": "删除",
+                            },
+                            "events": {
+                                "click": {
+                                    "api": f"plugin/{self.__class__.__name__}/delete_history",
+                                    "method": "get",
+                                    "params": {"key": unique},
+                                }
+                            },
+                        }
+                    ],
+                },
+            ],
+        }
+
+    def __empty_card(self) -> dict:
+        """还没有任何分组时的空态卡片（未配置歌手 / 尚未运行过，各一句）。"""
+        configured = parse_artist_entries(getattr(self, "_artists", "") or "")
+        if configured:
+            message = (
+                "尚未运行过：启用插件并运行一次后，这里会按歌手列出各自的订阅作品。"
+            )
+        else:
+            message = "还没有配置歌手：请在配置页填写「歌手名单」并启用插件。"
+        return {
+            "component": "VCard",
+            "props": {"variant": "tonal", "class": "mb-2"},
+            "content": [
+                {
+                    "component": "VCardText",
+                    "content": [self.__text_line(message)],
+                },
+            ],
+        }
 
     @staticmethod
     def __stat_card(label: str, value: Any) -> dict:
@@ -1379,219 +1620,4 @@ class MusicArtistSubscribe(_PluginBase):
             "component": "div",
             "props": {"class": css_class},
             "text": text,
-        }
-
-    def __artist_row(self, item: dict) -> dict:
-        """构造「歌手解析结果」中的一行。"""
-        if not isinstance(item, dict):
-            return self.__text_line(str(item))
-        name = item.get("name") or item.get("config_name") or "未知"
-        config_name = item.get("config_name") or ""
-        country = item.get("country") or "未知"
-        artist_type = item.get("artist_type") or "未知"
-        media_id = str(item.get("media_id") or "")
-        note = item.get("note") or ""
-        candidates = int(item.get("candidate_count") or 0)
-
-        rows: List[dict] = [
-            self.__text_line(
-                f"配置名：{config_name} → 解析名：{name}"
-                f"（{country} / {artist_type}）"
-                + ("｜已按 ID 锁定" if item.get("locked") else f"｜候选 {candidates} 个")
-            ),
-            self.__text_line(f"艺术家ID：{media_id or '未解析到'}", "text-caption"),
-        ]
-        if note:
-            css_class = "text-caption text-warning" if not item.get("exact_match") or candidates > 1 else "text-caption"
-            rows.append(self.__text_line(note, css_class))
-        detail_link = item.get("detail_link") or self.__artist_link(media_id)
-        if detail_link:
-            rows.append({
-                "component": "a",
-                "props": {"href": detail_link, "target": "_blank", "class": "text-caption"},
-                "text": detail_link,
-            })
-        rows.append({
-            "component": "VDivider",
-            "props": {"class": "my-2"},
-        })
-        return {"component": "div", "content": rows}
-
-    def __history_content(self, history: List[dict]) -> List[dict]:
-        """构造「已订阅历史」表格内容（表头 + 每行一条记录，行尾带删除按钮）。"""
-        if not history:
-            return [self.__text_line(
-                "还没有历史记录。启用插件并运行一次后，命中的新发行会出现在这里；"
-                "预演模式下记录的状态为「预演（未订阅）」。"
-            )]
-
-        contents: List[dict] = [self.__history_header()]
-        for item in sorted(
-                (entry for entry in history if isinstance(entry, dict)),
-                key=lambda entry: str(entry.get("time") or ""),
-                reverse=True,
-        ):
-            contents.append(self.__history_row(item))
-        return contents
-
-    @staticmethod
-    def __history_header() -> dict:
-        """历史表格的表头行。"""
-        titles = ["封面", "标题", "类型", "歌手", "发行日期", "处理结果", "时间", "操作"]
-        return {
-            "component": "VRow",
-            "props": {"class": "text-caption font-weight-bold d-none d-md-flex"},
-            "content": [
-                {
-                    "component": "VCol",
-                    "props": {"cols": 2, "md": 1},
-                    "text": titles[0],
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 10, "md": 3},
-                    "text": titles[1],
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 6, "md": 1},
-                    "text": titles[2],
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 6, "md": 2},
-                    "text": titles[3],
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 6, "md": 2},
-                    "text": titles[4],
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 6, "md": 1},
-                    "text": titles[5],
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 6, "md": 1},
-                    "text": titles[6],
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 6, "md": 1},
-                    "text": titles[7],
-                },
-            ],
-        }
-
-    def __history_row(self, item: dict) -> dict:
-        """历史表格的一条记录行（含封面与删除按钮）。"""
-        title = str(item.get("title") or "")
-        cover_url = str(item.get("cover_url") or "")
-        detail_link = str(item.get("detail_link") or "")
-        status = str(item.get("status") or "")
-        status_label = STATUS_LABELS.get(status, status or "未知")
-        message = str(item.get("message") or "")
-        if status == STATUS_FAILED and message:
-            status_label = f"{status_label}：{message}"
-
-        cover: dict
-        if cover_url:
-            cover = {
-                "component": "VImg",
-                "props": {
-                    "src": cover_url,
-                    "height": 56,
-                    "width": 56,
-                    "aspect-ratio": "1/1",
-                    "class": "object-cover shadow ring-gray-500",
-                    "cover": True,
-                },
-            }
-        else:
-            cover = {
-                "component": "VAvatar",
-                "props": {"size": 48, "variant": "tonal"},
-                "content": [
-                    {
-                        "component": "VIcon",
-                        "props": {"icon": "mdi-album"},
-                    }
-                ],
-            }
-
-        title_node: dict
-        if detail_link:
-            title_node = {
-                "component": "a",
-                "props": {"href": detail_link, "target": "_blank"},
-                "text": title,
-            }
-        else:
-            title_node = {"component": "span", "text": title}
-
-        unique = item.get("unique") or history_unique(title, item.get("media_id"))
-        return {
-            "component": "VRow",
-            "props": {"class": "align-center border-b py-2"},
-            "content": [
-                {
-                    "component": "VCol",
-                    "props": {"cols": 2, "md": 1},
-                    "content": [cover],
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 10, "md": 3, "class": "text-body-2"},
-                    "content": [title_node],
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 6, "md": 1, "class": "text-body-2"},
-                    "text": str(item.get("album_type") or "专辑"),
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 6, "md": 2, "class": "text-body-2"},
-                    "text": str(item.get("artist") or ""),
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 6, "md": 2, "class": "text-body-2"},
-                    "text": str(item.get("release_date") or ""),
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 6, "md": 1, "class": "text-body-2"},
-                    "text": status_label,
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 6, "md": 1, "class": "text-caption"},
-                    "text": str(item.get("time") or ""),
-                },
-                {
-                    "component": "VCol",
-                    "props": {"cols": 6, "md": 1},
-                    "content": [
-                        {
-                            "component": "VBtn",
-                            "props": {
-                                "size": "small",
-                                "variant": "tonal",
-                                "color": "error",
-                                "text": "删除",
-                            },
-                            "events": {
-                                "click": {
-                                    "api": f"plugin/{self.__class__.__name__}/delete_history",
-                                    "method": "get",
-                                    "params": {"key": unique},
-                                }
-                            },
-                        }
-                    ],
-                },
-            ],
         }
