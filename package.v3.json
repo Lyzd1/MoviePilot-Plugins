@@ -119,13 +119,14 @@
         "name": "歌手作品订阅",
         "description": "按歌手自动订阅 MusicBrainz 上新增的专辑、EP 与单曲（只追新发行，不回补历史）",
         "labels": "订阅",
-        "version": "1.0.1",
+        "version": "1.0.2",
         "icon": "https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/icons/musicartistsubscribe.png",
         "author": "Lyzd1",
         "level": 1,
         "release": true,
         "system_version": ">=3.0.1",
         "history": {
+            "v1.0.2": "详情页显示优化：标题行只留歌手名（去掉国家/类型括号）、艺术家ID 只显示前 8 位（仍可点击）、去掉「精确匹配」标记；记录行与卡片适配窄屏不再被裁切；移除「最近运行」统计卡",
             "v1.0.1": "订阅类型收敛为与宿主前端一致的 专辑/EP/单曲（原声带/现场/合辑属 MusicBrainz 附属标签，与前三项重复，已移除）；详情页改为按歌手分组展示其订阅作品、精简歌手解析信息；取消订阅通知（不再发送通知）",
             "v1.0.0": "首个版本：按歌手名单定时检查 MusicBrainz 新发行（专辑/EP/单曲等），支持类型多选、发行年份下限、追新窗口与提前订阅、预演模式、同名候选提醒"
         }

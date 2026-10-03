@@ -67,11 +67,18 @@ STATUS_DRY_RUN = "dry_run"
 STATUS_FAILED = "failed"
 
 # 状态 -> 中文标签
+#
+# 「预演」二字已足够区分（预演不会真正建订阅），不再缀「（未订阅）」——
+# 窄屏下记录行本来就紧张，短标签能少一次折行。
 STATUS_LABELS: Dict[str, str] = {
     STATUS_SUBSCRIBED: "已订阅",
-    STATUS_DRY_RUN: "预演（未订阅）",
+    STATUS_DRY_RUN: "预演",
     STATUS_FAILED: "订阅失败",
 }
+
+# 详情页展示艺术家ID 时保留的前缀长度，超出部分用「…」省略。
+# 完整 ID 仍留在链接地址（href 指向 MusicBrainz 详情页）里，需要时可复制。
+ARTIST_ID_DISPLAY_LEN = 8
 
 # 订阅类型多选（值需与 MusicBrainz 浏览接口的 type 参数一致）
 #
@@ -382,6 +389,24 @@ def clamp_days(value: Any, default: int) -> int:
     return max(0, parsed)
 
 
+def short_artist_id(artist_id: Any, keep: int = ARTIST_ID_DISPLAY_LEN) -> str:
+    """
+    艺术家ID 的**展示**用法：只留前 ``keep`` 位，其余用「…」省略。
+
+    整串 UUID 铺在详情页里又长又占宽，用户只需前几位就能分辨是哪位歌手；
+    完整 ID 仍然保留在链接地址里，点开或复制链接即可拿到，故此处只截断显示。
+    比 ``keep`` 还短的值原样返回，不画蛇添足地加省略号。
+
+    :param artist_id: 完整的 MusicBrainz 艺术家ID
+    :param keep: 保留的前缀长度
+    :return: 截断后的展示文本
+    """
+    text = str(artist_id or "")
+    if len(text) <= keep:
+        return text
+    return text[:keep] + "…"
+
+
 class MusicArtistSubscribe(_PluginBase):
     """按歌手名单定时检查 MusicBrainz 新发行并创建订阅。"""
 
@@ -392,7 +417,7 @@ class MusicArtistSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/icons/musicartistsubscribe.png"
     # 插件版本
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -1257,7 +1282,6 @@ class MusicArtistSubscribe(_PluginBase):
         handled = handled if isinstance(handled, list) else []
         resolved = self.get_data(KEY_ARTISTS_RESOLVED)
         resolved = resolved if isinstance(resolved, list) else []
-        last_run = self.get_data(KEY_LAST_RUN) or "尚未运行"
 
         subscribed = sum(
             1 for item in history
@@ -1280,7 +1304,6 @@ class MusicArtistSubscribe(_PluginBase):
                     self.__stat_card("已订阅", subscribed),
                     self.__stat_card("预演", dry_run),
                     self.__stat_card("订阅失败", failed),
-                    self.__stat_card("最近运行", str(last_run)),
                 ],
             }
         ]
@@ -1383,30 +1406,39 @@ class MusicArtistSubscribe(_PluginBase):
 
         return {
             "component": "VCard",
-            "props": {"variant": "tonal", "class": "mb-2"},
+            # px-3 给内容统一的左右内边距：窄屏上标题行与记录行都不再贴着卡片边缘，
+            # 右侧那一列也不会因为贴边而被裁掉。
+            "props": {"variant": "tonal", "class": "mb-2 px-3 py-2"},
             "content": content,
         }
 
     def __artist_header(self, group: dict, record: dict, summary: str) -> dict:
         """
-        构造歌手分组的一行标题：``配置名 → 解析名（国家 · 类型）`` + 状态 chip
-        + 可点击的艺术家 ID/链接 + 计数摘要。
+        构造歌手分组的两行标题。
 
-        正常情况（精确同名唯一命中 / 已按 ID 锁定）只用一个极短 chip 表示，
-        不再占用整行文字；异常情况由 ``__artist_issue`` 单独以 warning 醒目提示。
+        第一行：**只有歌手名**（配置名与解析名不同才显示 ``配置名 → 解析名``）
+        + 「已按ID锁定」chip（只在你手动钉了 ID 时出现）+ 截断后可点击的艺术家ID。
+        国家/类型这类括号内容、以及「精确匹配」chip（绝大多数歌手都会命中，
+        属于噪音还占宽度）都不再显示；解析异常由 ``__artist_issue`` 单独 warning 提示。
+
+        第二行：计数摘要（``已订阅 x · 预演 y · 失败 z``）。放在标题行下面而不是
+        用 ``ml-auto`` 挤在行尾，窄屏上就不会和艺术家ID 争宽导致截断。
+
+        :param group: 分组字典（``key`` 为歌手展示名）
+        :param record: 该歌手的解析记录（可能为空）
+        :param summary: 计数摘要文本
+        :return: 标题行节点
         """
         name = str(group.get("key") or "未知歌手")
         config_name = str(record.get("config_name") or "") if record else ""
         media_id = str(record.get("media_id") or "") if record else ""
-        country = str(record.get("country") or "未知") if record else ""
-        artist_type = str(record.get("artist_type") or "未知") if record else ""
 
         if record and media_id:
             # 配置名与解析名一致时省略箭头，避免「许嵩 → 许嵩」这类冗余
             if config_name and normalize_name(config_name) != normalize_name(name):
-                head = f"{config_name} → {name}（{country} · {artist_type}）"
+                head = f"{config_name} → {name}"
             else:
-                head = f"{name}（{country} · {artist_type}）"
+                head = name
         elif record:
             head = f"{config_name or name} → 未解析到艺术家"
         else:
@@ -1415,12 +1447,10 @@ class MusicArtistSubscribe(_PluginBase):
         nodes: List[dict] = [
             {"component": "span", "props": {"class": "text-subtitle-2"}, "text": head},
         ]
-        if record:
-            if record.get("locked"):
-                nodes.append(self.__chip("已按ID锁定", "info"))
-            elif record.get("exact_match") and not record.get("multiple"):
-                nodes.append(self.__chip("精确匹配", "success"))
+        if record and record.get("locked"):
+            nodes.append(self.__chip("已按ID锁定", "info"))
         if media_id:
+            # href 仍是完整 ID 的 MusicBrainz 页面，只把「显示文本」截断
             link = str(record.get("detail_link") or "") or self.__artist_link(media_id)
             nodes.append({
                 "component": "a",
@@ -1429,22 +1459,28 @@ class MusicArtistSubscribe(_PluginBase):
                     "target": "_blank",
                     "class": "text-caption text-medium-emphasis",
                 },
-                "text": media_id,
+                "text": short_artist_id(media_id),
             })
-        nodes.append({
-            "component": "span",
-            "props": {"class": "text-caption text-medium-emphasis ml-auto"},
-            "text": summary,
-        })
         return {
             "component": "div",
             "props": {"class": "d-flex align-center flex-wrap ga-2"},
-            "content": nodes,
+            "content": [
+                {
+                    "component": "div",
+                    "props": {"class": "d-flex align-center flex-wrap ga-2"},
+                    "content": nodes,
+                },
+                {
+                    "component": "div",
+                    "props": {"class": "text-caption text-medium-emphasis"},
+                    "text": summary,
+                },
+            ],
         }
 
     @staticmethod
     def __chip(text: str, color: str) -> dict:
-        """构造一个极短标记用的 chip（如「已按ID锁定」「精确匹配」）。"""
+        """构造一个极短标记用的 chip（本插件目前只用于「已按ID锁定」）。"""
         return {
             "component": "VChip",
             "props": {
@@ -1481,10 +1517,12 @@ class MusicArtistSubscribe(_PluginBase):
 
     def __work_row(self, item: dict) -> dict:
         """
-        一位歌手名下的一条作品记录（紧凑一行）。
+        一位歌手名下的一条作品记录（紧凑一行，窄屏可折行）。
 
-        标题即 MusicBrainz release-group 详情链接；后面内联「类型 · 发行日期 ·
-        处理结果 · 处理时间」。订阅失败时把 ``message`` 里的错误原因一并显示。
+        标题即 MusicBrainz release-group 详情链接；后面依次是「类型 / 发行日期 /
+        处理结果 / 处理时间」，订阅失败时补上 ``message`` 里的错误原因。
+        各项各自是独立节点、由 flex 间隙分隔（不再用固定列宽的 ``VCol`` 硬挤），
+        外层 ``flex-wrap``：窄屏上折行而不是被裁掉右半截。
         """
         title = str(item.get("title") or "")
         detail_link = str(item.get("detail_link") or "")
@@ -1512,60 +1550,52 @@ class MusicArtistSubscribe(_PluginBase):
         }.get(status, "text-caption")
 
         meta: List[dict] = [
-            {
-                "component": "span",
-                "props": {"class": "text-caption text-medium-emphasis"},
-                "text": f" · {album_type} · {release_date} · ",
-            },
-            {"component": "span", "props": {"class": status_class}, "text": status_label},
+            self.__span(album_type, "text-caption text-medium-emphasis"),
+            self.__span(release_date, "text-caption text-medium-emphasis"),
+            self.__span(status_label, status_class),
         ]
         if status == STATUS_FAILED and message:
-            meta.append({
-                "component": "span",
-                "props": {"class": "text-caption text-error"},
-                "text": f"：{message}",
-            })
+            meta.append(self.__span(message, "text-caption text-error"))
         if handle_time:
-            meta.append({
-                "component": "span",
-                "props": {"class": "text-caption text-medium-emphasis"},
-                "text": f" · {handle_time}",
-            })
+            meta.append(self.__span(handle_time, "text-caption text-medium-emphasis"))
 
         unique = item.get("unique") or history_unique(title, item.get("media_id"))
         return {
-            "component": "VRow",
-            "props": {"class": "align-center py-1"},
+            "component": "div",
+            # 外层 flex-wrap：空间不够时「删除」按钮整块换到下一行，绝不横向溢出
+            "props": {"class": "d-flex flex-wrap align-center ga-2 py-1"},
             "content": [
                 {
-                    "component": "VCol",
-                    "props": {"cols": 10, "md": 11, "class": "text-body-2"},
+                    "component": "div",
+                    # 内层同样 flex-wrap：标题与各元信息之间可以自由折行
+                    "props": {
+                        "class": "d-flex flex-wrap align-center ga-2 text-body-2 flex-grow-1",
+                    },
                     "content": [title_node, *meta],
                 },
                 {
-                    "component": "VCol",
-                    "props": {"cols": 2, "md": 1, "class": "text-right"},
-                    "content": [
-                        {
-                            "component": "VBtn",
-                            "props": {
-                                "size": "small",
-                                "variant": "tonal",
-                                "color": "error",
-                                "text": "删除",
-                            },
-                            "events": {
-                                "click": {
-                                    "api": f"plugin/{self.__class__.__name__}/delete_history",
-                                    "method": "get",
-                                    "params": {"key": unique},
-                                }
-                            },
+                    "component": "VBtn",
+                    "props": {
+                        "size": "small",
+                        "variant": "tonal",
+                        "color": "error",
+                        "text": "删除",
+                    },
+                    "events": {
+                        "click": {
+                            "api": f"plugin/{self.__class__.__name__}/delete_history",
+                            "method": "get",
+                            "params": {"key": unique},
                         }
-                    ],
+                    },
                 },
             ],
         }
+
+    @staticmethod
+    def __span(text: str, css_class: str = "text-caption text-medium-emphasis") -> dict:
+        """构造一个内联文本节点（用于记录行的元信息）。"""
+        return {"component": "span", "props": {"class": css_class}, "text": text}
 
     def __empty_card(self) -> dict:
         """还没有任何分组时的空态卡片（未配置歌手 / 尚未运行过，各一句）。"""
@@ -1589,10 +1619,15 @@ class MusicArtistSubscribe(_PluginBase):
 
     @staticmethod
     def __stat_card(label: str, value: Any) -> dict:
-        """构造统计小卡片。"""
+        """
+        构造统计小卡片。
+
+        列宽 ``cols=6 md=3``：手机上一行两张、桌面上一行四张。
+        原先的 ``md=2`` 是按五张卡的排法定的，删掉「最近运行」后四张卡会排不满一排。
+        """
         return {
             "component": "VCol",
-            "props": {"cols": 6, "md": 2},
+            "props": {"cols": 6, "md": 3},
             "content": [
                 {
                     "component": "VCard",
