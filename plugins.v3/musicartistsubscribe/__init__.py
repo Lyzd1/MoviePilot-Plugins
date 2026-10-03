@@ -80,6 +80,14 @@ STATUS_LABELS: Dict[str, str] = {
 # 完整 ID 仍留在链接地址（href 指向 MusicBrainz 详情页）里，需要时可复制。
 ARTIST_ID_DISPLAY_LEN = 8
 
+# 订阅展示里封面缩略图的边长（像素）。
+# 专辑封面是正方形，比演员作品订阅插件那张 2/3 的竖版海报小一号：
+# 一张专辑封面按 80×120 铺开会把单行撑得过高，一屏看不了几条。
+COVER_SIZE = 60
+
+# 封面缺失时的占位图标（灰底块 + 音乐图标），避免出现空白或裂图感
+COVER_PLACEHOLDER_ICON = "mdi-music"
+
 # 订阅类型多选（值需与 MusicBrainz 浏览接口的 type 参数一致）
 #
 # 只保留主类型三项，与宿主前端艺术家页（mpfront 的 resources.vue 按
@@ -417,7 +425,7 @@ class MusicArtistSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/icons/musicartistsubscribe.png"
     # 插件版本
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -1271,10 +1279,19 @@ class MusicArtistSubscribe(_PluginBase):
     # ------------------------------------------------------------------ #
     def get_page(self) -> List[dict]:
         """
-        返回插件详情页：统计卡 + 按歌手分组的订阅情况。
+        返回插件详情页：统计卡 -> 订阅展示 -> 歌手解析 -> 预演提醒。
 
-        不再有独立的「已订阅历史」区块：解析结果与订阅记录按歌手合并成一块，
-        每位歌手一个分组（解析行只占一行），组内列出该歌手订阅到的作品。
+        页面顺序（v1.0.3 起）：
+
+        1. **统计卡**：四张（已处理总数 / 已订阅 / 预演 / 订阅失败）；
+        2. **订阅展示**：所有订阅记录**平铺**成一张卡片，按处理时间倒序，每行
+           封面 + 标题 + 歌手名 + 类型 + 发行日期 + 状态 + 处理时间 + 删除；
+        3. **歌手解析**：解析结果单独成一块放在下面，每位歌手一行；
+        4. **预演模式提醒**（仅预演时）。
+
+        作品与歌手解析不再混排：作品行按时间倒序平铺后，同一位歌手的作品可能
+        不相邻，所以每行都带上歌手名；歌手的解析情况（ID、异常提示）统一在
+        下面的「歌手解析」区查看。
         """
         history = self.get_data(KEY_HISTORY)
         history = history if isinstance(history, list) else []
@@ -1283,18 +1300,12 @@ class MusicArtistSubscribe(_PluginBase):
         resolved = self.get_data(KEY_ARTISTS_RESOLVED)
         resolved = resolved if isinstance(resolved, list) else []
 
-        subscribed = sum(
-            1 for item in history
-            if isinstance(item, dict) and item.get("status") == STATUS_SUBSCRIBED
-        )
-        dry_run = sum(
-            1 for item in history
-            if isinstance(item, dict) and item.get("status") == STATUS_DRY_RUN
-        )
-        failed = sum(
-            1 for item in history
-            if isinstance(item, dict) and item.get("status") == STATUS_FAILED
-        )
+        entries = [item for item in history if isinstance(item, dict)]
+        records = [record for record in resolved if isinstance(record, dict)]
+
+        subscribed = sum(1 for item in entries if item.get("status") == STATUS_SUBSCRIBED)
+        dry_run = sum(1 for item in entries if item.get("status") == STATUS_DRY_RUN)
+        failed = sum(1 for item in entries if item.get("status") == STATUS_FAILED)
 
         page: List[dict] = [
             {
@@ -1305,15 +1316,10 @@ class MusicArtistSubscribe(_PluginBase):
                     self.__stat_card("预演", dry_run),
                     self.__stat_card("订阅失败", failed),
                 ],
-            }
+            },
+            self.__subscriptions_card(entries),
+            self.__artists_card(records),
         ]
-
-        groups = self.__artist_groups(resolved, history)
-        if groups:
-            for group in groups:
-                page.append(self.__artist_group_card(group))
-        else:
-            page.append(self.__empty_card())
 
         if self._dry_run:
             page.append({
@@ -1322,88 +1328,36 @@ class MusicArtistSubscribe(_PluginBase):
                     "type": "warning",
                     "variant": "tonal",
                     "style": "white-space: pre-line;",
-                    "text": "当前处于预演模式：命中的作品只记录在分组里，不会真正创建订阅。"
+                    "text": "当前处于预演模式：命中的作品只记录在上面的订阅列表里，不会真正创建订阅。"
                             "确认清单无误后，请在配置里关闭「预演模式」。",
                 },
             })
         return page
 
-    def __artist_groups(self, resolved: List[Any], history: List[Any]) -> List[dict]:
+    def __subscriptions_card(self, entries: List[dict]) -> dict:
         """
-        按歌手把「解析结果」与「订阅记录」合并成展示分组。
+        订阅展示区：把全部订阅记录**平铺**成一张卡片（不再按歌手分卡片）。
 
-        归组键取解析记录的展示名（``name`` 优先，回退 ``config_name``）；历史记录的
-        ``artist`` 字段写的就是这个展示名（见 ``__run_once_inner`` 的 ``artist_label``），
-        两者天然一致，无需额外存键。先按配置/解析顺序排列，再补上只出现在历史里的
-        （老记录里的）歌手，确保每位处理过的歌手都有一组。
+        排序取处理时间倒序（``time`` 是 ``YYYY-MM-DD HH:MM:SS``，字符串序即时间序；
+        缺时间的旧记录排到最后）。平铺之后同一位歌手的作品可能不相邻，因此每行都
+        带歌手名（见 ``__work_row``）。
 
-        :param resolved: ``artists_resolved`` 里的解析记录
-        :param history: ``history`` 里的订阅记录
-        :return: ``[{"key", "record", "entries"}, ...]``
+        :param entries: 历史记录（已过滤出 dict）
+        :return: 订阅展示卡片节点
         """
-        groups: List[dict] = []
-        index: Dict[str, dict] = {}
-        for record in resolved:
-            if not isinstance(record, dict):
-                continue
-            key = str(record.get("name") or record.get("config_name") or "").strip()
-            if not key or key in index:
-                continue
-            group = {"key": key, "record": record, "entries": []}
-            index[key] = group
-            groups.append(group)
-        for entry in history:
-            if not isinstance(entry, dict):
-                continue
-            key = str(entry.get("artist") or "").strip() or "未知歌手"
-            group = index.get(key)
-            if group is None:
-                group = {"key": key, "record": None, "entries": []}
-                index[key] = group
-                groups.append(group)
-            group["entries"].append(entry)
-        for group in groups:
-            group["entries"].sort(
-                key=lambda item: str(item.get("time") or ""), reverse=True
-            )
-        return groups
-
-    def __artist_group_card(self, group: dict) -> dict:
-        """构造一位歌手的分组卡片：解析行（一行）+ 异常提示 + 该歌手的作品清单。"""
-        record = group.get("record") or {}
-        entries: List[dict] = group.get("entries") or []
-
-        counts = {
-            status: sum(1 for item in entries if item.get("status") == status)
-            for status in STATUS_LABELS
-        }
-        summary = (
-            f"已订阅 {counts.get(STATUS_SUBSCRIBED, 0)} · "
-            f"预演 {counts.get(STATUS_DRY_RUN, 0)} · "
-            f"失败 {counts.get(STATUS_FAILED, 0)}"
-        )
-
-        content: List[dict] = [self.__artist_header(group, record, summary)]
-        issue = self.__artist_issue(record)
-        if issue:
-            content.append({
-                "component": "VAlert",
-                "props": {
-                    "type": "warning",
-                    "variant": "tonal",
-                    "density": "compact",
-                    "class": "text-caption mb-2",
-                    "style": "white-space: pre-line;",
-                    "text": issue,
-                },
-            })
-        content.append({"component": "VDivider", "props": {"class": "my-2"}})
+        content: List[dict] = [
+            self.__section_title("订阅作品"),
+            {"component": "VDivider", "props": {"class": "my-2"}},
+        ]
         if entries:
-            for entry in entries:
+            for entry in sorted(
+                    entries, key=lambda item: str(item.get("time") or ""), reverse=True
+            ):
                 content.append(self.__work_row(entry))
         else:
-            content.append(self.__text_line("暂无记录", "text-caption text-medium-emphasis py-1"))
-
+            content.append(self.__text_line(
+                self.__empty_message(), "text-caption text-medium-emphasis py-1"
+            ))
         return {
             "component": "VCard",
             # px-3 给内容统一的左右内边距：窄屏上标题行与记录行都不再贴着卡片边缘，
@@ -1412,42 +1366,83 @@ class MusicArtistSubscribe(_PluginBase):
             "content": content,
         }
 
-    def __artist_header(self, group: dict, record: dict, summary: str) -> dict:
+    def __empty_message(self) -> str:
+        """订阅展示还没有内容时，按「有没有配歌手」给不同的引导文案。"""
+        if parse_artist_entries(getattr(self, "_artists", "") or ""):
+            return "尚未运行过：启用插件并运行一次后，这里会按处理时间倒序列出订阅到的作品。"
+        return "还没有配置歌手：请在配置页填写「歌手名单」并启用插件。"
+
+    def __artists_card(self, records: List[dict]) -> dict:
         """
-        构造歌手分组的两行标题。
+        歌手解析区：单独一块放在订阅展示**下面**，每位歌手一行。
 
-        第一行：**只有歌手名**（配置名与解析名不同才显示 ``配置名 → 解析名``）
-        + 「已按ID锁定」chip（只在你手动钉了 ID 时出现）+ 截断后可点击的艺术家ID。
-        国家/类型这类括号内容、以及「精确匹配」chip（绝大多数歌手都会命中，
-        属于噪音还占宽度）都不再显示；解析异常由 ``__artist_issue`` 单独 warning 提示。
+        只展示解析结果（ID、锁定状态与解析异常），不再重复作品清单——作品统一在
+        上面的订阅展示里看。解析异常（多个同名候选 / 无精确同名匹配 / 未解析到 ID /
+        搜索失败）以 warning 紧跟在对应歌手那一行下面，仍然醒目。
 
-        第二行：计数摘要（``已订阅 x · 预演 y · 失败 z``）。放在标题行下面而不是
-        用 ``ml-auto`` 挤在行尾，窄屏上就不会和艺术家ID 争宽导致截断。
-
-        :param group: 分组字典（``key`` 为歌手展示名）
-        :param record: 该歌手的解析记录（可能为空）
-        :param summary: 计数摘要文本
-        :return: 标题行节点
+        :param records: ``artists_resolved`` 里的解析记录（已过滤出 dict）
+        :return: 歌手解析卡片节点
         """
-        name = str(group.get("key") or "未知歌手")
-        config_name = str(record.get("config_name") or "") if record else ""
-        media_id = str(record.get("media_id") or "") if record else ""
+        content: List[dict] = [
+            self.__section_title("歌手解析"),
+            {"component": "VDivider", "props": {"class": "my-2"}},
+        ]
+        if records:
+            for record in records:
+                content.append(self.__artist_row(record))
+                issue = self.__artist_issue(record)
+                if issue:
+                    content.append({
+                        "component": "VAlert",
+                        "props": {
+                            "type": "warning",
+                            "variant": "tonal",
+                            "density": "compact",
+                            "class": "text-caption mb-2",
+                            "style": "white-space: pre-line;",
+                            "text": issue,
+                        },
+                    })
+        else:
+            content.append(self.__text_line(
+                self.__artists_empty_message(), "text-caption text-medium-emphasis py-1"
+            ))
+        return {
+            "component": "VCard",
+            "props": {"variant": "tonal", "class": "mb-2 px-3 py-2"},
+            "content": content,
+        }
 
-        if record and media_id:
+    def __artist_row(self, record: dict) -> dict:
+        """
+        歌手解析区的**一行**：只有歌手名（配置名与解析名不同才显示 ``配置名 → 解析名``）
+        + 「已按ID锁定」chip（只在手动钉了 ID 时出现）+ 截断后可点击的艺术家ID。
+
+        国家/类型这类括号内容、以及「精确匹配」chip（绝大多数歌手都会命中，属于噪音
+        还占宽度）都不显示；解析异常由 ``__artist_issue`` 单独 warning 提示。
+        这一行原先还挂着「已订阅 x · 预演 y · 失败 z」的计数摘要，平铺之后作品行
+        不再按歌手归类，那份计数的归属感消失，故一并去掉。
+
+        :param record: 该歌手的解析记录
+        :return: 解析行节点
+        """
+        name = str(record.get("name") or record.get("config_name") or "未知歌手")
+        config_name = str(record.get("config_name") or "")
+        media_id = str(record.get("media_id") or "")
+
+        if media_id:
             # 配置名与解析名一致时省略箭头，避免「许嵩 → 许嵩」这类冗余
             if config_name and normalize_name(config_name) != normalize_name(name):
                 head = f"{config_name} → {name}"
             else:
                 head = name
-        elif record:
-            head = f"{config_name or name} → 未解析到艺术家"
         else:
-            head = name
+            head = f"{config_name or name} → 未解析到艺术家"
 
         nodes: List[dict] = [
-            {"component": "span", "props": {"class": "text-subtitle-2"}, "text": head},
+            {"component": "span", "props": {"class": "text-body-2"}, "text": head},
         ]
-        if record and record.get("locked"):
+        if record.get("locked"):
             nodes.append(self.__chip("已按ID锁定", "info"))
         if media_id:
             # href 仍是完整 ID 的 MusicBrainz 页面，只把「显示文本」截断
@@ -1463,20 +1458,15 @@ class MusicArtistSubscribe(_PluginBase):
             })
         return {
             "component": "div",
-            "props": {"class": "d-flex align-center flex-wrap ga-2"},
-            "content": [
-                {
-                    "component": "div",
-                    "props": {"class": "d-flex align-center flex-wrap ga-2"},
-                    "content": nodes,
-                },
-                {
-                    "component": "div",
-                    "props": {"class": "text-caption text-medium-emphasis"},
-                    "text": summary,
-                },
-            ],
+            "props": {"class": "d-flex align-center flex-wrap ga-2 py-1"},
+            "content": nodes,
         }
+
+    def __artists_empty_message(self) -> str:
+        """歌手解析区还没有内容时，按「有没有配歌手」给不同的引导文案。"""
+        if parse_artist_entries(getattr(self, "_artists", "") or ""):
+            return "尚未运行过：运行一次后，这里会显示每位歌手的解析结果。"
+        return "还没有配置歌手：请在配置页填写「歌手名单」。"
 
     @staticmethod
     def __chip(text: str, color: str) -> dict:
@@ -1517,15 +1507,19 @@ class MusicArtistSubscribe(_PluginBase):
 
     def __work_row(self, item: dict) -> dict:
         """
-        一位歌手名下的一条作品记录（紧凑一行，窄屏可折行）。
+        订阅展示里的一条作品记录（紧凑一行，窄屏可折行）。
 
-        标题即 MusicBrainz release-group 详情链接；后面依次是「类型 / 发行日期 /
-        处理结果 / 处理时间」，订阅失败时补上 ``message`` 里的错误原因。
-        各项各自是独立节点、由 flex 间隙分隔（不再用固定列宽的 ``VCol`` 硬挤），
-        外层 ``flex-wrap``：窄屏上折行而不是被裁掉右半截。
+        从左到右：**封面缩略图**（缺失时用等尺寸灰底 + 音乐图标占位）+ 标题
+        （即 MusicBrainz release-group 详情链接）+ 歌手名 + 「类型 / 发行日期 /
+        处理结果 / 处理时间」，订阅失败时再补上 ``message`` 里的错误原因。
+
+        平铺之后同一位歌手的作品不一定相邻，所以歌手名必须跟着每一行进；各项各自是
+        独立节点、由 flex 间隙分隔（不再用固定列宽的 ``VCol`` 硬挤），外层
+        ``flex-wrap``：窄屏上折行而不是被裁掉右半截。
         """
         title = str(item.get("title") or "")
         detail_link = str(item.get("detail_link") or "")
+        artist = str(item.get("artist") or "") or "未知歌手"
         album_type = str(item.get("album_type") or "专辑")
         release_date = str(item.get("release_date") or "无日期")
         status = str(item.get("status") or "")
@@ -1550,6 +1544,8 @@ class MusicArtistSubscribe(_PluginBase):
         }.get(status, "text-caption")
 
         meta: List[dict] = [
+            # 歌手名用默认强调色（不带 medium-emphasis），比其它元信息醒目一点
+            self.__span(artist, "text-caption"),
             self.__span(album_type, "text-caption text-medium-emphasis"),
             self.__span(release_date, "text-caption text-medium-emphasis"),
             self.__span(status_label, status_class),
@@ -1565,6 +1561,7 @@ class MusicArtistSubscribe(_PluginBase):
             # 外层 flex-wrap：空间不够时「删除」按钮整块换到下一行，绝不横向溢出
             "props": {"class": "d-flex flex-wrap align-center ga-2 py-1"},
             "content": [
+                self.__cover(item.get("cover_url")),
                 {
                     "component": "div",
                     # 内层同样 flex-wrap：标题与各元信息之间可以自由折行
@@ -1597,24 +1594,59 @@ class MusicArtistSubscribe(_PluginBase):
         """构造一个内联文本节点（用于记录行的元信息）。"""
         return {"component": "span", "props": {"class": css_class}, "text": text}
 
-    def __empty_card(self) -> dict:
-        """还没有任何分组时的空态卡片（未配置歌手 / 尚未运行过，各一句）。"""
-        configured = parse_artist_entries(getattr(self, "_artists", "") or "")
-        if configured:
-            message = (
-                "尚未运行过：启用插件并运行一次后，这里会按歌手列出各自的订阅作品。"
-            )
-        else:
-            message = "还没有配置歌手：请在配置页填写「歌手名单」并启用插件。"
+    @staticmethod
+    def __cover(cover_url: Any) -> dict:
+        """
+        构造作品行的封面缩略图。
+
+        历史记录里存的是 MusicBrainz / Cover Art Archive 的封面地址（非空时可用）：
+        专辑封面是正方形，故按 ``1/1`` 裁切、边长 ``COVER_SIZE`` 并加圆角。
+
+        封面缺失（老记录或该作品没有封面图）时**不渲染 VImg**——``src`` 为空会露出
+        一个空白裂图，比没有更难看——改为渲染等尺寸的灰底块，中间放一个音乐图标。
+
+        :param cover_url: 历史记录里的封面地址
+        :return: VImg 或占位块节点
+        """
+        url = str(cover_url or "").strip()
+        if url:
+            return {
+                "component": "VImg",
+                "props": {
+                    "src": url,
+                    "height": COVER_SIZE,
+                    "width": COVER_SIZE,
+                    "aspect-ratio": "1/1",
+                    "class": "rounded object-cover flex-grow-0",
+                    "cover": True,
+                },
+            }
         return {
-            "component": "VCard",
-            "props": {"variant": "tonal", "class": "mb-2"},
+            "component": "div",
+            "props": {
+                "class": "d-flex align-center justify-center rounded flex-grow-0",
+                # 半透明灰：浅色与深色主题下都是「一块灰底」而不会一个太白一个太黑
+                "style": (
+                    f"width: {COVER_SIZE}px; height: {COVER_SIZE}px; "
+                    "background-color: rgba(128, 128, 128, 0.22);"
+                ),
+            },
             "content": [
                 {
-                    "component": "VCardText",
-                    "content": [self.__text_line(message)],
-                },
+                    "component": "VIcon",
+                    "props": {"size": COVER_SIZE - 28},
+                    "text": COVER_PLACEHOLDER_ICON,
+                }
             ],
+        }
+
+    @staticmethod
+    def __section_title(text: str) -> dict:
+        """构造区块小标题（订阅作品 / 歌手解析）。"""
+        return {
+            "component": "div",
+            "props": {"class": "text-subtitle-2"},
+            "text": text,
         }
 
     @staticmethod
