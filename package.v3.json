@@ -114,5 +114,34 @@
         "history": {
             "v0.1.0": "首个版本：在宿主通知派发出口（NotificationMixin._dispatch_notification_steps / _async_dispatch_notification_steps）打补丁，按用户自定义的 Python 正则（忽略大小写）拦截通知内容——命中即不发送 NoticeMessage 事件、不投递任何渠道（飞书/TG/webhook 与第三方通知插件一并生效），消息中心历史仍由上游正常写入；支持限定标题/内容匹配范围与通知类型、非法正则自动跳过并在详情页列出；默认空规则且不启用，装好对现有行为零影响；停用插件自动还原宿主方法。"
         }
+    },
+    "MusicArtistSubscribe": {
+        "name": "歌手作品订阅",
+        "description": "按歌手自动订阅 MusicBrainz 上新增的专辑、EP 与单曲（只追新发行，不回补历史）",
+        "labels": "订阅",
+        "version": "1.0.0",
+        "icon": "https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/icons/musicartistsubscribe.png",
+        "author": "Lyzd1",
+        "level": 1,
+        "release": true,
+        "system_version": ">=3.0.1",
+        "history": {
+            "v1.0.0": "首个版本：按歌手名单定时检查 MusicBrainz 新发行（专辑/EP/单曲等），支持类型多选、发行年份下限、追新窗口与提前订阅、预演模式、同名候选提醒"
+        }
+    },
+    "ActorSubscribePlus": {
+        "name": "演员作品订阅",
+        "description": "获取TMDB演员作品，并自动添加到订阅；新增「排除题材」过滤（真人秀/脱口秀/新闻/纪录片，默认排除真人秀与脱口秀，仅对电视剧生效）",
+        "labels": "订阅",
+        "version": "2.1.0",
+        "icon": "https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/icons/actorsubscribeplus.png",
+        "author": "thsrite,Lyzd1",
+        "level": 2,
+        "release": true,
+        "system_version": ">=3.0.0",
+        "history": {
+            "v2.1.0": "fork 自 thsrite v2.0.0；新增「排除题材」多选（真人秀=Reality/脱口秀=Talk/新闻/纪录片），默认排除真人秀与脱口秀，仅对电视剧生效，电影不受影响",
+            "v2.0.0": "上游原始版本"
+        }
     }
 }
