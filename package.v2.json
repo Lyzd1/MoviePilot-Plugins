@@ -1,17 +1,4 @@
 {
-    "MoviePilotRankSubscribe": {
-        "name": "MoviePilot榜单订阅",
-        "description": "定期获取MoviePilot内置榜单，根据评分和过滤条件自动订阅内容。",
-        "labels": "订阅",
-        "version": "1.7",
-        "icon": "Ombi_A.png",
-        "author": "Lyzd1",
-        "level": 1,
-        "history": {
-                "v1.7": "增加关键词排除和电视剧电影分别最低评分",
-                "v1.0": "第一版"
-        }
-    },
     "BonusExchangePlugin": {
         "name": "魔力兑换助手",
         "description": "自动监控分享率，在低于阈值时执行魔力兑换操作",
@@ -143,18 +130,6 @@
           "v6.1": "新增新种子定时重新宣告功能",
           "v5.0.1": "增加站点独立配置"
          }
-    },
-    "TrafficAssistant": {
-        "name": "站点流量管理",
-        "description": "自动管理流量，保障站点分享率。",
-        "labels": "流量管理",
-        "version": "2.0",
-        "icon": "https://raw.githubusercontent.com/InfinityPacer/MoviePilot-Plugins/main/icons/trafficassistant.png",
-        "author": "InfinityPacer",
-        "level": 2,
-        "history": {
-            "v2.0": "支持新版BrushFlow任务架构（tasks），兼容BrushFlowLowFreq旧版"
-        }
     },
     "SiteRatioLimiter": {
         "name": "站点分享率上传限速",

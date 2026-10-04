@@ -22,11 +22,6 @@ https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/package.v2.json
 
 ### 订阅
 
-#### MoviePilotRankSubscribe — MoviePilot榜单订阅
-- **版本**: v1.7
-- **功能**: 定期获取 MoviePilot 内置榜单，根据评分和过滤条件自动订阅内容。支持关键词排除、电视剧和电影分别设置最低评分。
-- **标签**: `订阅`
-
 #### SubscribeGroup — 订阅规则自动填充
 - **版本**: v3.3.5
 - **功能**: 电视剧下载后自动添加官组等信息到订阅；添加订阅后根据二级分类名称自定义订阅规则。支持副标题匹配、视频来源识别、保存路径变量等高级功能。
