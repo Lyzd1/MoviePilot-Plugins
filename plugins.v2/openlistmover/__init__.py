@@ -144,7 +144,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.6.8"
+    plugin_version = "4.6.9"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -216,6 +216,7 @@ class OpenlistMover(_PluginBase):
     _clear_api_threshold = 10    # 自动清空 Openlist API 任务记录的阈值 (已弃用，保留以兼容旧配置)
     _clear_panel_threshold = 30  # 自动清空成功任务面板记录的阈值 (默认 30 次成功)
     _keep_successful_tasks = 3   # 清空面板时保留的最新成功任务数量 (默认 3 个)
+    _clear_records: bool = False # 一次性开关：保存配置后立即清空面板已完成记录，随后自动写回 False
 
     # === 清空面板/Openlist 任务记录的空闲门槛与防抖 ===
     _clear_debounce_seconds = 60  # 两次清空之间的最小间隔（秒），防抖
@@ -307,6 +308,9 @@ class OpenlistMover(_PluginBase):
                 self._keep_successful_tasks = int(config.get("keep_successful_tasks", 3))
             except ValueError:
                 self._keep_successful_tasks = 3
+
+            # 一次性开关：勾选并保存后立即执行一次任务记录清理，随后自动写回 False
+            self._clear_records = bool(config.get("clear_records", False))
 
             # === 加载视频后缀配置 ===
             video_extensions_config = config.get("video_extensions", "")
@@ -408,6 +412,9 @@ class OpenlistMover(_PluginBase):
 
         # 停止现有任务
         self.stop_service()
+
+        # 一次性开关：清空面板已完成记录（插件未启用时也要能清）
+        self._maybe_clear_records_on_init()
 
         if self._enabled:
             # =========================================================
@@ -1002,6 +1009,26 @@ class OpenlistMover(_PluginBase):
                             }
                         ]
                     },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "clear_records",
+                                            "label": "清空任务记录（保存后立即执行一次）",
+                                            "hint": "仅清空面板里已完成的记录（含失败/错误），进行中与未收尾任务保留；不影响 OpenList 服务端任务记录与累计成功计数。开启并保存后执行一次，随后自动关闭。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
                     # =================================
                     # === 全局扫描配置 ===
                     {
@@ -1086,7 +1113,8 @@ class OpenlistMover(_PluginBase):
             "global_scan_time": "02:00",
             "task_check_interval": 60,
             "task_timeout_minutes": 0,
-            "task_stuck_minutes": 0
+            "task_stuck_minutes": 0,
+            "clear_records": False
             # ======================
         }
 
@@ -1719,6 +1747,57 @@ class OpenlistMover(_PluginBase):
 
             return clear_panel_triggered
 
+    def _clear_finished_records(self) -> int:
+        """
+        一次性清理：移除面板中所有已完成记录（成功与失败都清）。
+
+        保留：
+        - status 为 等待中/进行中 的任务；
+        - 移动已成功但后续流程(STRM/额外复制)未收尾的任务（_is_pending_followup）。
+
+        不重置成功计数、不写 _last_clear_time、不清空 OpenList 服务端任务记录、不发通知。
+        """
+        removed = 0
+        with task_lock:
+            kept_tasks = [
+                t for t in self._move_tasks
+                if t.get('status') in [TASK_STATUS_WAITING, TASK_STATUS_RUNNING]
+                or self._is_pending_followup(t)
+            ]
+            removed = len(self._move_tasks) - len(kept_tasks)
+            if removed > 0:
+                self._move_tasks = kept_tasks
+                self._save_move_tasks()
+        return removed
+
+    def _write_back_clear_switch(self) -> None:
+        """
+        把一次性开关 clear_records 写回 False。
+
+        必须读回整份配置后只改这一个键再整体写回——只传部分键会把插件配置覆盖掉。
+        """
+        try:
+            cfg = self.get_config()
+            if cfg is None:
+                logger.error("清空任务记录开关写回失败：未能读取插件配置。")
+                return
+            cfg['clear_records'] = False
+            self.update_config(cfg)
+        except Exception as e:
+            logger.error(f"清空任务记录开关写回失败: {e}")
+
+    def _maybe_clear_records_on_init(self) -> int:
+        """
+        init_plugin 阶段处理一次性「清空任务记录」开关：开启则清一次并自动写回 False。
+        """
+        if not self._clear_records:
+            return 0
+        self._clear_records = False
+        removed = self._clear_finished_records()
+        self._write_back_clear_switch()
+        logger.info(f"任务记录清理完成：清除 {removed} 条已完成记录（保留进行中/未收尾任务）。")
+        return removed
+
     def _update_task_strm_status(self, task_id: str, new_status: str, is_final: bool = False):
         """
         安全地更新任务列表中的 STRM 状态和发送通知。
@@ -1754,18 +1833,18 @@ class OpenlistMover(_PluginBase):
         elif counted:
             logger.info(f"任务 {task_id} 收尾成功，成功计数 +1（当前 {self._successful_moves_count}）。")
 
-        # 仅在 STRM 流程最终完成后发送通知
-        if is_final and found_task:
+        # 仅在后续流程收尾失败时发送通知（成功/跳过一律不打扰）
+        if is_final and found_task and str(new_status or '').startswith('失败'):
             is_wash_text = "(洗版)" if found_task.get("is_wash", False) else ""
-            move_success_text = (
-                f"✅ 文件移动成功 {is_wash_text}\n"
-                f"🎬 视频文件：{found_task['dst_dir']}/{found_task['file']}\n"
+            followup_failed_text = (
+                f"❌ 文件后续处理失败 {is_wash_text}\n"
+                f"🎬 文件：{found_task['dst_dir']}/{found_task['file']}\n"
                 f"🔗 STRM状态：{new_status}"
             )
             self._send_task_notification(
                 found_task,
-                f"Openlist 移动完成 {is_wash_text}",
-                move_success_text
+                f"Openlist 后续处理失败 {is_wash_text}",
+                followup_failed_text
             )
 
 
