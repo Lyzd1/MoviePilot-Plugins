@@ -88,19 +88,6 @@
             "v0.0.2": "new"
         }
     },
-    "FeishuImageFix": {
-        "name": "飞书图片修复",
-        "description": "给宿主飞书通知模块的图片下载补上豆瓣 Referer 与 TMDB 代理；上游修复后本插件会自报可删除",
-        "labels": "工具,修复",
-        "version": "0.1.0",
-        "author": "Lyzd1",
-        "level": 1,
-        "release": true,
-        "system_version": ">=3.0.1",
-        "history": {
-            "v0.1.0": "首个版本：启动时自动检测宿主 Feishu._upload_remote_image 是否已修复（含 Referer/代理或改用 ImageHelper）——未修复则同进程打补丁，取图优先复用宿主 ImageHelper、回退自建下载器（豆瓣补 Referer 且不走代理，其它 URL 走 PROXY_HOST）；已修复则只提示、不动宿主；插件详情页显示当前状态；停用插件自动还原。"
-        }
-    },
     "NotifyFilter": {
         "name": "通知过滤器",
         "description": "按自定义正则规则拦截指定内容的通知：命中即不推送任何渠道，消息中心历史仍保留",
