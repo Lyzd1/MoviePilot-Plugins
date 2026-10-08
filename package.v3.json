@@ -142,7 +142,6 @@
         "icon": "mediaplay.png",
         "author": "jxxghp,Lyzd1",
         "level": 1,
-        "release": true,
         "history": {
             "v2.1.4": "TV剧集入库通知改为『首条立即通知 + 时间窗口去重』：每条入库的剧集立即通知，设置的秒数内同一部剧的后续入库不再通知（fork 自 jxxghp/MoviePilot-Plugins v2.1.3）"
         },
