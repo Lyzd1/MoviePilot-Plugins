@@ -133,5 +133,19 @@
             "v2.1.0": "fork 自 thsrite v2.0.0；新增「排除题材」多选（真人秀=Reality/脱口秀=Talk/新闻/纪录片），默认排除真人秀与脱口秀，仅对电视剧生效，电影不受影响",
             "v2.0.0": "上游原始版本"
         }
+    },
+    "MediaServerMsg": {
+        "name": "媒体库服务器通知",
+        "description": "发送Emby/Jellyfin/Plex服务器的播放、入库等通知消息。TV剧集入库通知去重：首条立即通知，设定时间内同一部剧不再重复通知。",
+        "labels": "消息通知,媒体库",
+        "version": "2.1.4",
+        "icon": "mediaplay.png",
+        "author": "jxxghp,Lyzd1",
+        "level": 1,
+        "release": true,
+        "history": {
+            "v2.1.4": "TV剧集入库通知改为『首条立即通知 + 时间窗口去重』：每条入库的剧集立即通知，设置的秒数内同一部剧的后续入库不再通知（fork 自 jxxghp/MoviePilot-Plugins v2.1.3）"
+        },
+        "system_version": ">=3.0.0"
     }
 }

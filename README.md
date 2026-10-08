@@ -57,3 +57,11 @@ https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/package.v2.json
 - **版本**: v1.2
 - **功能**: 编辑 AI 助手的提示词并清空缓存使其立即生效。
 - **标签**: `AI`
+
+### 消息通知
+
+#### MediaServerMsg — 媒体库服务器通知（TV剧集入库通知去重）
+- **版本**: v2.1.4
+- **功能**: 发送 Emby/Jellyfin/Plex 的播放、入库等通知；TV 剧集入库时首条立即通知，设置的秒数内同一部剧的后续入库不再重复通知。
+- **标签**: `消息通知` `媒体库`
+- **说明**: fork 自 jxxghp/MoviePilot-Plugins v2.1.3。
