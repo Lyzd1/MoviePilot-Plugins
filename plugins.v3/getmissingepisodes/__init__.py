@@ -1,6 +1,7 @@
 from pathlib import Path
 from threading import Event, Lock
 from threading import Thread
+from urllib.parse import quote
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import datetime
@@ -211,7 +212,7 @@ class GetMissingEpisodes(_PluginBase):
     plugin_name = "剧集管家"
     plugin_desc = "检测指定剧集库，对有新季或存在集缺失的剧集自动订阅补全"
     plugin_icon = "https://raw.githubusercontent.com/boeto/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
-    plugin_version = "3.1.7"
+    plugin_version = "3.1.8"
     plugin_author = "左岸"
     author_url = "https://github.com/andyxu8023"
     plugin_config_prefix = "getmissingepisodes_"
@@ -1263,9 +1264,16 @@ class GetMissingEpisodes(_PluginBase):
                 logger.warning(f"获取 {mediaserver} 媒体库列表失败: {str(e)}")
         return sorted(set(mediaservers)), sorted(set(libraries))
 
-    def _build_media_link(self, tmdbid: int) -> str:
-        """生成剧集在 MoviePilot 前端的媒体详情页链接。"""
-        link = f"#/media?mediaid=tmdb:{tmdbid}&type={MediaType.TV.value}"
+    def _build_media_link(self, tmdbid: int, title: str = "", year: str = "") -> str:
+        """生成剧集在 MoviePilot v3 前端的媒体详情页链接。"""
+        link = (
+            f"#/media?media_source={MediaSource.TMDB.value}"
+            f"&media_id={tmdbid}&type={MediaType.TV.value}"
+        )
+        if title:
+            link += f"&title={quote(str(title))}"
+        if year:
+            link += f"&year={quote(str(year))}"
         mp_domain = settings.MP_DOMAIN()
         if not mp_domain:
             return link
@@ -1306,11 +1314,13 @@ class GetMissingEpisodes(_PluginBase):
                 )
             exist_status = item.get("exist_status") or HistoryStatus.UNKNOW.value
             tmdbid = tv_info.get("tmdbid", 0) or 0
+            title = tv_info.get("title", "未知")
+            year = tv_info.get("year", "未知")
             records.append(
                 {
                     "unique": unique,
-                    "title": tv_info.get("title", "未知"),
-                    "year": tv_info.get("year", "未知"),
+                    "title": title,
+                    "year": year,
                     "path": tv_info.get("path", "未知"),
                     "tmdbid": tmdbid,
                     "poster": tv_info.get("poster_path") or default_poster_path,
@@ -1327,7 +1337,7 @@ class GetMissingEpisodes(_PluginBase):
                     "last_check_full": item.get("last_check_full", ""),
                     "first_found_time": item.get("first_found_time", ""),
                     "last_status_change": item.get("last_status_change", item.get("last_check_full", "")),
-                    "media_link": self._build_media_link(tmdbid),
+                    "media_link": self._build_media_link(tmdbid, title, year),
                 }
             )
 
@@ -2364,7 +2374,11 @@ class GetMissingEpisodes(_PluginBase):
             status = f"{status}⏭️"
 
         mp_domain = settings.MP_DOMAIN()
-        link = f"#/media?mediaid=tmdb:{tmdbid}&type={MediaType.TV.value}"
+        link = (
+            f"#/media?media_source={MediaSource.TMDB.value}"
+            f"&media_id={tmdbid}&type={MediaType.TV.value}"
+            f"&title={quote(str(title))}&year={quote(str(year))}"
+        )
         if mp_domain:
             if mp_domain.endswith("/"):
                 link = f"{mp_domain}{link}"
