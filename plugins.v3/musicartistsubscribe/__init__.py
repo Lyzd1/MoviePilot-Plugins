@@ -107,7 +107,9 @@ _ARTISTS_HINT = (
     "换行、逗号、顿号、分号都能分隔；名称里含英文逗号时请用「名字@ID」写法。\n"
     "艺术家ID 获取方式：打开 musicbrainz.org 搜索歌手，详情页地址栏 "
     "artist/ 后面那一串 UUID 即是；或先只填歌手名跑一次，详情页会显示解析结果，"
-    "确认取错时再用「名字@ID」锁定。"
+    "确认取错时再用「名字@ID」锁定。\n"
+    "插件会记住每位歌手的解析结果，配置不变时后续运行直接沿用（不再重复搜索）；"
+    "改名字或补上「@ID」即重新识别。\n"
 )
 
 # 参数说明
@@ -123,6 +125,8 @@ KEY_HISTORY = "history"
 KEY_HANDLED = "already_handle"
 KEY_ARTISTS_RESOLVED = "artists_resolved"
 KEY_LAST_RUN = "last_run"
+# 歌手解析缓存：{缓存键: 解析记录}，配置文本没变就直接沿用，不再重复搜索/拉详情
+KEY_ARTISTS_CACHE = "artists_cache"
 
 
 # --------------------------------------------------------------------------- #
@@ -139,6 +143,20 @@ def field_of(item: Any, name: str, default: Any = None) -> Any:
 def normalize_name(text: Any) -> str:
     """歌手名规范化：忽略大小写与全部空白字符，用于精确同名判定。"""
     return "".join(str(text or "").split()).lower()
+
+
+def artist_entry_key(display_name: Any, pinned_id: Any) -> str:
+    """
+    构造一位歌手的缓存键：规范化后的名字 + ``@`` + 锁定的艺术家ID（小写、去空白）。
+
+    键完全由「配置里那一条文本」决定，所以配置文本一变（改名字、补上或去掉 ``@ID``）
+    键就跟着变，旧缓存自然命中不上——等同于该歌手重新识别，无需额外的开关。
+
+    :param display_name: 配置里写的歌手名
+    :param pinned_id: 配置里锁定的 MusicBrainz 艺术家 ID，没锁定时传 None 或空串
+    :return: 该配置条目的稳定缓存键
+    """
+    return f"{normalize_name(display_name)}@{str(pinned_id or '').strip().lower()}"
 
 
 def parse_artist_entries(raw: Any) -> List[Tuple[str, Optional[str]]]:
@@ -425,7 +443,7 @@ class MusicArtistSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/icons/musicartistsubscribe.png"
     # 插件版本
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -573,6 +591,9 @@ class MusicArtistSubscribe(_PluginBase):
             history = []
         if not isinstance(handled, list):
             handled = []
+        cache = self.get_data(KEY_ARTISTS_CACHE) or {}
+        if not isinstance(cache, dict):
+            cache = {}
 
         today = datetime.now().date()
         mode = "预演模式" if self._dry_run else "正式模式"
@@ -585,9 +606,12 @@ class MusicArtistSubscribe(_PluginBase):
         resolved_records: List[dict] = []
         summary: List[str] = []
         planned = 0
+        reused_count = 0
 
         for display_name, pinned_id in entries:
-            resolved = self.__resolve_artist(display_name, pinned_id)
+            resolved, reused = self.__resolve_artist(display_name, pinned_id, cache)
+            if reused:
+                reused_count += 1
             resolved_records.append(resolved)
             artist_id = str(resolved.get("media_id") or "")
             if not artist_id:
@@ -596,8 +620,22 @@ class MusicArtistSubscribe(_PluginBase):
 
             albums = self.__fetch_albums(artist_id)
             if not albums:
+                if reused:
+                    # 沿用缓存的 ID 却取不到作品，可能是该艺术家被合并/改名了：
+                    # 清掉这条解析记录，下次运行重新识别
+                    cache.pop(artist_entry_key(display_name, pinned_id), None)
+                    logger.warning(
+                        f"歌手作品订阅：{resolved.get('name') or display_name} 沿用上次解析的艺术家未取到作品，"
+                        f"已清除该解析记录，下次运行重新识别"
+                    )
                 summary.append(f"歌手「{resolved.get('name') or display_name}」：未取到作品")
                 continue
+
+            if not reused:
+                # 沿用时不回写，免得把「沿用」的说明写回缓存
+                cache[artist_entry_key(display_name, pinned_id)] = {
+                    k: v for k, v in resolved.items() if k != "from_cache"
+                }
 
             artist_label = resolved.get("name") or display_name
             hit = 0
@@ -658,9 +696,13 @@ class MusicArtistSubscribe(_PluginBase):
                 f"歌手「{artist_label}」：候选 {len(albums)} 条 / 命中 {hit} 条 / 新建订阅 {created} 条"
             )
 
+        logger.info(
+            f"歌手作品订阅：本轮解析 —— 沿用上次 {reused_count} 位 / 重新识别 {len(entries) - reused_count} 位"
+        )
         self.save_data(KEY_ARTISTS_RESOLVED, resolved_records)
         self.save_data(KEY_LAST_RUN, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         self.save_data(KEY_HANDLED, handled)
+        self.save_data(KEY_ARTISTS_CACHE, cache)
         logger.info("歌手作品订阅：本轮汇总 —— " + "；".join(summary))
         if self._dry_run and planned:
             logger.warning(f"歌手作品订阅：预演完成，将订阅 {planned} 条（预演模式不会真正创建订阅）")
@@ -669,16 +711,21 @@ class MusicArtistSubscribe(_PluginBase):
     # ------------------------------------------------------------------ #
     # 歌手解析
     # ------------------------------------------------------------------ #
-    def __resolve_artist(self, display_name: str, pinned_id: Optional[str]) -> dict:
+    def __resolve_artist(
+            self, display_name: str, pinned_id: Optional[str], cache: dict
+    ) -> Tuple[dict, bool]:
         """
-        解析一位歌手，返回详情页展示用的解析记录。
+        解析一位歌手，返回详情页展示用的解析记录与「本轮是否沿用缓存」。
 
-        填了 ``@ID`` 就直接采用并顺带拉一次艺术家详情用于展示；否则调宿主搜索，
-        在候选里找「规范化同名」（忽略大小写与空格，比较 name 与 aliases）。
+        配置条目在 ``cache`` 里有可用记录（``media_id`` 非空）时直接沿用，本轮不再
+        发任何识别请求；否则填了 ``@ID`` 就采用并顺带拉一次艺术家详情用于展示，
+        没填就走宿主搜索，在候选里找「规范化同名」（忽略大小写与空格，比较 name 与 aliases）。
+        搜索失败或没解析出 ID 属于「没定下来」，不写进缓存，下轮仍会重试。
 
         :param display_name: 配置里写的歌手名
         :param pinned_id: 配置里锁定的 MusicBrainz 艺术家 ID
-        :return: 解析记录字典
+        :param cache: 歌手解析缓存 ``{缓存键: 解析记录}``
+        :return: ``(解析记录字典, 本轮是否沿用缓存)``
         """
         record = {
             "config_name": display_name,
@@ -691,7 +738,24 @@ class MusicArtistSubscribe(_PluginBase):
             "candidate_count": 0,
             "detail_link": "",
             "note": "",
+            # 记录是否来自缓存：仅用于排查，落盘时会被剔除
+            "from_cache": False,
         }
+
+        cached = cache.get(artist_entry_key(display_name, pinned_id)) if isinstance(cache, dict) else None
+        if isinstance(cached, dict) and str(cached.get("media_id") or ""):
+            # 配置文本一字未改：沿用当初的解析结果，note 原样保留（异常提示继续显示）
+            record = dict(cached)
+            record["config_name"] = display_name
+            record["from_cache"] = True
+            if pinned_id:
+                record["locked"] = True
+            logger.info(
+                f"歌手作品订阅：{display_name} 沿用上次解析 {record.get('name') or display_name}"
+                f"（{record.get('country') or '未知'} / {record.get('artist_type') or '未知'}）"
+                f"{record['media_id']}"
+            )
+            return record, True
 
         if pinned_id:
             record.update({
@@ -717,7 +781,7 @@ class MusicArtistSubscribe(_PluginBase):
                 logger.warning(
                     f"歌手作品订阅：{display_name} 锁定了艺术家ID {pinned_id}，但未取到艺术家详情"
                 )
-            return record
+            return record, False
 
         try:
             candidates = MediaChain().search_persons(
@@ -727,14 +791,14 @@ class MusicArtistSubscribe(_PluginBase):
         except Exception as err:
             logger.error(f"歌手作品订阅：搜索歌手 {display_name} 失败：{err}")
             record["note"] = f"搜索失败：{err}"
-            return record
+            return record, False
 
         picked = pick_artist_candidate(display_name, candidates)
         chosen = picked["chosen"]
         if chosen is None:
             logger.warning(f"歌手作品订阅：未搜索到歌手 {display_name}，跳过")
             record["note"] = picked["note"]
-            return record
+            return record, False
         if not picked["exact_match"] or picked["multiple"]:
             logger.warning(f"歌手作品订阅：{display_name} {picked['note']}")
 
@@ -746,6 +810,8 @@ class MusicArtistSubscribe(_PluginBase):
             "artist_type": str(field_of(chosen, "artist_type") or ""),
             "exact_match": bool(picked["exact_match"]),
             "candidate_count": int(picked["candidate_count"]),
+            # 原先漏写这一项，__artist_issue() 里的同名候选告警永远不亮
+            "multiple": bool(picked["multiple"]),
             "detail_link": field_of(chosen, "detail_link") or self.__artist_link(media_id),
             "note": picked["note"],
         })
@@ -754,7 +820,7 @@ class MusicArtistSubscribe(_PluginBase):
             f"（{record['country'] or '未知'} / {record['artist_type'] or '未知'}）"
             f" {media_id} 候选 {record['candidate_count']} 个"
         )
-        return record
+        return record, False
 
     @staticmethod
     def __artist_link(artist_id: str) -> str:
