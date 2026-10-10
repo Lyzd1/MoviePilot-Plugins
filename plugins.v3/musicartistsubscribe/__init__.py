@@ -36,6 +36,7 @@ import re
 import threading
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from urllib.parse import quote
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -443,7 +444,7 @@ class MusicArtistSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/icons/musicartistsubscribe.png"
     # 插件版本
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -826,6 +827,26 @@ class MusicArtistSubscribe(_PluginBase):
     def __artist_link(artist_id: str) -> str:
         """构造 MusicBrainz 艺术家详情链接。"""
         return f"https://musicbrainz.org/artist/{artist_id}" if artist_id else ""
+
+    def __artist_page_link(self, artist_id: str, name: str) -> str:
+        """
+        构造 MoviePilot **自己的**歌手页地址（详情页里点歌手ID 时用）。
+
+        宿主前端有现成的艺术家页 ``/music/artist``（hash 路由），认
+        ``media_source`` / ``media_id`` / ``title`` 三个 query 参数，与前端
+        自身拼链接的口径一致。这里刻意返回**相对 hash 链接**：用户可能挂着
+        反代或域名，写死主机名会失效，交给浏览器按当前站点解析即可。
+
+        :param artist_id: 完整的 MusicBrainz 艺术家ID
+        :param name: 歌手名，用作 ``title``（可为空，留空即可）
+        :return: 形如 ``#/music/artist?media_source=...&media_id=...&title=...`` 的相对链接
+        """
+        source = str(getattr(MediaSource.MusicBrainz, "value", MediaSource.MusicBrainz))
+        return (
+            f"#/music/artist?media_source={quote(source, safe='')}"
+            f"&media_id={quote(str(artist_id or ''), safe='')}"
+            f"&title={quote(str(name or ''), safe='')}"
+        )
 
     def __fetch_artist_info(self, artist_id: str) -> Optional[Any]:
         """按 ID 拉取艺术家详情（仅用于展示），失败时返回 None。"""
@@ -1511,8 +1532,8 @@ class MusicArtistSubscribe(_PluginBase):
         if record.get("locked"):
             nodes.append(self.__chip("已按ID锁定", "info"))
         if media_id:
-            # href 仍是完整 ID 的 MusicBrainz 页面，只把「显示文本」截断
-            link = str(record.get("detail_link") or "") or self.__artist_link(media_id)
+            # 跳到 MoviePilot 自己的歌手页（不再跳第三方 MusicBrainz），显示文本仍截断
+            link = self.__artist_page_link(media_id, name)
             nodes.append({
                 "component": "a",
                 "props": {
