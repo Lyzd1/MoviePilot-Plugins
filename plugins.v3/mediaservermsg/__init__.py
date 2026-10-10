@@ -42,7 +42,7 @@ class MediaServerMsg(_PluginBase):
     # 插件图标
     plugin_icon = "mediaplay.png"
     # 插件版本
-    plugin_version = "2.1.4"
+    plugin_version = "2.1.5"
     # 插件作者
     plugin_author = "jxxghp,Lyzd1"
     # 作者主页
@@ -719,9 +719,11 @@ class MediaServerMsg(_PluginBase):
         获取剧集ID，用于TV剧集入库通知去重
 
         优先级顺序：
-        1. 从JSON对象的Item中获取SeriesId
-        2. 从JSON对象的Item中获取SeriesName（作为备选）
-        3. 从event_info中直接获取series_id（fallback方案）
+        1. 事件媒体身份（media_source:media_id），集级与整剧级报文同键
+        2. 从JSON对象的Item中获取SeriesId
+        3. Item.Type 为 Series 时用 Item.Id（整剧条目自身即剧集ID）
+        4. 从JSON对象的Item中获取SeriesName或Name（作为备选）
+        5. 从event_info中直接获取series_id（fallback方案）
 
         Args:
             event_info (WebhookEventInfo): Webhook事件信息
@@ -730,11 +732,22 @@ class MediaServerMsg(_PluginBase):
             Optional[str]: 剧集ID或None（如果无法获取）
         """
         try:
+            # 优先用媒体身份：Emby 开启 GroupItems 后会发整剧级报文（无 SeriesId），
+            # 媒体身份对同一部剧的集级/整剧级报文解析结果一致，可保证去重键稳定。
+            media_source, media_id = self._resolve_event_media_identity(event_info)
+            if media_source and media_id:
+                return f"{getattr(media_source, 'value', media_source)}:{media_id}"
+
             # 从json_object中提取series_id
             json_object = getattr(event_info, 'json_object', None)
             if json_object and isinstance(json_object, dict):
                 item = json_object.get("Item", {})
-                series_id = item.get("SeriesId") or item.get("SeriesName")
+                series_id = item.get("SeriesId")
+                if not series_id and str(item.get("Type", "")).lower() == "series":
+                    # 整剧级报文的 Item.Id 就是剧集ID
+                    series_id = item.get("Id")
+                if not series_id:
+                    series_id = item.get("SeriesName") or item.get("Name")
                 if series_id:
                     return str(series_id)
 
@@ -979,7 +992,10 @@ class MediaServerMsg(_PluginBase):
                 f"⏰ 时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))}")
             # 添加每个集数的信息并合并连续集数
             episodes_detail = self._merge_continuous_episodes(events)
-            message_texts.append(f"📺 季集：{episodes_detail}")
+            # 整剧级报文（如 Emby 开启 GroupItems 后的 library.new）没有季集信息，
+            # 此时不输出空的季集行。
+            if episodes_detail and episodes_detail.strip():
+                message_texts.append(f"📺 季集：{episodes_detail}")
 
             # 统一分类服务返回稳定 ID 对应的当前路径，不再读取 legacy category.yaml。
             cat = self._classification_path(tmdb_info)
