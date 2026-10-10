@@ -444,7 +444,7 @@ class MusicArtistSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/icons/musicartistsubscribe.png"
     # 插件版本
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -700,6 +700,19 @@ class MusicArtistSubscribe(_PluginBase):
         logger.info(
             f"歌手作品订阅：本轮解析 —— 沿用上次 {reused_count} 位 / 重新识别 {len(entries) - reused_count} 位"
         )
+        # 收口：以本轮歌手名单为准，裁掉不再使用的旧缓存键。
+        # 键由「配置里那一条文本」决定，改过名字或补/去掉 @ID 后旧键永远不会再命中，
+        # 留着只会长期堆积，所以每轮对整份缓存做一次清理。
+        # 名单为空时函数已在开头 return，走不到这里，不会误清空整份缓存。
+        current_keys = {
+            artist_entry_key(display_name, pinned_id) for display_name, pinned_id in entries
+        }
+        removed = [key for key in list(cache) if key not in current_keys]
+        for key in removed:
+            cache.pop(key, None)
+        if removed:
+            logger.info(f"歌手作品订阅：已清理 {len(removed)} 条不再使用的歌手解析缓存")
+
         self.save_data(KEY_ARTISTS_RESOLVED, resolved_records)
         self.save_data(KEY_LAST_RUN, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         self.save_data(KEY_HANDLED, handled)
