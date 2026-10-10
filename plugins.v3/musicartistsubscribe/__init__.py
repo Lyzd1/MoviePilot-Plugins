@@ -444,7 +444,7 @@ class MusicArtistSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/icons/musicartistsubscribe.png"
     # 插件版本
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -828,24 +828,30 @@ class MusicArtistSubscribe(_PluginBase):
         """构造 MusicBrainz 艺术家详情链接。"""
         return f"https://musicbrainz.org/artist/{artist_id}" if artist_id else ""
 
-    def __artist_page_link(self, artist_id: str, name: str) -> str:
+    def __music_page_link(self, entity: str, media_id: str, title: str) -> str:
         """
-        构造 MoviePilot **自己的**歌手页地址（详情页里点歌手ID 时用）。
+        构造 MoviePilot **自己的**音乐页地址（歌手页 / 专辑页共用这一个构造器）。
 
-        宿主前端有现成的艺术家页 ``/music/artist``（hash 路由），认
-        ``media_source`` / ``media_id`` / ``title`` 三个 query 参数，与前端
-        自身拼链接的口径一致。这里刻意返回**相对 hash 链接**：用户可能挂着
-        反代或域名，写死主机名会失效，交给浏览器按当前站点解析即可。
+        ``entity`` 就是宿主前端自己的两个 hash 路由段：
 
-        :param artist_id: 完整的 MusicBrainz 艺术家ID
-        :param name: 歌手名，用作 ``title``（可为空，留空即可）
-        :return: 形如 ``#/music/artist?media_source=...&media_id=...&title=...`` 的相对链接
+        - ``"artist"``：歌手页 ``/music/artist``；
+        - ``"album"``：专辑页 ``/music/album``（release-group 在 MP 里就是「专辑」实体）。
+
+        两者认的都是 ``media_source`` / ``media_id`` / ``title`` 三个 query 参数，
+        与前端自身拼链接的口径一致，故收敛成一个构造器，避免两份重复逻辑走偏。
+        这里刻意返回**相对 hash 链接**：用户可能挂着反代或域名，写死主机名会失效，
+        交给浏览器按当前站点解析即可。
+
+        :param entity: 路由段，``"artist"``（歌手页）或 ``"album"``（专辑页）
+        :param media_id: 完整的 MusicBrainz ID（艺术家ID 或 release-group ID）
+        :param title: 展示标题，用作 ``title``（可为空，留空即可）
+        :return: 形如 ``#/music/<entity>?media_source=...&media_id=...&title=...`` 的相对链接
         """
         source = str(getattr(MediaSource.MusicBrainz, "value", MediaSource.MusicBrainz))
         return (
-            f"#/music/artist?media_source={quote(source, safe='')}"
-            f"&media_id={quote(str(artist_id or ''), safe='')}"
-            f"&title={quote(str(name or ''), safe='')}"
+            f"#/music/{entity}?media_source={quote(source, safe='')}"
+            f"&media_id={quote(str(media_id or ''), safe='')}"
+            f"&title={quote(str(title or ''), safe='')}"
         )
 
     def __fetch_artist_info(self, artist_id: str) -> Optional[Any]:
@@ -1533,7 +1539,7 @@ class MusicArtistSubscribe(_PluginBase):
             nodes.append(self.__chip("已按ID锁定", "info"))
         if media_id:
             # 跳到 MoviePilot 自己的歌手页（不再跳第三方 MusicBrainz），显示文本仍截断
-            link = self.__artist_page_link(media_id, name)
+            link = self.__music_page_link("artist", media_id, name)
             nodes.append({
                 "component": "a",
                 "props": {
@@ -1597,15 +1603,16 @@ class MusicArtistSubscribe(_PluginBase):
         订阅展示里的一条作品记录（紧凑一行，窄屏可折行）。
 
         从左到右：**封面缩略图**（缺失时用等尺寸灰底 + 音乐图标占位）+ 标题
-        （即 MusicBrainz release-group 详情链接）+ 歌手名 + 「类型 / 发行日期 /
-        处理结果 / 处理时间」，订阅失败时再补上 ``message`` 里的错误原因。
+        （有 ``media_id`` 时是 MoviePilot 自己的专辑页链接，没有则退化成纯文本）
+        + 歌手名 + 「类型 / 发行日期 / 处理结果 / 处理时间」，订阅失败时再补上
+        ``message`` 里的错误原因。
 
         平铺之后同一位歌手的作品不一定相邻，所以歌手名必须跟着每一行进；各项各自是
         独立节点、由 flex 间隙分隔（不再用固定列宽的 ``VCol`` 硬挤），外层
         ``flex-wrap``：窄屏上折行而不是被裁掉右半截。
         """
         title = str(item.get("title") or "")
-        detail_link = str(item.get("detail_link") or "")
+        media_id = str(item.get("media_id") or "")
         artist = str(item.get("artist") or "") or "未知歌手"
         album_type = str(item.get("album_type") or "专辑")
         release_date = str(item.get("release_date") or "无日期")
@@ -1615,10 +1622,14 @@ class MusicArtistSubscribe(_PluginBase):
         handle_time = str(item.get("time") or "")
 
         title_node: dict
-        if detail_link:
+        if media_id:
+            # 跳到 MoviePilot 自己的专辑页（不再跳第三方 MusicBrainz 页面）
             title_node = {
                 "component": "a",
-                "props": {"href": detail_link, "target": "_blank"},
+                "props": {
+                    "href": self.__music_page_link("album", media_id, title),
+                    "target": "_blank",
+                },
                 "text": title,
             }
         else:
