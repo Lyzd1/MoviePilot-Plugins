@@ -444,7 +444,7 @@ class MusicArtistSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/icons/musicartistsubscribe.png"
     # 插件版本
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -598,7 +598,7 @@ class MusicArtistSubscribe(_PluginBase):
 
         today = datetime.now().date()
         mode = "预演模式" if self._dry_run else "正式模式"
-        logger.info(
+        logger.debug(
             f"歌手作品订阅：开始检查 {len(entries)} 位歌手（{mode}，"
             f"类型={'/'.join(self._album_types) or '未选择'}，"
             f"追新 {self._recent_days} 天，提前 {self._preorder_days} 天）"
@@ -665,13 +665,13 @@ class MusicArtistSubscribe(_PluginBase):
                     continue
 
                 if self.__subscribe_exists(item):
-                    logger.info(f"歌手作品订阅：{artist_label} - {title} 订阅已存在")
+                    logger.debug(f"歌手作品订阅：{artist_label} - {title} 订阅已存在")
                     handled.append(media_id)
                     self.__save_progress(history, handled)
                     continue
 
                 if self.__media_exists(item):
-                    logger.info(f"歌手作品订阅：{artist_label} - {title} 媒体库中已存在")
+                    logger.debug(f"歌手作品订阅：{artist_label} - {title} 媒体库中已存在")
                     handled.append(media_id)
                     self.__save_progress(history, handled)
                     continue
@@ -697,7 +697,7 @@ class MusicArtistSubscribe(_PluginBase):
                 f"歌手「{artist_label}」：候选 {len(albums)} 条 / 命中 {hit} 条 / 新建订阅 {created} 条"
             )
 
-        logger.info(
+        logger.debug(
             f"歌手作品订阅：本轮解析 —— 沿用上次 {reused_count} 位 / 重新识别 {len(entries) - reused_count} 位"
         )
         # 收口：以本轮歌手名单为准，裁掉不再使用的旧缓存键。
@@ -711,13 +711,13 @@ class MusicArtistSubscribe(_PluginBase):
         for key in removed:
             cache.pop(key, None)
         if removed:
-            logger.info(f"歌手作品订阅：已清理 {len(removed)} 条不再使用的歌手解析缓存")
+            logger.debug(f"歌手作品订阅：已清理 {len(removed)} 条不再使用的歌手解析缓存")
 
         self.save_data(KEY_ARTISTS_RESOLVED, resolved_records)
         self.save_data(KEY_LAST_RUN, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         self.save_data(KEY_HANDLED, handled)
         self.save_data(KEY_ARTISTS_CACHE, cache)
-        logger.info("歌手作品订阅：本轮汇总 —— " + "；".join(summary))
+        logger.debug("歌手作品订阅：本轮汇总 —— " + "；".join(summary))
         if self._dry_run and planned:
             logger.warning(f"歌手作品订阅：预演完成，将订阅 {planned} 条（预演模式不会真正创建订阅）")
         self.save_data(KEY_HISTORY, history)
@@ -764,7 +764,7 @@ class MusicArtistSubscribe(_PluginBase):
             record["from_cache"] = True
             if pinned_id:
                 record["locked"] = True
-            logger.info(
+            logger.debug(
                 f"歌手作品订阅：{display_name} 沿用上次解析 {record.get('name') or display_name}"
                 f"（{record.get('country') or '未知'} / {record.get('artist_type') or '未知'}）"
                 f"{record['media_id']}"
@@ -786,7 +786,7 @@ class MusicArtistSubscribe(_PluginBase):
                 record["country"] = str(field_of(info, "country") or "")
                 record["artist_type"] = str(field_of(info, "artist_type") or "")
                 record["detail_link"] = field_of(info, "detail_link") or record["detail_link"]
-                logger.info(
+                logger.debug(
                     f"歌手作品订阅：{display_name} 已锁定为 "
                     f"{record['name']}（{record['country'] or '未知'} / "
                     f"{record['artist_type'] or '未知'}）{pinned_id}"
@@ -829,7 +829,7 @@ class MusicArtistSubscribe(_PluginBase):
             "detail_link": field_of(chosen, "detail_link") or self.__artist_link(media_id),
             "note": picked["note"],
         })
-        logger.info(
+        logger.debug(
             f"歌手作品订阅：{display_name} 解析为 {record['name']}"
             f"（{record['country'] or '未知'} / {record['artist_type'] or '未知'}）"
             f" {media_id} 候选 {record['candidate_count']} 个"
@@ -989,8 +989,8 @@ class MusicArtistSubscribe(_PluginBase):
                 music_type="album",
                 exist_ok=True,
                 username=self.plugin_name,
-                # 用户明确要求本插件不发送订阅通知，固定关闭（不做成配置项）
-                message=False,
+                # 发送宿主的「已添加订阅」通知（默认行为，不做成配置项）
+                message=True,
             )
         except Exception as err:
             logger.error(f"歌手作品订阅：添加订阅异常 {artist} - {title}：{err}")
