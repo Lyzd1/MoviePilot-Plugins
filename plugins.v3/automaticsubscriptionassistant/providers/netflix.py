@@ -280,8 +280,12 @@ class NetflixRankProvider(RankProvider):
         """返回本来源的元描述（选项与过滤器 schema）。
 
         媒体类型已由全球/国家的 category 选择区分、Netflix 无年份数据（``year=None``），故
-        不提供年份/类型过滤；「评分≥」走通用 ``VoteFilter``（post，识别后的 TMDB 评分口径
-        ——Netflix 数据集本身不含评分），**不覆写**为豆瓣那套「按榜单自带豆瓣评分判定」的口径。
+        不提供年份/类型过滤；评分改走 **IMDb 口径**（``imdb_vote`` / ``imdb_votes``，post，
+        默认 8.0 分 + 2 万人）：Netflix 数据集本身不含评分，识别后按 ``mediainfo.imdb_id``
+        查 IMDb（拿不到 id 时按标题搜索兜底），**不再使用识别后的 TMDB 评分**——TMDB 上刚
+        上线的新剧评分人数常只有个位数、分数噪声极大（实测某剧 TMDB 8.3 分/6 人，IMDb 5.2
+        分/1189 人）。语义见 ``core/filters.py``：阈值 ≤ 0 视为未启用；查询异常放行；未匹配
+        到 IMDb 条目 / 条目暂无评分会被拦下。
 
         另有「排除第 2 季及以后」（``season_exclude``，post，默认关）：季号取本来源榜单数据
         抽出的 ``item.season``，在 ``PROVIDER_FILTER_OVERRIDES`` 里覆写为
@@ -353,12 +357,22 @@ class NetflixRankProvider(RankProvider):
                 ),
             ],
             filters_schema=[
+                # 评分按 IMDb 口径（不再声明 vote / TMDB 评分）：先按 imdb_id 查 IMDb，
+                # 无 id 时按标题搜索兜底；两者共用一次查询（见 core/filters.py）。
                 FieldSpec(
-                    key="vote",
-                    label="评分≥",
+                    key="imdb_vote",
+                    label="IMDb 评分≥",
                     kind="float",
-                    default=0,
-                    hint="按识别后的 TMDB 评分过滤；识别失败的条目不会进入评分判定",
+                    default=8,
+                    hint="按 IMDb 评分过滤（识别后按 imdb_id 查 IMDb；匹配不到 IMDb 条目的会被拦下）",
+                ),
+                FieldSpec(
+                    key="imdb_votes",
+                    label="IMDb 评分人数≥",
+                    kind="number",
+                    default=20000,
+                    hint="按 IMDb 评分人数过滤，用于挡掉刚上线、样本太少的高分噪声"
+                         "（如 TMDB 6 人 8.3 分）；想不限设为 0",
                 ),
                 # 排在最后：post 链上位于评分过滤之后（取前 N → 识别 → 评分过滤 → 本项）。
                 FieldSpec(

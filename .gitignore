@@ -166,6 +166,8 @@ logsclean/
 mcpserver_bk/
 events.db
 test_*
+# 上面的 test_* 是针对仓库根临时脚本的；插件自带的单测要入库，这里开个口子。
+!plugins.v3/**/tests/test_*.py
 __federation_shared_vuetify/
 index-*
 date-*

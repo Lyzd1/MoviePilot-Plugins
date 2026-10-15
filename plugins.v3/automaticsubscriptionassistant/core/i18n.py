@@ -91,6 +91,9 @@ _TEXT: Dict[str, Dict[str, str]] = {
     "自定义RSS地址": {"zh-TW": "自訂 RSS 位址", "en-US": "Custom RSS URLs"},
     "使用代理服务器": {"zh-TW": "使用代理伺服器", "en-US": "Use proxy"},
     "评分≥": {"zh-TW": "評分≥", "en-US": "Rating ≥"},
+    # 奈飞改走 IMDb 口径后的两个新 label（其它来源的「评分≥」不受影响）。
+    "IMDb 评分≥": {"zh-TW": "IMDb 評分≥", "en-US": "IMDb rating ≥"},
+    "IMDb 评分人数≥": {"zh-TW": "IMDb 評分人數≥", "en-US": "IMDb votes ≥"},
     "年份≥": {"zh-TW": "年份≥", "en-US": "Year ≥"},
     "媒体类型": {"zh-TW": "媒體類型", "en-US": "Media type"},
     "排除第2季及以后": {"zh-TW": "排除第2季及以後", "en-US": "Exclude season 2+"},
@@ -270,10 +273,17 @@ _HINTS: Dict[Any, Dict[str, str]] = {
                  "entries without a season number and movies are unaffected; "
                  "off by default",
     },
-    ("netflix", "vote"): {
-        "zh-TW": "按識別後的 TMDB 評分過濾；識別失敗的條目不會進入評分判定",
-        "en-US": "Filters by the post-recognition TMDB rating; entries that fail "
-                 "recognition are never rating-judged",
+    ("netflix", "imdb_vote"): {
+        "zh-TW": "按 IMDb 評分過濾（識別後按 imdb_id 查 IMDb；匹配不到 IMDb 條目的會被攔下）",
+        "en-US": "Filters by the IMDb rating (looked up by imdb_id after recognition; "
+                 "entries with no IMDb match are blocked)",
+    },
+    ("netflix", "imdb_votes"): {
+        "zh-TW": "按 IMDb 評分人數過濾，用於擋掉剛上線、樣本太少的高分噪聲"
+                 "（如 TMDB 6 人 8.3 分）；想不限設為 0",
+        "en-US": "Filters by the IMDb vote count to block high-score noise from "
+                 "freshly released titles with too few votes (e.g. TMDB 8.3 from 6 "
+                 "votes); set 0 for no limit",
     },
     ("netflix", "season_exclude"): {
         "zh-TW": "開啟後不訂閱「第2季及以後」的劇集（按 Netflix 資料自帶的季號 Season N "

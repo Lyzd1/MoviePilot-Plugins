@@ -10,6 +10,17 @@ TMDB 评分，走 post 的 ``VoteFilter``。两者判定时机相同（都在识
 前者读榜单自带的豆瓣评分，后者读宿主识别出的 TMDB 评分。配置项的 key 不变，故用户已保存
 的阈值在两种口径间无缝沿用。
 
+``imdb_vote`` / ``imdb_votes``（post，**默认 8.0 分 + 2 万人**，供奈飞来源使用）改用
+**IMDb 的评分与评分人数**判定，取代 TMDB 评分口径：TMDB 上刚上线的新剧常常只有个位数评分
+人数，分数噪声极大（实测某剧 TMDB 8.3 分/6 人，IMDb 5.2 分/1189 人）。两者都先取
+``mediainfo.imdb_id``，拿不到再用标题搜索兜底（**分级匹配：精确 → 完整前缀 → 类型 + 年份
+最接近**，详见 ``_pick_imdb_candidate``），并复用同一份进程内查询结果——同一条目被两个
+过滤器各判一次也只查一次网络。判定语义：
+
+- 阈值 ≤ 0 / 空 / 非法 → 未启用，放行，且**不发起任何 IMDb 查询**；
+- 查询过程抛异常（含宿主没有 IMDb 客户端）→ **放行**（环境问题不该造成大面积漏订）并记 warn；
+- 未匹配到 IMDb 条目 / 条目没有评分 → **拒绝**（刚上线、无人在 IMDb 打分的内容不该被订阅）。
+
 ``season_exclude``（「排除第 2 季及以后」，post，**默认关闭**）按来源分派**两套**实现：
 
 - ``TitleSeasonExcludeFilter``（豆瓣 / Mikan 共用）：从**条目标题**解析季号，单位词认
@@ -25,10 +36,12 @@ TMDB 评分，走 post 的 ``VoteFilter``。两者判定时机相同（都在识
 from __future__ import annotations
 
 import re
+import threading
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Dict, List, Optional, Type
+from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional, Type
 
 from app.schemas.types import MediaType
+from app.sdk.logging import logger
 
 from .models import FilterVerdict, RankMediaItem
 
@@ -109,6 +122,234 @@ def _parse_title_season(title: str) -> Optional[int]:
     return _cn_number(match.group(1))
 
 
+# ==================== IMDb 评分查询（imdb_vote / imdb_votes 共用）====================
+# 宿主的 IMDb 客户端与配置入口都做防御性导入：拿不到（宿主版本不符 / 离线测试）即视为
+# 「查询不可用」，由过滤器按「异常放行」处理——环境问题不该造成大面积漏订。
+try:
+    from app.modules.imdb.api import ImdbApi
+    from app.sdk.config import settings
+except Exception:  # noqa: BLE001 - 缺失时降级，不影响插件加载
+    ImdbApi = None
+    settings = None
+
+
+class ImdbLookup(NamedTuple):
+    """一次 IMDb 查询的结果：是否匹配到条目，以及评分 / 评分人数（都可能缺失）。"""
+
+    matched: bool = False
+    imdb_id: Optional[str] = None
+    rating: Optional[float] = None
+    votes: Optional[int] = None
+
+
+# 识别类型 -> 允许的 IMDb ``titleType``（搜索兜底时挡下同名不同形态的候选）。
+_IMDB_TYPES_BY_MEDIA_TYPE = {
+    MediaType.TV: frozenset({"tvSeries", "tvMiniSeries"}),
+    MediaType.MOVIE: frozenset({"movie", "tvMovie"}),
+}
+# 识别类型缺失或非影/剧时的兜底集合：仍只认影/剧，排除 short / videoGame / podcast 等。
+_IMDB_TYPES_FALLBACK = frozenset({"movie", "tvMovie", "tvSeries", "tvMiniSeries"})
+
+# 「完整前缀」匹配的长度比下限：短串 / 长串 低于该值就不认前缀命中，防止 `Monster` 这类
+# 短名匹配到 `Monster Hunter` 之类的长标题。
+_IMDB_PREFIX_MIN_RATIO = 0.6
+# 例外：查询串不短于该长度且**是**候选标题的前缀时，不受上面的比值限制。奈飞榜单常给出
+# 缩短名（`DAHMER` → IMDb `Dahmer – Monster: The Jeffrey Dahmer Story`，比值仅约 0.15），
+# 这类「榜单用简称、IMDb 用全称」的情况必须能命中。
+_IMDB_PREFIX_MIN_QUERY = 5
+
+# 进程内查询结果缓存：同一条目被两个过滤器各判一次时只发一次网络（键见 ``_imdb_lookup``）。
+_IMDB_CACHE: Dict[str, ImdbLookup] = {}
+_IMDB_CACHE_LOCK = threading.Lock()
+# 宿主 IMDb 客户端单例（自带跨调用请求缓存）；代理配置变了就重建。
+_IMDB_API_LOCK = threading.Lock()
+_IMDB_API_STATE: Dict[str, object] = {"proxy": None, "api": None}
+
+
+def _imdb_api():
+    """返回惰性构造并复用的宿主 IMDb 客户端；不可用时抛异常，由调用方按「放行」处理。"""
+    if ImdbApi is None:
+        raise RuntimeError("宿主未提供 IMDb 客户端（app.modules.imdb.api.ImdbApi 不可用）")
+    proxy = (getattr(settings, "PROXY", None) or None) if settings is not None else None
+    with _IMDB_API_LOCK:
+        if _IMDB_API_STATE["api"] is None or _IMDB_API_STATE["proxy"] != proxy:
+            _IMDB_API_STATE["api"] = ImdbApi(proxies=proxy)
+            _IMDB_API_STATE["proxy"] = proxy
+        return _IMDB_API_STATE["api"]
+
+
+def _normalize_title(value) -> str:
+    """标题归一化：转小写、非字母数字压成单空格、去首尾空格。
+
+    用 Unicode 版 ``\\W``（把下划线一并算作分隔符）：中文字符属于 ``\\w``，故中文标题
+    不会被清空——若被清空，两个空串相等会把不同作品误判为同一条目。
+    """
+    return re.sub(r"[\W_]+", " ", str(value or "").lower()).strip()
+
+
+def _year_of(value) -> Optional[int]:
+    """抽四位年份（``"2019"`` / ``"2019-01-01"`` 均可）；抽不到返回 None。"""
+    match = re.search(r"\d{4}", str(value or ""))
+    return int(match.group(0)) if match else None
+
+
+def _imdb_query_of(mediainfo) -> str:
+    """搜索兜底用的查询串：``en_title`` → ``original_title`` → ``title`` 的第一个非空值。"""
+    for attr in ("en_title", "original_title", "title"):
+        value = str(getattr(mediainfo, attr, None) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _imdb_candidates(titles, mediainfo) -> list:
+    """按识别类型筛出可用的 IMDb 候选（TV/MOVIE 各一套 ``titleType``）。"""
+    allowed = _IMDB_TYPES_BY_MEDIA_TYPE.get(
+        getattr(mediainfo, "type", None), _IMDB_TYPES_FALLBACK)
+    return [t for t in (titles or []) if str(getattr(t, "type", "") or "") in allowed]
+
+
+def _imdb_title_names(candidate) -> tuple:
+    """候选的归一化标题（``primary_title`` / ``original_title``）。"""
+    return (_normalize_title(getattr(candidate, "primary_title", None)),
+            _normalize_title(getattr(candidate, "original_title", None)))
+
+
+def _is_prefix_match(query: str, candidate: str) -> bool:
+    """分级匹配第 2 级：一方是另一方的前缀，且长度比达标。
+
+    比值低于 ``_IMDB_PREFIX_MIN_RATIO`` 时，只有「查询串不短于 ``_IMDB_PREFIX_MIN_QUERY``
+    且**本身是候选标题的前缀**」才放行（榜单用简称、IMDb 用全称的场景）；反向（候选是查询
+    的前缀）不享受该例外，避免 ``Monster`` 这类短候选名把 ``Monster: The Lizzie Borden
+    Story`` 整个吃掉——那种情况交给第 3 级兜底，由年份（该剧按整剧口径记在 ``Monster`` 下）
+    决定。
+    """
+    if not query or not candidate:
+        return False
+    if not (candidate.startswith(query) or query.startswith(candidate)):
+        return False
+    short, long = sorted((query, candidate), key=len)
+    if len(short) / len(long) >= _IMDB_PREFIX_MIN_RATIO:
+        return True
+    return len(query) >= _IMDB_PREFIX_MIN_QUERY and candidate.startswith(query)
+
+
+def _closest_by_year(candidates, year: Optional[int]):
+    """按 ``start_year`` 与 ``year`` 最接近挑一条；``year`` 缺失时取年份最大的一条。
+
+    无年份的候选一律排在有年份的之后（避免把「年份未知」当成精确命中）；同样接近时取
+    年份更大的那条（新作更可能是榜单当下推的内容）。
+    """
+    if year is None:
+        return max(candidates,
+                   key=lambda t: _year_of(getattr(t, "start_year", None)) or 0)
+
+    def _distance(candidate) -> tuple:
+        """(无年份排最后, 年份差, 年份大的优先)。"""
+        start_year = _year_of(getattr(candidate, "start_year", None))
+        if start_year is None:
+            return 1, 0, 0
+        return 0, abs(start_year - year), -start_year
+
+    return min(candidates, key=_distance)
+
+
+def _pick_imdb_candidate(titles, query: str, mediainfo):
+    """在 IMDb 搜索结果里挑出最可能对应的一条（分级匹配，命中即停）。
+
+    奈飞榜单与 IMDb 记名口径常不一致，只按「归一化标题完全相等」匹配会大量漏订（实测
+    70 个片名里 8 个匹配失败），故分三级放宽：
+
+    1. **精确**：归一化后与候选的 ``primary_title`` / ``original_title`` 相等；
+    2. **完整前缀**：一方是另一方的前缀且长度比 ≥ ``_IMDB_PREFIX_MIN_RATIO``；查询串不短于
+       ``_IMDB_PREFIX_MIN_QUERY`` 且是候选前缀时不受比值限制（见 ``_is_prefix_match``）；
+    3. **兜底**：类型对得上但标题写法完全不同时，取 ``start_year`` 与 ``mediainfo.year``
+       最接近的一条（年份缺失取年份最大的一条），并记一条 debug 日志便于回溯。
+
+    每一级内部若有多条命中，仍按 ``_closest_by_year`` 用年份定夺（同名重拍/多版本常见）。
+    类型过滤始终生效：没有同类型候选即返回 None（= 未匹配，调用方按拒绝处理）。第 3 级只
+    放宽「候选选择」，不放宽「无同类型候选 → 拒绝」。
+    """
+    wanted = _normalize_title(query)
+    candidates = _imdb_candidates(titles, mediainfo)
+    if not wanted or not candidates:
+        return None
+    year = _year_of(getattr(mediainfo, "year", None))
+
+    # 1. 精确匹配。
+    exact = [c for c in candidates if wanted in _imdb_title_names(c)]
+    if exact:
+        return _closest_by_year(exact, year)
+
+    # 2. 完整前缀匹配。
+    prefix = [
+        c for c in candidates
+        if any(_is_prefix_match(wanted, name) for name in _imdb_title_names(c) if name)
+    ]
+    if prefix:
+        return _closest_by_year(prefix, year)
+
+    # 3. 兜底：类型匹配但标题不同，取年份最接近的一条，并记日志便于回溯。
+    picked = _closest_by_year(candidates, year)
+    logger.debug(
+        f"IMDb 非精确匹配：查询「{query}」按类型+年份选中候选"
+        f"「{getattr(picked, 'primary_title', None) or getattr(picked, 'original_title', None)}」"
+        f"（{getattr(picked, 'id', None)}，{getattr(picked, 'start_year', None)}）"
+    )
+    return picked
+
+
+def _fetch_imdb_lookup(mediainfo, imdb_id: str, query: str) -> ImdbLookup:
+    """实际发起 IMDb 查询（测试替换此函数即可避免真实网络）。
+
+    先定 ID：``imdb_id`` 非空直接用，否则按标题搜索兜底（``search_titles(query, limit=8)``
+    的候选自带类型/年份可供筛选）；再按 ID 取详情读 ``rating.aggregate_rating`` 与
+    ``rating.vote_count``——**搜索结果自身的 ``rating`` 恒为 None，评分只能另查详情**。
+    网络/解析异常一律向上抛，由过滤器按「放行」处理。
+    """
+    api = _imdb_api()
+    if not imdb_id:
+        candidate = _pick_imdb_candidate(
+            api.search_titles(query, limit=8) if query else [], query, mediainfo)
+        if candidate is None:
+            return ImdbLookup(matched=False)
+        imdb_id = str(getattr(candidate, "id", "") or "").strip()
+        if not imdb_id:
+            return ImdbLookup(matched=False)
+    title = api.get_title(imdb_id)
+    rating = getattr(title, "rating", None) if title is not None else None
+    return ImdbLookup(
+        matched=True,
+        imdb_id=imdb_id,
+        rating=getattr(rating, "aggregate_rating", None) if rating is not None else None,
+        votes=getattr(rating, "vote_count", None) if rating is not None else None,
+    )
+
+
+def _imdb_lookup(mediainfo) -> ImdbLookup:
+    """查一条 MediaInfo 的 IMDb 评分与评分人数（带进程内缓存，同一条目只查一次网络）。
+
+    缓存键优先用 ``mediainfo.imdb_id``；无 id（需按标题搜索）时用「识别类型 + 归一化查询串」
+    ——带上类型是因为同名电影与剧集的候选集合不同，只按标题串缓存会让两者互相串味。
+    **查询抛异常时不写缓存**，下一个条目/下一轮仍可再试（避免一次网络抖动污染整个进程）。
+    """
+    imdb_id = str(getattr(mediainfo, "imdb_id", None) or "").strip()
+    query = _imdb_query_of(mediainfo)
+    if imdb_id:
+        key = f"id:{imdb_id}"
+    else:
+        mtype = getattr(getattr(mediainfo, "type", None), "value", None)
+        key = f"q:{mtype}:{_normalize_title(query)}"
+    with _IMDB_CACHE_LOCK:
+        hit = _IMDB_CACHE.get(key)
+    if hit is not None:
+        return hit
+    result = _fetch_imdb_lookup(mediainfo, imdb_id, query)
+    with _IMDB_CACHE_LOCK:
+        _IMDB_CACHE[key] = result
+    return result
+
+
 class MediaFilter(ABC):
     """过滤器基类。"""
 
@@ -176,6 +417,84 @@ class SourceVoteFilter(MediaFilter):
         if vote >= threshold:
             return FilterVerdict.accept()
         return FilterVerdict.reject(self.filter_id, f"评分 {vote} < {threshold}")
+
+
+class _ImdbFilterBase(MediaFilter):
+    """IMDb 口径过滤器（post）的公共骨架：阈值判定 → 查询 → 未匹配/异常处理。
+
+    阈值 ≤ 0 / 空 / 非法视为未启用：**先返回放行、不发起任何 IMDb 查询**。查询过程抛异常
+    （含宿主没有 IMDb 客户端）一律放行并记一条 warn——这是环境问题，拦下来会造成大面积漏订。
+    查询到「未匹配到 IMDb 条目」才会拒绝；匹配到条目后由子类按各自字段（评分 / 评分人数）
+    裁决。两个子类共用 ``_imdb_lookup`` 的进程内缓存，故同一条目只查一次网络。
+    """
+
+    stage = "post"
+
+    def accept(self, item, mediainfo, config):
+        threshold = self._threshold(config)
+        if threshold <= 0:
+            return FilterVerdict.accept()
+        try:
+            lookup = _imdb_lookup(mediainfo)
+        except Exception as err:  # noqa: BLE001 - 查询环境问题放行，避免大面积漏订
+            logger.warning(f"IMDb 查询失败，{self.filter_id} 本次放行（不拦截该条目）：{err}")
+            return FilterVerdict.accept()
+        if not lookup.matched:
+            return FilterVerdict.reject(self.filter_id, "IMDb 未匹配到条目")
+        return self._judge(lookup, threshold)
+
+    def _threshold(self, config):
+        """本过滤器的阈值（≤ 0 即未启用）；子类给出各自的取值方式。"""
+        raise NotImplementedError
+
+    def _judge(self, lookup: ImdbLookup, threshold) -> FilterVerdict:
+        """按本过滤器的口径裁决一条已匹配到的 IMDb 条目。"""
+        raise NotImplementedError
+
+
+class ImdbVoteFilter(_ImdbFilterBase):
+    """IMDb 评分过滤（post）：``rating.aggregate_rating`` >= 阈值。
+
+    供奈飞来源取代 TMDB 评分口径：TMDB 上刚上线的新剧评分人数常只有个位数、分数噪声极大，
+    IMDb 的评分人数门槛（``ImdbVoteCountFilter``）才挡得住这类高分开局。**无评分的条目**
+    （``aggregate_rating`` 为 None 或 ≤ 0）一律不达标——评分缺失时无法判断质量。
+    """
+
+    filter_id = "imdb_vote"
+
+    def _threshold(self, config):
+        return _to_float((config or {}).get(self.filter_id))
+
+    def _judge(self, lookup, threshold):
+        # _to_float 把 None / 非数字统一成 0.0，与「无评分」同义。
+        rating = _to_float(lookup.rating)
+        if rating <= 0:
+            return FilterVerdict.reject(self.filter_id, "IMDb 暂无评分")
+        if rating < threshold:
+            return FilterVerdict.reject(
+                self.filter_id, f"IMDb 评分 {rating} < {threshold}")
+        return FilterVerdict.accept()
+
+
+class ImdbVoteCountFilter(_ImdbFilterBase):
+    """IMDb 评分人数过滤（post）：``rating.vote_count`` >= 阈值。
+
+    用于挡掉刚上线、样本太少的高分噪声（如 TMDB 6 人 8.3 分、IMDb 1189 人 5.2 分）。
+    评分缺失的条目由 ``ImdbVoteFilter`` 负责拦；本过滤器只认人数，「无人数」同样按不达标处理
+    （``_to_int`` 把 None 归一成 0）。
+    """
+
+    filter_id = "imdb_votes"
+
+    def _threshold(self, config):
+        return _to_int((config or {}).get(self.filter_id))
+
+    def _judge(self, lookup, threshold):
+        votes = _to_int(lookup.votes)
+        if votes < threshold:
+            return FilterVerdict.reject(
+                self.filter_id, f"IMDb 评分人数 {votes} < {threshold}")
+        return FilterVerdict.accept()
 
 
 class YearFilter(MediaFilter):
@@ -307,6 +626,9 @@ class FilterChain:
 # 内置过滤器注册表：filter_id -> 过滤器类。
 BUILTIN_FILTERS: Dict[str, Type[MediaFilter]] = {
     VoteFilter.filter_id: VoteFilter,
+    # IMDb 评分 / 评分人数（奈飞来源改用这套口径，见 providers/netflix.py）。
+    ImdbVoteFilter.filter_id: ImdbVoteFilter,
+    ImdbVoteCountFilter.filter_id: ImdbVoteCountFilter,
     YearFilter.filter_id: YearFilter,
     PopularityFilter.filter_id: PopularityFilter,
     MediaTypeFilter.filter_id: MediaTypeFilter,
