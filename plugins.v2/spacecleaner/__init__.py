@@ -51,6 +51,7 @@
 import datetime
 import os
 import shutil
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -65,6 +66,13 @@ from app.helper.service import ServiceConfigHelper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType, ServiceInfo
+from app.schemas.types import EventType
+from app.sdk.events import Event, eventmanager
+
+# 清理任务单飞锁：cron 与「大种子触发」同时到达时只允许一轮执行
+_RUN_LOCK = threading.Lock()
+# 事件触发状态锁（去重/冷却）
+_TRIGGER_LOCK = threading.Lock()
 
 
 class SpaceCleaner(_PluginBase):
@@ -83,7 +91,7 @@ class SpaceCleaner(_PluginBase):
     # 插件图标
     plugin_icon = "Qbittorrent_A.png"
     # 插件版本
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -107,6 +115,10 @@ class SpaceCleaner(_PluginBase):
     _onlyonce = False
     # 执行周期（cron 表达式）
     _cron = "*/30 * * * *"
+    # 大种子触发主动检查：MoviePilot 添加下载时，种子达到阈值就先判断一次空间
+    _trigger_on_large_download = True
+    # 大种子阈值（GB），0 表示不触发
+    _large_download_threshold_gb = 10.0
     # 已选择的下载器名称（仅 qBittorrent）
     _downloaders: List[str] = []
     # 监控路径（容器内路径）
@@ -147,6 +159,10 @@ class SpaceCleaner(_PluginBase):
     _SETTLE_INTERVAL = 2.0
     # 结算等待的「已明显开始归还」判定上限（字节）：预期归还量的 50% 与该值取小
     _SETTLE_EARLY_CAP = 2 * 1024 ** 3
+    # 大种子触发的冷却时间（秒）：批量添加多个大种子时只主动检查一次
+    _TRIGGER_COOLDOWN = 10 * 60
+    # 触发去重保留的 hash 上限
+    _TRIGGER_HASH_LIMIT = 200
 
     # ---- 运行时状态 ----
     # 「立即运行一次」的一次性调度器
@@ -156,6 +172,9 @@ class SpaceCleaner(_PluginBase):
     # 无释放空间闭锁（跨会话持久化）：检测到「删了种子但磁盘空间没释放」后暂停自动删除，
     # 避免定时任务一轮一轮地把种子删光；修正配置（删除文件/监控路径变化）或空间恢复后自动解除
     _latch: Dict[str, Any] = {}
+    # 大种子触发的冷却时间戳与已触发 hash（进程内状态）
+    _last_trigger_at = 0.0
+    _triggered_hashes: List[str] = []
 
     # 持久化数据键
     _LAST_RESULT_KEY = "last_result"
@@ -192,6 +211,12 @@ class SpaceCleaner(_PluginBase):
         self._process_duplicates = self._to_bool(config.get("process_duplicates"), True)
         self._delete_files = self._to_bool(config.get("delete_files"), True)
         self._exclude_paths, self._exclude_text = self._normalize_excludes(config.get("exclude_paths"))
+        self._trigger_on_large_download = self._to_bool(config.get("trigger_on_large_download"), True)
+        self._large_download_threshold_gb = self._to_float(
+            config.get("large_download_threshold_gb"), 10.0, minimum=0.0
+        )
+        self._last_trigger_at = 0.0
+        self._triggered_hashes = []
 
         # 读取上次运行结果（详情页展示用）
         try:
@@ -388,9 +413,77 @@ class SpaceCleaner(_PluginBase):
         """返回插件启用状态。"""
         return bool(self._enabled)
 
+    @eventmanager.register(EventType.DownloadAdded)
+    def download_added(self, event: Event):
+        """MoviePilot 添加下载：新种子达到阈值时主动检查一次空间。"""
+        if not self._enabled or not self._trigger_on_large_download:
+            return
+        threshold_bytes = int(self._large_download_threshold_gb * 1024 ** 3)
+        if threshold_bytes <= 0:
+            return
+        try:
+            data = event.event_data or {}
+            downloader = str(data.get("downloader") or "")
+            torrent_hash = str(data.get("hash") or "")
+            context = data.get("context")
+            torrent = getattr(context, "torrent_info", None) if context else None
+            if not torrent:
+                return
+            # 只处理本插件配置的下载器
+            if self._downloaders and downloader and downloader not in self._downloaders:
+                return
+            size = int(getattr(torrent, "size", 0) or 0)
+            if size < threshold_bytes:
+                return
+            name = str(getattr(torrent, "title", "") or torrent_hash or "未知种子")
+            with _TRIGGER_LOCK:
+                if torrent_hash and torrent_hash in self._triggered_hashes:
+                    return
+                now = time.time()
+                remain = int(self._TRIGGER_COOLDOWN - (now - self._last_trigger_at))
+                if remain > 0:
+                    logger.info(
+                        f"{self.LOG_TAG}大种子 {name}（{self._fmt_size(size)}）触发检查，"
+                        f"距上次触发不足 {self._TRIGGER_COOLDOWN // 60} 分钟"
+                        f"（还需等待 {remain} 秒），本次跳过"
+                    )
+                    return
+                self._last_trigger_at = now
+                if torrent_hash:
+                    self._triggered_hashes.append(torrent_hash)
+                    if len(self._triggered_hashes) > self._TRIGGER_HASH_LIMIT:
+                        self._triggered_hashes = self._triggered_hashes[-self._TRIGGER_HASH_LIMIT:]
+            logger.warning(
+                f"{self.LOG_TAG}检测到 MoviePilot 新增大种子：{name}"
+                f"（{self._fmt_size(size)} ≥ {self._large_download_threshold_gb:g} GB），"
+                "主动检查一次空间"
+            )
+            # 清理可能要几十秒到几分钟，放后台线程，避免阻塞事件分发（其它插件也在监听同一事件）
+            threading.Thread(
+                target=self.run_cleanup,
+                kwargs={"reserved_bytes": size, "trigger_reason": f"新增大种子 {name}"},
+                name="SpaceCleanerLargeDownloadCheck",
+                daemon=True,
+            ).start()
+        except Exception as err:
+            logger.error(f"{self.LOG_TAG}处理添加下载事件失败：{err}", exc_info=True)
+
     # ---------------------------------------------------------------- 主流程
 
-    def run_cleanup(self):
+    def run_cleanup(self, reserved_bytes: int = 0, trigger_reason: str = ""):
+        """执行一轮空间检查与清理（同一时间只允许一轮）。"""
+        if not _RUN_LOCK.acquire(blocking=False):
+            logger.info(
+                f"{self.LOG_TAG}上一轮检查仍在执行，本次触发跳过"
+                f"（{trigger_reason or '定时任务'}）"
+            )
+            return
+        try:
+            self._run_cleanup(reserved_bytes=reserved_bytes, trigger_reason=trigger_reason)
+        finally:
+            _RUN_LOCK.release()
+
+    def _run_cleanup(self, reserved_bytes: int = 0, trigger_reason: str = ""):
         """
         执行一轮空间检查与清理：
 
@@ -418,24 +511,52 @@ class SpaceCleaner(_PluginBase):
             return
         total_bytes, free_bytes = usage
         free_gb = free_bytes / 1024 ** 3
+        reserve_bytes = max(int(reserved_bytes or 0), 0)
+        reserve_gb = reserve_bytes / 1024 ** 3
+        effective_free_gb = self._effective_free_gb(free_gb, reserve_gb)
+        stop_gb = self._stop_target_gb(self._target_gb, self._threshold_gb, reserve_gb)
         logger.info(
             f"{self.LOG_TAG}当前剩余空间 {free_gb:.1f} GB / 总量 {total_bytes / 1024 ** 3:.1f} GB"
         )
+        if reserve_gb > 0:
+            logger.info(
+                f"{self.LOG_TAG}本次由「{trigger_reason or '大种子触发'}」发起："
+                f"种子预留 {reserve_gb:.1f} GB，预计剩余 {effective_free_gb:.1f} GB"
+            )
 
         # 空间充足：不清理、不通知，只更新详情页状态；同时解除「无释放空间」闭锁
-        if free_gb >= self._threshold_gb:
-            logger.info(
-                f"{self.LOG_TAG}剩余空间 {free_gb:.1f} GB ≥ 触发阈值 {self._threshold_gb:g} GB，空间充足，无需清理"
-            )
+        if effective_free_gb >= self._threshold_gb:
+            if reserve_gb > 0:
+                message = (
+                    f"空间充足，无需清理（预留 {reserve_gb:.1f} GB 后"
+                    f"预计剩余 {effective_free_gb:.1f} GB）"
+                )
+                logger.info(
+                    f"{self.LOG_TAG}扣除种子预留 {reserve_gb:.1f} GB 后预计剩余 "
+                    f"{effective_free_gb:.1f} GB ≥ 触发阈值 {self._threshold_gb:g} GB，空间充足，无需清理"
+                )
+            else:
+                message = "空间充足，无需清理"
+                logger.info(
+                    f"{self.LOG_TAG}剩余空间 {free_gb:.1f} GB ≥ 触发阈值 {self._threshold_gb:g} GB，空间充足，无需清理"
+                )
             self._clear_latch()
             self._save_result(self._build_result(
-                status="ok", message="空间充足，无需清理", total=total_bytes, free=free_bytes,
+                status="ok", message=message, total=total_bytes, free=free_bytes,
+                stop_gb=stop_gb, reserved=reserve_bytes, trigger=trigger_reason,
             ))
             return
 
-        logger.warning(
-            f"{self.LOG_TAG}剩余空间 {free_gb:.1f} GB < 触发阈值 {self._threshold_gb:g} GB，开始清理 ..."
-        )
+        if reserve_gb > 0:
+            logger.warning(
+                f"{self.LOG_TAG}预计剩余 {effective_free_gb:.1f} GB（当前剩余 {free_gb:.1f} GB，"
+                f"种子预留 {reserve_gb:.1f} GB）< 触发阈值 {self._threshold_gb:g} GB，"
+                f"开始清理（停止阈值 {stop_gb:g} GB） ..."
+            )
+        else:
+            logger.warning(
+                f"{self.LOG_TAG}剩余空间 {free_gb:.1f} GB < 触发阈值 {self._threshold_gb:g} GB，开始清理 ..."
+            )
 
         # 无释放空间闭锁：上次已确认「删了种子但空间没释放」，在用户修正配置前不再自动删除
         # （先判闭锁：配置变化时它会自动解除，避免用户改回旧配置时闭锁被重新激活）
@@ -450,6 +571,7 @@ class SpaceCleaner(_PluginBase):
             self._save_result(self._build_result(
                 status="error", message=message, error=message,
                 total=total_bytes, free=free_bytes, free_before=free_bytes,
+                stop_gb=stop_gb, reserved=reserve_bytes, trigger=trigger_reason,
             ))
             return
 
@@ -461,6 +583,7 @@ class SpaceCleaner(_PluginBase):
             self._save_result(self._build_result(
                 status="error", message=message, error=message,
                 total=total_bytes, free=free_bytes, free_before=free_bytes,
+                stop_gb=stop_gb, reserved=reserve_bytes, trigger=trigger_reason,
             ))
             # 同一个问题只通知一次（避免每轮 cron 重复推送）
             if message != previous_error:
@@ -490,6 +613,7 @@ class SpaceCleaner(_PluginBase):
                 message=f"空间不足但没有可删除的内容（跳过 {skipped_count} 个种子、{skipped_groups} 组内容）",
                 total=total_bytes, free=free_bytes, free_before=free_bytes,
                 skipped_groups=skipped_groups,
+                stop_gb=stop_gb, reserved=reserve_bytes, trigger=trigger_reason,
             ))
             self._notify_message(
                 title="空间不足自动删种：没有可删除的内容",
@@ -517,10 +641,14 @@ class SpaceCleaner(_PluginBase):
                 f"种子合计 {self._fmt_size(item['raw_size'])}）"
             )
 
-        self._execute(candidates, total_bytes, free_bytes, skipped_groups)
+        self._execute(
+            candidates, total_bytes, free_bytes, skipped_groups,
+            stop_gb=stop_gb, reserved_bytes=reserve_bytes, trigger_reason=trigger_reason,
+        )
 
     def _execute(self, candidates: List[Dict[str, Any]], total_bytes: int, start_free: int,
-                 skipped_groups: int = 0):
+                 skipped_groups: int = 0, stop_gb: Optional[float] = None,
+                 reserved_bytes: int = 0, trigger_reason: str = ""):
         """
         逐组删除内容，每删一组重新检查剩余空间，达到停止阈值立即停止（绝不超删）。
 
@@ -535,6 +663,7 @@ class SpaceCleaner(_PluginBase):
         （例如未开启「同时删除文件」、媒体库是硬链接、监控路径不在下载文件所在分区），
         说明删种子并不能释放空间，此时立即中止本轮（记错误 + 通知），避免把种子一路删光。
         """
+        stop_gb = self._target_gb if stop_gb is None else stop_gb
         deleted_seeds = 0
         deleted_groups = 0
         freed_dedup = 0
@@ -630,11 +759,11 @@ class SpaceCleaner(_PluginBase):
                         f"但本轮累计已尝试释放仅 {self._fmt_size(freed_dedup)}"
                         f"（不足 {self._fmt_size(self._MIN_ABORT_RELEASE)}），暂不中止，继续观察"
                     )
-            if current_free / 1024 ** 3 >= self._target_gb:
+            if current_free / 1024 ** 3 >= stop_gb:
                 reached = True
                 logger.info(
                     f"{self.LOG_TAG}剩余空间已回到 {current_free / 1024 ** 3:.1f} GB"
-                    f"（≥ 停止阈值 {self._target_gb:g} GB），停止清理"
+                    f"（≥ 停止阈值 {stop_gb:g} GB），停止清理"
                 )
                 break
 
@@ -670,7 +799,7 @@ class SpaceCleaner(_PluginBase):
         if not reached and not aborted:
             logger.warning(
                 f"{self.LOG_TAG}{'[预演]' if self._dry_run else ''}候选内容已处理完，"
-                f"剩余空间仍未达到停止阈值 {self._target_gb:g} GB（当前 {current_free / 1024 ** 3:.1f} GB）"
+                f"剩余空间仍未达到停止阈值 {stop_gb:g} GB（当前 {current_free / 1024 ** 3:.1f} GB）"
             )
 
         # 日志中同时给出「去重后释放量」与「种子条数」，避免辅种导致虚高
@@ -710,6 +839,9 @@ class SpaceCleaner(_PluginBase):
             aborted=aborted,
             skipped_groups=skipped_groups,
             error=message if aborted else "",
+            stop_gb=stop_gb,
+            reserved=reserved_bytes,
+            trigger=trigger_reason,
         )
         self._save_result(result)
 
@@ -720,7 +852,7 @@ class SpaceCleaner(_PluginBase):
                 f"监控路径：{self._monitor_path}",
                 f"删除种子：{deleted_seeds} 个（内容 {deleted_groups} 组）",
                 f"去重后释放：{self._fmt_size(freed_dedup)}",
-                f"剩余空间：{current_free / 1024 ** 3:.1f} GB（触发 {self._threshold_gb:g} GB / 停止 {self._target_gb:g} GB）",
+                f"剩余空间：{current_free / 1024 ** 3:.1f} GB（触发 {self._threshold_gb:g} GB / 停止 {stop_gb:g} GB）",
                 f"是否达到停止阈值：{'是' if reached else '否'}",
             ]
             if self._dry_run:
@@ -966,6 +1098,23 @@ class SpaceCleaner(_PluginBase):
             value = getattr(torrent, key, None)
         return default if value is None else value
 
+    @staticmethod
+    def _effective_free_gb(free_gb: float, reserve_gb: float) -> float:
+        """预计剩余空间：当前剩余空间扣除种子预留（预留量不小于 0）。"""
+        return float(free_gb) - max(float(reserve_gb or 0.0), 0.0)
+
+    @staticmethod
+    def _stop_target_gb(target_gb: float, threshold_gb: float, reserve_gb: float) -> float:
+        """
+        大种子触发时的停止阈值：清理到「实际剩余 ≥ 停止阈值」且「扣除种子后仍 ≥ 触发阈值」。
+
+        没有预留时直接返回用户配置的停止阈值。
+        """
+        reserve_gb = max(float(reserve_gb or 0.0), 0.0)
+        if reserve_gb <= 0:
+            return target_gb
+        return max(target_gb, round(reserve_gb + threshold_gb, 1))
+
     # ---------------------------------------------------------------- 磁盘空间
 
     def _disk_usage(self, silent: bool = False) -> Optional[Tuple[int, int]]:
@@ -1048,7 +1197,8 @@ class SpaceCleaner(_PluginBase):
                       freed_dedup: int = 0, freed_raw: int = 0, freed_actual: int = 0,
                       reached: bool = False, records: Optional[List[Dict[str, Any]]] = None,
                       failed: int = 0, error: str = "", aborted: bool = False,
-                      skipped_groups: int = 0) -> Dict[str, Any]:
+                      skipped_groups: int = 0, stop_gb: Optional[float] = None,
+                      reserved: int = 0, trigger: str = "") -> Dict[str, Any]:
         """组装本轮运行结果（详情页展示 + 持久化）。"""
         return {
             "time": datetime.datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d %H:%M:%S"),
@@ -1061,6 +1211,10 @@ class SpaceCleaner(_PluginBase):
             "path": self._monitor_path,
             "threshold_gb": self._threshold_gb,
             "target_gb": self._target_gb,
+            # 大种子触发时实际使用的停止阈值、预留字节数与触发来源
+            "stop_gb": self._target_gb if stop_gb is None else stop_gb,
+            "reserved": int(reserved or 0),
+            "trigger": str(trigger or ""),
             "total": int(total or 0),
             # free = 本轮结束时的剩余空间；free_before = 本轮开始前的剩余空间
             "free": int(free or 0),
@@ -1144,6 +1298,8 @@ class SpaceCleaner(_PluginBase):
             "process_duplicates": self._process_duplicates,
             "delete_files": self._delete_files,
             "exclude_paths": self._exclude_text,
+            "trigger_on_large_download": self._trigger_on_large_download,
+            "large_download_threshold_gb": self._large_download_threshold_gb,
         }
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -1153,10 +1309,11 @@ class SpaceCleaner(_PluginBase):
         第一行：启用插件 / 预演模式 / 发送通知；
         第二行：立即运行一次 / 执行周期（cron）/ 监控路径；
         第三行：触发阈值 / 停止阈值 / 做种时长保护；
-        第四行：未完成种子保护 / 辅种整组删除 / 删除文件；
-        第五行：下载器（多选，仅 qBittorrent）；
-        第六行：排除路径（多行）；
-        第七行：说明与危险提示。
+        第四行：大种子触发主动检查 / 大种子阈值（GB）；
+        第五行：未完成种子保护 / 辅种整组删除 / 删除文件；
+        第六行：下载器（多选，仅 qBittorrent）；
+        第七行：排除路径（多行）；
+        第八行：说明与危险提示。
         """
         # 下载器下拉：MoviePilot 已配置并启用的 qBittorrent
         downloader_items = []
@@ -1327,6 +1484,46 @@ class SpaceCleaner(_PluginBase):
                                             "step": 1,
                                             "hide-spin-buttons": True,
                                             "hint": "做种时长（完成时间或添加时间起算）不足该小时数的种子不删除，用于防止 H&R 种子被误删；0 表示不限制。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "trigger_on_large_download",
+                                            "label": "大种子触发主动检查",
+                                            "hint": "MoviePilot 添加下载时，若种子总大小达到下面的阈值，立即按“预计剩余 = 当前剩余 − 种子大小”判断一次空间；预计剩余低于触发阈值就按现有规则清理。只对 MoviePilot 添加的下载生效，手动添加/IYUU 辅种不会触发。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "large_download_threshold_gb",
+                                            "label": "大种子阈值（GB）",
+                                            "placeholder": "例如 10",
+                                            "type": "number",
+                                            "min": 0,
+                                            "step": 1,
+                                            "hide-spin-buttons": True,
+                                            "hint": "种子总大小达到该值才触发，0 表示不触发（默认 10）。按种子标注的总大小预留；选集下载实际占用可能更小，因此清理可能偏保守（多删一些）。触发后清理停止条件：实际剩余 ≥ 停止阈值，且扣除该种子大小后仍不低于触发阈值。",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -1548,6 +1745,11 @@ class SpaceCleaner(_PluginBase):
                 card("同时删除文件", "开启" if self._delete_files else "关闭（只删种子，不释放磁盘空间）"),
                 card("做种时长保护", f"{self._min_seeding_hours} 小时" if self._min_seeding_hours > 0 else "未限制"),
                 card("排除路径", " ｜ ".join(self._exclude_paths) if self._exclude_paths else "未配置"),
+                card("大种子主动检查",
+                     f"开启（≥ {self._large_download_threshold_gb:g} GB 触发）"
+                     if self._trigger_on_large_download and self._large_download_threshold_gb > 0
+                     else "关闭",
+                     "按预计剩余空间判断；仅 MoviePilot 添加的下载，手动/辅种不触发"),
             ],
         }
 
@@ -1582,23 +1784,30 @@ class SpaceCleaner(_PluginBase):
             detail_bits.append(str(result.get("message")))
         if result.get("error"):
             detail_bits.append(f"错误：{result.get('error')}")
+        last_run_cards = [
+            card("上次运行时间", str(result.get("time") or "—"), "预演：是" if result.get("dry_run") else "预演：否"),
+            card("上次运行状态", status, " ｜ ".join(detail_bits)),
+            card("上次删除种子数", f"{int(result.get('deleted_seeds') or 0)} 个（内容 {int(result.get('deleted_groups') or 0)} 组）",
+                 f"删除失败 {int(result.get('failed') or 0)} 组" if result.get("failed") else ""),
+            card("上次去重后释放", self._fmt_size(int(result.get("freed_dedup") or 0)),
+                 f"种子合计 {self._fmt_size(int(result.get('freed_raw') or 0))}，磁盘实际释放 {self._fmt_size(int(result.get('freed_actual') or 0))}"),
+            card("上次是否达到停止阈值", "是" if result.get("reached") else "否"),
+            card("上次剩余空间（运行前 → 运行后）",
+                 f"{int(result.get('free_before') or 0) / 1024 ** 3:.1f} GB → "
+                 f"{int(result.get('free') or 0) / 1024 ** 3:.1f} GB"
+                 if result.get("free_before") else "—",
+                 "因同内容种子受保护而整组跳过 "
+                 f"{int(result.get('skipped_groups') or 0)} 组" if result.get("skipped_groups") else ""),
+        ]
+        if result.get("trigger"):
+            trigger_text = str(result.get("trigger"))
+            reserved_bytes = int(result.get("reserved") or 0)
+            if reserved_bytes > 0:
+                trigger_text = f"{trigger_text}（预留 {self._fmt_size(reserved_bytes)}）"
+            last_run_cards.append(card("上次触发来源", trigger_text))
         sections.append({
             'component': 'VRow',
-            'content': [
-                card("上次运行时间", str(result.get("time") or "—"), "预演：是" if result.get("dry_run") else "预演：否"),
-                card("上次运行状态", status, " ｜ ".join(detail_bits)),
-                card("上次删除种子数", f"{int(result.get('deleted_seeds') or 0)} 个（内容 {int(result.get('deleted_groups') or 0)} 组）",
-                     f"删除失败 {int(result.get('failed') or 0)} 组" if result.get("failed") else ""),
-                card("上次去重后释放", self._fmt_size(int(result.get("freed_dedup") or 0)),
-                     f"种子合计 {self._fmt_size(int(result.get('freed_raw') or 0))}，磁盘实际释放 {self._fmt_size(int(result.get('freed_actual') or 0))}"),
-                card("上次是否达到停止阈值", "是" if result.get("reached") else "否"),
-                card("上次剩余空间（运行前 → 运行后）",
-                     f"{int(result.get('free_before') or 0) / 1024 ** 3:.1f} GB → "
-                     f"{int(result.get('free') or 0) / 1024 ** 3:.1f} GB"
-                     if result.get("free_before") else "—",
-                     "因同内容种子受保护而整组跳过 "
-                     f"{int(result.get('skipped_groups') or 0)} 组" if result.get("skipped_groups") else ""),
-            ],
+            'content': last_run_cards,
         })
 
         records = result.get("records") or []
