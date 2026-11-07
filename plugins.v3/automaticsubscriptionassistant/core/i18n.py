@@ -100,6 +100,10 @@ _TEXT: Dict[str, Dict[str, str]] = {
     "订阅类型": {"zh-TW": "訂閱類型", "en-US": "Subscription type"},
     "播出平台": {"zh-TW": "播出平台", "en-US": "Platform"},
     "每榜条数": {"zh-TW": "每榜條數", "en-US": "Items per list"},
+    # 豆瓣「扩量」三件套（仅豆瓣来源有）。
+    "扩量地区": {"zh-TW": "擴量地區", "en-US": "Extra regions"},
+    "其它扩量地区": {"zh-TW": "其它擴量地區", "en-US": "Other extra regions"},
+    "扩量取数": {"zh-TW": "擴量取數", "en-US": "Extra fetch depth"},
     "订阅类别": {"zh-TW": "訂閱類別", "en-US": "Category"},
     "获取条数": {"zh-TW": "取得條數", "en-US": "Fetch count"},
     "订阅人次≥": {"zh-TW": "訂閱人次≥", "en-US": "Subscribers ≥"},
@@ -246,6 +250,40 @@ _HINTS: Dict[Any, Dict[str, str]] = {
     ("douban", "limit"): {
         "zh-TW": "每個榜單只看前 N 條（TOP250 等長榜建議設小；0 = 不限）",
         "en-US": "Only the top N entries of each list (set small for TOP250; 0 = no limit)",
+    },
+    ("douban", "extra_regions"): {
+        "zh-TW": "給「榜單前幾名多半是國產劇、但想多撈其他國家/地區」用："
+                 "排名在「每榜取前N」之內的條目照舊不看國家、全部保留，"
+                 "只有更靠後的名次（見下面的「擴量取數」）裡命中這些地區的條目才會被收進來。"
+                 "與「其它擴量地區」取並集；條目的出品地區可能有多個，命中任一即可。"
+                 "留空 = 不擴量，行為與現在完全一致。",
+        "en-US": "For lists whose top entries are mostly domestic: entries within "
+                 "'Top N per list' are still kept regardless of country; only entries in "
+                 "the deeper ranks (see 'Extra fetch depth' below) that match these regions "
+                 "are added. Combined with 'Other extra regions'; an entry matching any one "
+                 "region counts. Empty = no extra fetching, behaviour unchanged.",
+    },
+    ("douban", "extra_regions_text"): {
+        "zh-TW": "「擴量地區」裡沒有的國家/地區寫這裡，每行一個（也支援逗號、頓號分隔），"
+                 "比如 中国大陆、中国香港、美国、韩国；寫法要與榜單一致。"
+                 "與上面的多選取並集，留空 = 不生效。",
+        "en-US": "Country/region names missing from 'Extra regions', one per line "
+                 "(commas also work), e.g. 中国大陆, 中国香港, 美国, 韩国 — spelling must "
+                 "match the list. Combined with the multi-select above; empty = inactive.",
+    },
+    ("douban", "extra_limit"): {
+        "zh-TW": "每榜實際向下多看幾名：取數深度 = max(「每榜取前N」, 本項)。"
+                 "排名 ≤「每榜取前N」的照舊全收（不看國家），"
+                 "第「每榜取前N」+1 ~ 本項之間只收命中擴量地區的條目。"
+                 "例：「每榜取前N」=1、本項=3、擴量地區=韩国 → 每榜前 1 條照舊全收，"
+                 "第 2~3 條只收韓國劇。0 = 不擴量（預設）；"
+                 "「每榜取前N」=0（不限）時本組設定不生效。",
+        "en-US": "How many ranks to look at per list: depth = max('Top N per list', this). "
+                 "Entries within 'Top N per list' are kept regardless of country; entries "
+                 "between N+1 and this value are kept only if they match the extra regions. "
+                 "E.g. Top N=1, depth=3, region=韩国 → the top entry is kept as before and "
+                 "ranks 2-3 add only Korean shows. 0 = off (default); inactive when "
+                 "'Top N per list' = 0 (no limit).",
     },
     ("douban", "vote"): {
         "zh-TW": "按榜單自帶的豆瓣評分過濾（識別後判定）；暫無評分/0.0 視為不達標",

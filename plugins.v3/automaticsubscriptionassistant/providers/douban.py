@@ -18,6 +18,20 @@
 Mikan 完全一致（两来源共用 ``core.filters.TitleSeasonExcludeFilter``），故「地狱老师
 第2部分」「某某 第2期」这类按「部/期」记季的续作同样会被排除。电影、综艺与无季号条目
 不受影响。
+
+**扩量地区 / 其它扩量地区 / 扩量取数**（仅本来源有）：豆瓣榜单前几名多半是国产剧，常见配置是
+「每榜取前 1」；但想额外多捞某些国家/地区的剧时，靠放大「每榜取前N」会连带收进一堆国产剧，
+所以这里有独立的扩量通道。语义是**叠加式**的，默认行为一行不变：
+
+- 每榜的**取数深度** = ``max(「每榜取前N」, 「扩量取数」)``；
+- 排名 ≤ 「每榜取前N」的条目**照旧全部保留，不看国家/地区**；
+- 排名在 「每榜取前N」+1 ~ 深度之间的条目，**只有命中「扩量地区」/「其它扩量地区」才保留**；
+- 两个地区字段（多选 + 文本框）取**并集**；条目的出品国家/地区可能有多个
+  （如 ``法国 日本 德国 比利时``），**命中其中任一个即算命中**；
+- 三个字段留空/为 ``0``、或「每榜取前N」≤ 0（不限）时，**行为与没有这组配置时完全一致**；
+- 解析不出地区（:meth:`DoubanRankProvider._parse_regions` 返回 None）的条目：浅位照旧保留，
+  深位**不保留**（无法证明命中）；
+- 判定在**抓取阶段**完成（取数深度只能在取数时决定），不走 ``core/filters.py`` 的过滤器框架。
 """
 from __future__ import annotations
 
@@ -94,6 +108,28 @@ _VOTE_MIN, _VOTE_MAX = 0.0, 10.0
 # 每榜取前 N 的默认值（0 = 不限，向后兼容）。
 _DEFAULT_LIMIT = 0
 
+# 豆瓣正文里的「信息行」：``<p>标签：2026 / 美国 / 剧情 悬疑 / 导演 / 主演</p>``（内置榜，带「标签：」前缀）
+# 或 ``<p>2026 / 韩国 / 剧情 喜剧 / 朴丹熙 / 任时完 薛仁雅</p>``（列表榜，无前缀）。两种格式的
+# **第 2 段都是出品国家/地区**，故只锚定「以年份开头 + 紧跟斜杠」，标题行与评分行不会命中。
+_REGION_INFO_PATTERN = re.compile(r"<p>\s*(?:标签[：:]\s*)?((?:19|20)\d{2}\s*/[^<]*)</p>")
+# 地区段内的多地区分隔符：空白 / 顿号 / 全半角逗号 / 全角斜杠（如「西班牙 法国」「德国,法国」）。
+_REGION_SEPARATOR_PATTERN = re.compile(r"[\s,，、／]+")
+
+# 「扩量地区」多选的预置选项：title 与 value 都用中文地区名，与榜单正文的写法保持一致
+# （i18n 的 _country_title 只认 iso2，中文地区名会原样透传，故无需译文）。
+DOUBAN_REGION_OPTIONS = [
+    {"title": name, "value": name}
+    for name in (
+        "中国大陆", "中国香港", "中国澳门", "中国台湾",
+        "美国", "日本", "韩国", "英国", "法国", "德国", "意大利", "西班牙", "葡萄牙",
+        "俄罗斯", "乌克兰", "印度", "泰国", "新加坡", "马来西亚", "印度尼西亚", "菲律宾",
+        "越南", "加拿大", "澳大利亚", "新西兰", "巴西", "墨西哥", "阿根廷", "智利",
+        "哥伦比亚", "瑞典", "挪威", "丹麦", "芬兰", "冰岛", "荷兰", "比利时", "瑞士",
+        "奥地利", "波兰", "捷克", "匈牙利", "希腊", "土耳其", "伊朗", "以色列", "埃及",
+        "南非", "爱尔兰", "罗马尼亚",
+    )
+]
+
 
 @register
 class DoubanRankProvider(RankProvider):
@@ -131,6 +167,39 @@ class DoubanRankProvider(RankProvider):
                     kind="number",
                     default=_DEFAULT_LIMIT,
                     hint="每个榜单只看前 N 条（TOP250 等长榜建议设小；0 = 不限）",
+                ),
+                FieldSpec(
+                    key="extra_regions",
+                    label="扩量地区",
+                    kind="multi-select",
+                    default=[],
+                    options=DOUBAN_REGION_OPTIONS,
+                    hint="给「榜单前几名多半是国产剧、但想多捞其他国家/地区」用："
+                         "排名在「每榜取前N」之内的条目照旧不看国家、全部保留，"
+                         "只有更靠后的名次（见下面的「扩量取数」）里命中这些地区的条目才会被收进来。"
+                         "与「其它扩量地区」取并集；条目的出品地区可能有多个，命中任一即可。"
+                         "留空 = 不扩量，行为与现在完全一致。",
+                ),
+                FieldSpec(
+                    key="extra_regions_text",
+                    label="其它扩量地区",
+                    kind="textarea",
+                    default="",
+                    hint="「扩量地区」里没有的国家/地区写这里，每行一个（也支持逗号、顿号分隔），"
+                         "比如 中国大陆、中国香港、美国、韩国；写法要与榜单一致。"
+                         "与上面的多选取并集，留空 = 不生效。",
+                ),
+                FieldSpec(
+                    key="extra_limit",
+                    label="扩量取数",
+                    kind="number",
+                    default=0,
+                    hint="每榜实际向下多看几名：取数深度 = max(「每榜取前N」, 本项)。"
+                         "排名 ≤「每榜取前N」的照旧全收（不看国家），"
+                         "第「每榜取前N」+1 ~ 本项之间只收命中扩量地区的条目。"
+                         "例：「每榜取前N」=1、本项=3、扩量地区=韩国 → 每榜前 1 条照旧全收，"
+                         "第 2~3 条只收韩国剧。0 = 不扩量（默认）；"
+                         "「每榜取前N」=0（不限）时本组配置不生效。",
                 ),
                 FieldSpec(
                     key="rsshub_base",
@@ -197,6 +266,9 @@ class DoubanRankProvider(RankProvider):
         每个地址（每个内置榜单、以及每行自定义 RSS 地址）各算一个榜，各取前 ``limit`` 条
         （``limit<=0`` / 非法值 = 不限）；顺序即榜单顺序，不排序。单条 item 解析失败内部
         try/except continue；请求/解析级异常向上抛出，由 runner 捕获。
+
+        配了「扩量地区」时取数深度放宽到 ``max(limit, extra_limit)``，其中浅位（前 ``limit``
+        条）照旧全收、深位只收地区命中的条目（见模块 docstring）；未配置时行为与从前一致。
         """
         options = options or {}
         ranks = self._as_list(options.get("ranks"))
@@ -207,6 +279,8 @@ class DoubanRankProvider(RankProvider):
         ]
         proxy = bool(options.get("proxy"))
         limit = self._parse_limit(options.get("limit"))
+        extra_limit = self._parse_limit(options.get("extra_limit"))
+        extra_regions = self._parse_extra_regions(options)
         base = self._normalize_base(options.get("rsshub_base"))
         # (地址, 路由兜底类型)：自定义地址无从判断类型 -> None。
         addr_list = [(addr, None) for addr in custom_addrs] + [
@@ -217,7 +291,8 @@ class DoubanRankProvider(RankProvider):
             logger.warn(f"{self.provider_name}：未配置任何榜单地址")
             return
         for addr, route_type in addr_list:
-            yield from self._fetch_addr(addr, proxy, limit, route_type)
+            yield from self._fetch_addr(addr, proxy, limit, route_type,
+                                        extra_limit=extra_limit, extra_regions=extra_regions)
 
     @staticmethod
     def _normalize_base(raw) -> str:
@@ -253,8 +328,15 @@ class DoubanRankProvider(RankProvider):
         return text
 
     def _fetch_addr(self, addr: str, proxy: bool, limit: int = 0,
-                    route_type: MediaType | None = None) -> Iterator[RankMediaItem]:
-        """抓取单个 RSS 地址并解析其中的 item（``limit>0`` 时只取榜单前 N 条）。"""
+                    route_type: MediaType | None = None, extra_limit: int = 0,
+                    extra_regions: Optional[set] = None) -> Iterator[RankMediaItem]:
+        """抓取单个 RSS 地址并解析其中的 item。
+
+        ``limit>0`` 时只取榜单前 N 条；配了 ``extra_regions``（且 ``limit>0``）时改为先解析
+        前 ``max(limit, extra_limit)`` 条，再由 :meth:`_apply_extra_regions` 决定保留哪些
+        ——浅位全收、深位只收地区命中的。未配置扩量时走原来的「切前 N 条」快路径，
+        不解析多余条目、也不打新日志。
+        """
         proxies = settings.PROXY if proxy else None
         ret = RequestUtils(timeout=_REQUEST_TIMEOUT, proxies=proxies).get_res(addr)
         if not ret:
@@ -268,10 +350,29 @@ class DoubanRankProvider(RankProvider):
             return
         items = root.getElementsByTagName("item")
         logger.info(f"{self.provider_name}：{addr} 共 {len(items)} 条数据")
+        # ``limit<=0``（不限）时扩量无意义：既然全部都要，谈不上「多看几名」。
+        if limit > 0 and extra_regions:
+            depth = max(limit, extra_limit)
+            # 地区只在解析后才有，故深位必须真解析出来再筛。
+            parsed = list(self._iter_parsed(items[:depth], route_type))
+            final = self._apply_extra_regions(parsed, limit, extra_limit, extra_regions)
+            logger.info(f"{self.provider_name}：{addr} 已按每榜取前 {limit} 条")
+            if depth > limit:
+                # 浅位实际保留数按解析成功的条目算（个别条目解析失败时不会算出负数）。
+                added = len(final) - len(parsed[:limit])
+                logger.info(
+                    f"{self.provider_name}：{addr} 扩量取数 {depth}："
+                    f"排名 {limit + 1}~{depth} 中地区命中的 {added} 条已并入")
+            yield from final
+            return
         if limit > 0:
             # RSS 顺序即榜单顺序（第 1 条=榜首），直接切前 N 条、不排序。
             items = items[:limit]
             logger.info(f"{self.provider_name}：{addr} 已按每榜取前 {limit} 条")
+        yield from self._iter_parsed(items, route_type)
+
+    def _iter_parsed(self, items, route_type: MediaType | None = None) -> Iterator[RankMediaItem]:
+        """逐条解析 RSS item：单条失败只记日志、不影响其余条目。"""
         for item in items:
             try:
                 media_item = self._parse_item(item, route_type)
@@ -307,6 +408,7 @@ class DoubanRankProvider(RankProvider):
             source_meta={"link": str(link)},
             unique_seed=f"{title}_{year}_(DB:{douban_id})",
             source_vote=self._parse_vote(item),
+            regions=self._parse_regions(item),
         )
 
     @staticmethod
@@ -353,8 +455,90 @@ class DoubanRankProvider(RankProvider):
         return value
 
     @staticmethod
+    def _parse_regions(item) -> Optional[List[str]]:
+        """从 description 的信息行解析出品国家/地区列表，解析不到返回 None。
+
+        正文里的信息行有两种形态（**第 2 段恒为出品地区**）：
+
+        - 内置榜：``<p>标签：2026 / 美国 / 剧情 悬疑 惊悚 犯罪 / 迈克尔·肖沃特 / 安妮·海瑟薇</p>``
+        - 列表榜：``<p>2026 / 韩国 / 剧情 喜剧 爱情 / 朴丹熙 / 任时完 薛仁雅</p>``（无「标签：」前缀）
+
+        正则锚定「``<p>`` 后紧跟年份 + 斜杠」，故标题行、裸评分行（``<p>8.6</p>``）都不会命中；
+        与 :meth:`_parse_year` 一样先剔除 ``<img>`` 与「评价数…」片段，避免海报地址里的数字
+        被当成信息行。地区可能有多个（空格分隔，如 ``法国 日本 德国 比利时``），段数不固定
+        （综艺条目可能没有主演），故只按「第 2 段」取，不依赖总段数。
+        """
+        description = str(DomUtils.tag_value(item, "description", default="") or "")
+        if not description:
+            return None
+        # 与 _parse_year 同一套清理：<img src> 里可能带年份与斜杠（海报地址），"评价数" 同理。
+        description = re.sub(r"评价数.*?<br>", "", description)
+        description = re.sub(r"<img.*?>", "", description)
+        match = _REGION_INFO_PATTERN.search(description)
+        if not match:
+            return None
+        segments = match.group(1).split("/")
+        if len(segments) < 2:
+            return None
+        regions: List[str] = []
+        for token in _REGION_SEPARATOR_PATTERN.split(segments[1]):
+            region = token.strip()
+            if region and region not in regions:  # 去空 + 去重且保序
+                regions.append(region)
+        return regions or None
+
+    @staticmethod
+    def _parse_extra_regions(options) -> set:
+        """合并「扩量地区」（多选）与「其它扩量地区」（文本框）为一个地区集合。
+
+        多选值可能被存成列表，也可能是逗号分隔的字符串；文本框每行一个地区，行内也支持
+        逗号 / 顿号 / 全角斜杠分隔。两侧去空、去重后取并集；都没填时返回空集合
+        （= 不扩量，行为与从前一致）。
+        """
+        options = options or {}
+        parts: List[str] = []
+        selected = options.get("extra_regions")
+        if isinstance(selected, list):
+            parts.extend(str(value) for value in selected)
+        elif selected:
+            parts.append(str(selected))
+        text = str(options.get("extra_regions_text") or "")
+        parts.extend(text.splitlines())
+
+        regions = set()
+        for part in parts:
+            for token in _REGION_SEPARATOR_PATTERN.split(str(part)):
+                region = token.strip()
+                if region:
+                    regions.add(region)
+        return regions
+
+    @staticmethod
+    def _apply_extra_regions(items: List[RankMediaItem], default_limit: int,
+                             extra_limit: int, extra_regions) -> List[RankMediaItem]:
+        """按「扩量」语义从已解析条目里挑出最终要产出的那些（纯函数，不改入参对象）。
+
+        - ``extra_regions`` 为空 ⇒ 等价未配置：``default_limit > 0`` 取前 N 条，否则原样返回；
+        - ``default_limit <= 0``（不限）⇒ 原样返回全部，扩量配置不生效；
+        - 否则取数深度 ``max(default_limit, extra_limit)``：前 ``default_limit`` 条无论产地
+          一律保留，其后的条目只有 ``regions`` 与 ``extra_regions`` 有交集才保留
+          （``regions`` 为 None = 无法证明命中，深位不保留）；返回顺序与输入一致。
+        """
+        items = list(items)
+        if not extra_regions:
+            return items[:default_limit] if default_limit > 0 else items
+        if default_limit <= 0:
+            return items
+        depth = max(default_limit, extra_limit)
+        kept = items[:default_limit]
+        for item in items[default_limit:depth]:
+            if set(item.regions or ()) & set(extra_regions):
+                kept.append(item)
+        return kept
+
+    @staticmethod
     def _parse_limit(raw) -> int:
-        """解析「每榜取前N」：非法值 / <=0 一律返回 0（= 不限，向后兼容）。"""
+        """解析「每榜取前N」/「扩量取数」：非法值 / <=0 一律返回 0（= 不限 / 不扩量）。"""
         try:
             value = int(float(raw))
         except (TypeError, ValueError):

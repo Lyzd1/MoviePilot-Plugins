@@ -204,6 +204,9 @@ class RankMediaItem:
     # 来源自带评分（如豆瓣榜单 RSS 的「评分：7.3分」）。有值时由 SourceVoteFilter 在识别后
     # 按榜单口径过滤；无值（未提供/暂无评分）为 None。
     source_vote: Optional[float] = None
+    # 来源自带的出品国家/地区列表（如 ["中国大陆"]、["法国", "日本", "德国", "比利时"]），
+    # 供 Provider 在抓取阶段按地区取舍（如豆瓣的「扩量地区」）；无该信息的来源为 None。
+    regions: Optional[List[str]] = None
 
     def dedup_key(self, provider_id: str) -> str:
         """返回去重键：``{provider_id}:{unique_seed}``。"""
@@ -277,6 +280,7 @@ class RankMediaItem:
             "media_id": self.media_id,
             "episode_group": self.episode_group,
             "source_vote": self.source_vote,
+            "regions": self.regions,
         }
 
     @classmethod
@@ -310,6 +314,7 @@ class RankMediaItem:
             episode_group=d.get("episode_group"),
             # ``.get()`` 容错：历史持久化条目（如奈飞 L2 缓存）没有该字段，缺省为 None。
             source_vote=d.get("source_vote"),
+            regions=d.get("regions"),
         )
 
 
