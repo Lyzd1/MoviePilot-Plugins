@@ -52,7 +52,8 @@ class DeletionTask:
     is_music: bool = False
     file_path: Optional[Path] = None
     folder_path: Optional[Path] = None
-    entries: List[EventEntry] = field(default_factory=list)
+    # 仅音乐目录清理合成的 folder 任务为 True：云盘目录删除后连同本地目录一并删除
+    delete_local: bool = False
     storage_type: str = ""
     storage_path: str = ""
     local_storage_type: Optional[str] = None
@@ -125,7 +126,7 @@ class StrmCleaner(_PluginBase):
     plugin_name = "StrmCleaner"
     plugin_desc = "监控STRM文件及文件夹删除，联动清理openlist/local云盘文件及元数据"
     plugin_icon = "Ombi_A.png"
-    plugin_version = "3.0.0"
+    plugin_version = "3.0.1"
     plugin_author = "Lyzd1"
     author_url = "https://github.com/Lyzd1"
     plugin_config_prefix = "strmcleaner_"
@@ -666,33 +667,51 @@ class StrmCleaner(_PluginBase):
                             f"[StrmCleaner] 检测到STRM文件删除: {parent_dir} ({', '.join(parts)})"
                         )
 
-                    # 音乐事件：开关开启时按目录聚合为 music_dir 任务，
-                    # 先逐个删除云盘文件，再判定是否整体删除目录。
-                    if self._music_dir_cleanup and music_entries:
-                        storage_type, storage_path, local_type, local_path = self._parse_folder_mapping(parent_dir)
-                        if storage_type and storage_path:
-                            logger.info(
-                                f"[StrmCleaner] 音乐目录整体清理已开启，聚合同目录 "
-                                f"{len(music_entries)} 个音乐事件: {parent_dir}"
-                            )
-                            tasks.append(DeletionTask(
-                                task_type="music_dir",
-                                is_music=True,
-                                folder_path=Path(parent_dir),
-                                entries=list(music_entries),
-                                storage_type=storage_type,
-                                storage_path=storage_path,
-                                local_storage_type=local_type,
-                                local_storage_path=local_path,
-                            ))
-                        else:
-                            # 无目录映射时退回逐文件删除，避免漏删
+                    # 音乐目录清理：watchdog 删除事件到达时文件已从磁盘消失，
+                    # 因此先统计该本地目录是否还剩任何 .strm（lrc/nfo/jpg 不计）。
+                    # 为 0 时直接合成一个 folder 任务删除云盘目录 + 本地目录，
+                    # 不再逐个删云盘文件；仍有 STRM（或无映射/根目录）时退回逐文件删除。
+                    music_dir_task_added = False
+                    if self._music_dir_cleanup and music_entries and not video_entries:
+                        if self._is_mapping_root(parent_dir):
                             logger.warning(
-                                f"[StrmCleaner] 音乐目录未找到映射，退回逐文件删除: {parent_dir}"
+                                f"[StrmCleaner] 音乐目录清理目标为映射根目录，退回逐文件删除: {parent_dir}"
                             )
-                            for entry in music_entries:
-                                tasks.append(self._build_file_task(entry))
-                    else:
+                            self._notify_root_protection(parent_dir)
+                        else:
+                            storage_type, storage_path, local_type, local_path = self._parse_folder_mapping(parent_dir)
+                            remaining = self._count_local_strm(Path(parent_dir))
+                            if storage_type and storage_path and remaining == 0:
+                                logger.info(
+                                    f"[StrmCleaner] 音乐目录已无 STRM，直接按目录清理: {parent_dir} "
+                                    f"→ [{self._display_storage_type(storage_type)}] {storage_path}"
+                                )
+                                tasks.append(DeletionTask(
+                                    task_type="folder",
+                                    is_music=True,
+                                    folder_path=Path(parent_dir),
+                                    delete_local=True,
+                                    storage_type=storage_type,
+                                    storage_path=storage_path,
+                                    local_storage_type=local_type,
+                                    local_storage_path=local_path,
+                                ))
+                                music_dir_task_added = True
+                            elif not storage_type or not storage_path:
+                                # 无目录映射时退回逐文件删除，避免漏删
+                                logger.warning(
+                                    f"[StrmCleaner] 音乐目录未找到映射，退回逐文件删除: {parent_dir}"
+                                )
+                            elif remaining > 0:
+                                logger.info(
+                                    f"[StrmCleaner] 本地目录仍有 {remaining} 个 STRM，按文件逐个清理: {parent_dir}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"[StrmCleaner] 无法确认本地目录是否还有 STRM，保守退回逐文件删除: {parent_dir}"
+                                )
+
+                    if not music_dir_task_added:
                         for entry in music_entries:
                             tasks.append(self._build_file_task(entry))
 
@@ -847,8 +866,6 @@ class StrmCleaner(_PluginBase):
                 return self._execute_music_file_deletion(task)
             else:
                 return self._execute_video_file_deletion(task)
-        elif task.task_type == "music_dir":
-            return self._execute_music_dir_deletion(task)
         return None
 
     def _execute_folder_deletion(self, task: DeletionTask) -> Optional[DeletionResult]:
@@ -860,7 +877,13 @@ class StrmCleaner(_PluginBase):
             storage_path=task.storage_path,
         )
 
-        if task.folder_path and os.path.exists(task.folder_path):
+        if task.delete_local:
+            # 音乐目录清理：本地目录此刻仍然存在（只是 .strm 已被删除），
+            # 不能用“目录存在”作为跳过条件；仅当目录重新出现 STRM 时才跳过。
+            if task.folder_path and self._count_local_strm(Path(task.folder_path)) != 0:
+                logger.info(f"[StrmCleaner] 目录重新出现 STRM，跳过: {task.folder_path}")
+                return None
+        elif task.folder_path and os.path.exists(task.folder_path):
             logger.info(f"[StrmCleaner] 文件夹已重新创建，跳过: {task.folder_path}")
             return None
 
@@ -891,6 +914,29 @@ class StrmCleaner(_PluginBase):
                         )
                         if self._storagechain.delete_file(local_item):
                             logger.info(f"[StrmCleaner] 同步删除本地目录: {task.local_storage_path}")
+
+                # 音乐目录清理：云盘目录已删，接着删除本地目录（含 lrc/nfo 等非 STRM 文件）。
+                # 本地删除失败只记错误，不影响 result.success（云盘已成功删除）。
+                if task.delete_local and task.folder_path:
+                    local_dir = Path(task.folder_path)
+                    if not local_dir.exists():
+                        logger.info(f"[StrmCleaner] 本地目录已不存在，跳过本地删除: {local_dir}")
+                    elif not self._is_safe_dir_path(local_dir):
+                        logger.error(f"[StrmCleaner] 本地目录路径异常，跳过目录删除: {local_dir}")
+                    elif self._is_mapping_root(str(local_dir)):
+                        logger.warning(
+                            f"[StrmCleaner] 音乐目录清理目标为映射根目录，已阻止删除本地目录: {local_dir}"
+                        )
+                    elif self._count_local_strm(local_dir) != 0:
+                        # 删除前再次确认：目录可能在清理期间被重新创建且含 STRM，此时保留
+                        logger.info(f"[StrmCleaner] 本地目录重新出现 STRM，保留目录: {local_dir}")
+                    else:
+                        try:
+                            shutil.rmtree(local_dir)
+                            result.local_dir_deleted = True
+                            logger.info(f"[StrmCleaner] 已删除本地目录（含 lrc/nfo 等非 STRM 文件）: {local_dir}")
+                        except Exception as e:
+                            logger.error(f"[StrmCleaner] 删除本地目录失败: {e} - {traceback.format_exc()}")
 
             else:
                 logger.error(f"[StrmCleaner] 删除云盘文件夹失败: [{self._display_storage_type(task.storage_type)}] {task.storage_path}")
@@ -1055,116 +1101,6 @@ class StrmCleaner(_PluginBase):
             return False
         return True
 
-    def _execute_music_dir_deletion(self, task: DeletionTask) -> Optional[DeletionResult]:
-        result = DeletionResult(
-            file_path=task.folder_path,
-            task_type="music_dir",
-            is_music=True,
-            storage_type=task.storage_type,
-            storage_path=task.storage_path,
-        )
-
-        # 1. 先按现有逻辑逐个删除云盘上的音乐/歌词文件
-        for entry in task.entries:
-            if entry.path and os.path.exists(entry.path):
-                logger.info(f"[StrmCleaner] 文件已被重新创建，跳过: {entry.path}")
-                continue
-            try:
-                self._delete_music_files_by_stem(
-                    entry.storage_type or task.storage_type,
-                    Path(entry.storage_path),
-                    result,
-                )
-            except Exception as e:
-                logger.error(f"[StrmCleaner] 音乐目录清理-文件删除异常: {e} - {traceback.format_exc()}")
-
-        if not task.folder_path:
-            return result
-
-        local_dir = Path(task.folder_path)
-
-        # 2. 仅依据本地侧是否还有 .strm 决定是否整体删除目录（云盘音频不作为阻断条件）
-        remaining = self._count_local_strm(local_dir)
-        if remaining != 0:
-            if remaining > 0:
-                logger.info(
-                    f"[StrmCleaner] 本地目录仍有 {remaining} 个 STRM，保留目录不删除: {local_dir}"
-                )
-            else:
-                logger.warning(
-                    f"[StrmCleaner] 无法确认本地目录是否还有 STRM，保守保留目录: {local_dir}"
-                )
-            return result
-
-        # 3. 映射根目录保护：仅按文件删，禁止删云盘根及本地目录
-        if self._is_mapping_root(str(local_dir)):
-            logger.warning(
-                f"[StrmCleaner] 音乐目录清理目标为映射根目录，已阻止删除云盘根及本地目录: {local_dir}"
-            )
-            self._notify_root_protection(str(local_dir))
-            return result
-
-        # 4. 异常路径保护
-        if not self._is_safe_dir_path(local_dir):
-            logger.error(f"[StrmCleaner] 本地目录路径异常，跳过目录删除: {local_dir}")
-            return result
-
-        # 5. 删除云盘目录（删除前打印剩余文件数，便于事后追溯）
-        cloud_dir_item = schemas.FileItem(
-            storage=task.storage_type,
-            path=task.storage_path if task.storage_path.endswith("/") else task.storage_path + "/",
-            type="dir",
-        )
-        try:
-            remaining_cloud = self._storagechain.list_files(cloud_dir_item, recursion=False)
-            logger.info(
-                f"[StrmCleaner] 云盘目录剩余文件数: {len(remaining_cloud or [])} "
-                f"[{self._display_storage_type(task.storage_type)}] {task.storage_path}"
-            )
-        except Exception as e:
-            logger.warning(f"[StrmCleaner] 统计云盘目录剩余文件数失败: {e}")
-
-        cloud_deleted = False
-        try:
-            if task.storage_type == "alist" and self._api_url and self._api_token:
-                cloud_deleted = self._call_openlist_api_delete_dir(task.storage_path)
-            else:
-                cloud_deleted = bool(self._storagechain.delete_file(cloud_dir_item))
-        except Exception as e:
-            logger.error(f"[StrmCleaner] 删除云盘目录异常: {e} - {traceback.format_exc()}")
-
-        if cloud_deleted:
-            logger.info(
-                f"[StrmCleaner] 已删除云盘目录: "
-                f"[{self._display_storage_type(task.storage_type)}] {task.storage_path}"
-            )
-        else:
-            logger.error(
-                f"[StrmCleaner] 删除云盘目录失败: "
-                f"[{self._display_storage_type(task.storage_type)}] {task.storage_path}"
-            )
-
-        # 6. 删除本地目录（连同 lrc/nfo 等一并删除）；目录已不存在则跳过
-        if not local_dir.exists():
-            logger.info(f"[StrmCleaner] 本地目录已不存在，跳过本地删除: {local_dir}")
-        else:
-            # 删除前再次确认：目录可能在清理期间被重新创建且含 STRM，此时保留
-            remaining_recheck = self._count_local_strm(local_dir)
-            if remaining_recheck != 0:
-                logger.info(
-                    f"[StrmCleaner] 本地目录在清理期间重新出现 STRM，保留目录: {local_dir}"
-                )
-            else:
-                try:
-                    shutil.rmtree(local_dir)
-                    result.local_dir_deleted = True
-                    logger.info(f"[StrmCleaner] 已删除本地目录: {local_dir}")
-                except Exception as e:
-                    logger.error(f"[StrmCleaner] 删除本地目录失败: {e} - {traceback.format_exc()}")
-
-        result.success = cloud_deleted or result.local_dir_deleted
-        return result
-
     def _delete_cloud_metadata(self, storage_type: str, parent_item: schemas.FileItem, cloud_file_path: Path) -> int:
         deleted = 0
         try:
@@ -1245,33 +1181,22 @@ class StrmCleaner(_PluginBase):
             return
 
         folder_results = [r for r in results if r.task_type == "folder" and r.success]
-        # 音乐目录整体清理成功删除目录的结果归入「文件夹」段
-        music_dir_results = [r for r in results if r.task_type == "music_dir" and r.success]
         video_results = [r for r in results if r.task_type == "file" and not r.is_music and r.success]
         music_results = [r for r in results if r.task_type == "file" and r.is_music and r.success]
 
         total_metadata = sum(r.metadata_deleted for r in results)
-        total_files = (
-            sum(r.files_deleted for r in video_results)
-            + sum(r.files_deleted for r in music_results)
-            + sum(r.files_deleted for r in music_dir_results)
-        )
 
         parts = []
 
-        all_folder_results = folder_results + music_dir_results
-        if all_folder_results:
-            parts.append(f"文件夹: {len(all_folder_results)} 个")
-            for r in all_folder_results[:5]:
-                if r.task_type == "music_dir":
-                    parts.append(
-                        f"  - {r.file_path.name} → [{self._display_storage_type(r.storage_type)}]"
-                        f" (音乐文件 {r.files_deleted} 个)"
-                    )
-                else:
-                    parts.append(f"  - {r.file_path.name} → [{self._display_storage_type(r.storage_type)}]")
-            if len(all_folder_results) > 5:
-                parts.append(f"  ... 等 {len(all_folder_results) - 5} 个")
+        if folder_results:
+            parts.append(f"文件夹: {len(folder_results)} 个")
+            for r in folder_results[:5]:
+                suffix = " (含本地目录删除)" if r.local_dir_deleted else ""
+                parts.append(
+                    f"  - {r.file_path.name} → [{self._display_storage_type(r.storage_type)}]{suffix}"
+                )
+            if len(folder_results) > 5:
+                parts.append(f"  ... 等 {len(folder_results) - 5} 个")
 
         if video_results:
             parts.append(f"视频文件: {len(video_results)} 个")
@@ -1454,7 +1379,14 @@ class StrmCleaner(_PluginBase):
                                 "content": [
                                     {
                                         "component": "VSwitch",
-                                        "props": {"model": "music_dir_cleanup", "label": "音乐目录整体清理"},
+                                        "props": {
+                                            "model": "music_dir_cleanup",
+                                            "label": "音乐目录整体清理",
+                                            "hint": "音乐 STRM 全部删除后，若该目录已无任何 STRM"
+                                                    "（lrc/nfo 等忽略），直接按目录删除云盘目录与本地目录；"
+                                                    "仍有 STRM 时按文件逐个清理",
+                                            "persistent-hint": True,
+                                        },
                                     }
                                 ],
                             },
