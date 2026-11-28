@@ -144,7 +144,7 @@ class OpenlistMover(_PluginBase):
     # 插件图标
     plugin_icon = "Ombi_A.png"
     # 插件版本
-    plugin_version = "4.7.0"
+    plugin_version = "4.7.1"
     # 插件作者
     plugin_author = "Lyzd1"
     # 作者主页
@@ -184,11 +184,15 @@ class OpenlistMover(_PluginBase):
     # === 新增移动延迟配置 ===
     _move_delay_seconds = 0
 
-    # === 4.7.0 按目录上传队列（额外文件优先 + 延迟重置） ===
+    # === 4.7.1 按目录上传队列（独立媒体 + 额外文件归队） ===
     _extra_first_enabled = True
-    # {local_dir(str): {"items": [item...], "deadline": float, "batch": bool,
-    #                    "known_extras": {name: last_seen}, "src_dir": str,
-    #                    "wait_since": float|None, "wait_timeout_warned": bool}}
+    # {local_dir(str): {
+    #     "queues": [{"items": [item...], "deadline": float, "started": bool,
+    #                 "src_dir": str, "wait_since": float|None,
+    #                 "wait_timeout_warned": bool}],
+    #     "pending": [{"file_path": str, "src_dir": str, "dst_dir": str,
+    #                  "name": str, "ready_at": float}],
+    # }}
     _dir_queues: Dict[str, Dict[str, Any]] = {}
     _dir_queues_lock = threading.RLock()  # 保护 _dir_queues 与队列线程状态
     _queue_worker_thread: Optional[threading.Thread] = None
@@ -873,7 +877,7 @@ class OpenlistMover(_PluginBase):
                                             "type": "info",
                                             "variant": "tonal",
                                             "title": "额外文件优先上传（按目录上传队列）",
-                                            "text": "开启后，以单个目录（一张专辑/一部剧）为单位维护 FIFO 上传队列：配置的额外后缀文件（如 .lrc/.txt/.png/.jpg/.yaml/.ass）一出现就立即上传（仅做最多 3 秒、大小连续 1 秒不变的稳定性检查），并重置同目录队列倒计时；音视频文件稳定后加入队列尾部，只有在该目录内不再存在额外文件、且没有额外文件正在上传/等待 STRM 回拷时，才按入队顺序依次放行。若有额外文件参与本批次，新加入的媒体文件也会重置队列倒计时并与之前未上传的媒体合并为一个批次；若没有额外文件参与，每个媒体文件各自按「入队时刻 + 移动延迟」独立放行，互不重置。关闭时恢复 4.6.9 行为：每个文件各自稳定检查 + 移动延迟，不排队。",
+                                            "text": "开启后，以单个目录（一张专辑/一部剧）为单位区分两类文件：①配置的额外后缀文件（如 .lrc/.txt/.png/.jpg/.yaml/.ass）一出现就立即上传（仅做最多 3 秒、大小连续 1 秒不变的稳定性检查），上传后触发一次「归队」；②音视频文件稳定后各自按「稳定时刻 + 移动延迟」独立等待（pending 独立媒体），不会自动并入已有队列。归队规则：若同目录有尚未开始上传的队列，则把所有 pending 媒体按 ready_at 升序追加到队尾并重置倒计时；若已有队列均已开始上传，则用当前 pending 新建一个队列（与旧队列互不影响）；没有队列时仅在有 pending 时新建。批次队列只有在该目录内不再存在额外文件、且没有额外文件正在上传/等待 STRM 回拷，并到达 deadline 后，才按 FIFO 每轮放行一个。关闭时恢复 4.6.9 行为：每个文件各自稳定检查 + 移动延迟，不排队。",
                                         },
                                     }
                                 ]
@@ -2211,11 +2215,11 @@ class OpenlistMover(_PluginBase):
 
             if self._extra_first_enabled and is_extra_file:
                 # 额外文件：仅做短暂稳定性检查（最多 3 秒、大小连续 1 秒不变），随后立即上传；
-                # 提交成功后重置同目录上传队列倒计时。
+                # 提交成功后触发一次「归队」：把同目录的 pending 独立媒体并入/新建批次队列。
                 if not self._wait_file_stable(file_path, 3, 1):
                     return  # 最终会进入 finally
                 if self._submit_move(src_dir, dst_dir, name):
-                    self._notify_extra_for_dir(str(file_path.parent), file_path.name)
+                    self._requeue_after_extra(str(file_path.parent), src_dir)
                 return  # 最终会进入 finally
 
             # 等待文件稳定（音视频文件，或未开启额外文件优先时的全部文件）
@@ -2223,9 +2227,9 @@ class OpenlistMover(_PluginBase):
                 return  # 最终会进入 finally
 
             if self._extra_first_enabled and is_media_file:
-                # 音视频文件：稳定后加入该目录的 FIFO 上传队列，
-                # 由队列线程在额外文件全部就位后按入队顺序提交移动。
-                self._enqueue_media_file(file_path, src_dir, dst_dir, name)
+                # 音视频文件：稳定后进入该目录的 pending 独立媒体列表，各自按
+                # ready_at = 此刻 + 移动延迟 独立放行；不会自动并入已存在的批次队列。
+                self._add_pending_media(file_path, src_dir, dst_dir, name)
                 return  # 最终会进入 finally
 
             # 4.6.9 原行为：移动延迟后直接提交移动
@@ -2370,75 +2374,140 @@ class OpenlistMover(_PluginBase):
                 )
             return False
 
-    # ===== 按目录 FIFO 上传队列（4.7.0） =====
+    # ===== 按目录上传队列（4.7.1） =====
 
-    def _enqueue_media_file(self, file_path: Path, src_dir: str, dst_dir: str, name: str):
-        """音视频文件稳定后加入所在目录的 FIFO 上传队列（必要时启动队列线程）"""
+    def _get_dir_state_locked(self, local_dir: str) -> Dict[str, Any]:
+        """获取（必要时创建）某目录的队列状态；调用方需持有 _dir_queues_lock"""
+        state = self._dir_queues.get(local_dir)
+        if state is None:
+            state = {"queues": [], "pending": []}
+            self._dir_queues[local_dir] = state
+        return state
+
+    @staticmethod
+    def _dir_state_idle(state: Dict[str, Any]) -> bool:
+        return not state.get("queues") and not state.get("pending")
+
+    def _drop_dir_state_if_idle_locked(self, local_dir: str):
+        """目录状态已无任何队列/pending 时删除，避免空目录拖住队列线程"""
+        state = self._dir_queues.get(local_dir)
+        if state is not None and self._dir_state_idle(state):
+            del self._dir_queues[local_dir]
+
+    def _ensure_queue_worker_locked(self) -> Optional[threading.Thread]:
+        """确保队列线程在运行；需要时返回尚未 start 的线程（调用方出锁后 start）"""
+        if self._queue_worker_running:
+            return None
+        self._queue_worker_running = True
+        thread = threading.Thread(
+            target=self._queue_worker,
+            name="OpenlistMoverQueue",
+            daemon=True,
+        )
+        self._queue_worker_thread = thread
+        return thread
+
+    def _add_pending_media(self, file_path: Path, src_dir: str, dst_dir: str, name: str):
+        """音视频文件稳定后进入所在目录的 pending 独立媒体列表（必要时启动队列线程）"""
         local_dir = str(file_path.parent)
         now = time.time()
         thread = None
+        duplicate = False
         with self._dir_queues_lock:
-            queue = self._dir_queues.get(local_dir)
-            if queue is None:
-                queue = {
-                    "items": [],
-                    "deadline": 0.0,
-                    "batch": False,
-                    "known_extras": {},
-                    "src_dir": src_dir,
-                    "wait_since": None,
-                    "wait_timeout_warned": False,
-                }
-                self._dir_queues[local_dir] = queue
+            state = self._get_dir_state_locked(local_dir)
 
-            # 重复入队防护：同名条目尚未提交时直接跳过，避免重复移动
-            duplicate = any(it["name"] == name for it in queue["items"])
+            # 去重：同名条目已在 pending 或任意队列中 → 不重复入列
+            duplicate = any(it["name"] == name for it in state["pending"]) or any(
+                it["name"] == name
+                for q in state["queues"]
+                for it in q["items"]
+            )
             if duplicate:
-                logger.debug(f"媒体文件 {name} 已在目录队列 {local_dir} 中，跳过重复入队")
+                logger.debug(f"媒体文件 {name} 已在目录 {local_dir} 的待传列表中，跳过重复入列")
             else:
-                queue["items"].append({
+                state["pending"].append({
                     "file_path": str(file_path),
                     "src_dir": src_dir,
                     "dst_dir": dst_dir,
                     "name": name,
                     "ready_at": now + self._move_delay_seconds,
-                    "enqueued_at": now,
                 })
+                thread = self._ensure_queue_worker_locked()
 
-                if queue["batch"]:
-                    # 本批次已有额外文件参与：新加入的媒体文件重置倒计时并合并到同一批次
-                    queue["deadline"] = now + self._move_delay_seconds
-                    logger.debug(f"目录 {local_dir} 队列已有额外文件参与，媒体文件 {name} 重置倒计时")
+            self._drop_dir_state_if_idle_locked(local_dir)
 
-            if not self._queue_worker_running:
-                self._queue_worker_running = True
-                thread = threading.Thread(
-                    target=self._queue_worker,
-                    name="OpenlistMoverQueue",
-                    daemon=True,
-                )
-                self._queue_worker_thread = thread
-
+        if thread is not None:
+            thread.start()
         if not duplicate:
-            logger.debug(f"媒体文件 {name} 已加入目录队列 {local_dir} (位置 {len(queue['items'])})")
+            logger.debug(
+                f"媒体文件 {name} 进入目录 {local_dir} 的独立待传列表 "
+                f"(ready_at=+{self._move_delay_seconds}s)"
+            )
+
+    def _requeue_after_extra(self, local_dir: str, src_dir: str):
+        """
+        额外文件上传成功后触发的「归队」动作：
+        a) 存在未开始上传的队列 → 把所有 pending 按 ready_at 升序追加到队尾并重置 deadline；
+        b) 队列都已开始上传 → 用当前 pending 新建一个批次队列；
+        c) 没有任何队列 → 有 pending 才新建批次队列，否则不创建。
+        """
+        now = time.time()
+        thread = None
+        with self._dir_queues_lock:
+            state = self._dir_queues.get(local_dir)
+            if state is None:
+                logger.debug(f"目录 {local_dir} 无 pending 独立媒体，额外文件无需归队")
+                return
+
+            pending = state["pending"]
+
+            # 选最近创建、尚未开始上传的队列（多个队列时新的未开始队列优先）
+            target = None
+            for queue in reversed(state["queues"]):
+                if not queue["started"]:
+                    target = queue
+                    break
+
+            if target is not None:
+                if pending:
+                    pending.sort(key=lambda it: it["ready_at"])
+                    target["items"].extend(pending)
+                    state["pending"] = []
+                target["deadline"] = now + self._move_delay_seconds
+                target["wait_since"] = None
+                target["wait_timeout_warned"] = False
+                logger.debug(
+                    f"目录 {local_dir} 归队：追加 pending 媒体到未开始队列，"
+                    f"队列长度 {len(target['items'])}，deadline=+{self._move_delay_seconds}s"
+                )
+            elif pending:
+                pending.sort(key=lambda it: it["ready_at"])
+                queue = {
+                    "items": list(pending),
+                    "deadline": now + self._move_delay_seconds,
+                    "started": False,
+                    "src_dir": src_dir or pending[0]["src_dir"],
+                    "wait_since": None,
+                    "wait_timeout_warned": False,
+                }
+                state["queues"].append(queue)
+                state["pending"] = []
+                logger.debug(
+                    f"目录 {local_dir} 归队：用 {len(queue['items'])} 个 pending 媒体新建批次队列，"
+                    f"deadline=+{self._move_delay_seconds}s"
+                )
+            else:
+                self._drop_dir_state_if_idle_locked(local_dir)
+                logger.debug(f"目录 {local_dir} 无 pending 独立媒体，额外文件无需归队")
+                return
+
+            thread = self._ensure_queue_worker_locked()
+
         if thread is not None:
             thread.start()
 
-    def _notify_extra_for_dir(self, local_dir: str, name: Optional[str] = None):
-        """额外文件已提交上传：将同目录队列标记为额外文件批次并重置倒计时"""
-        now = time.time()
-        with self._dir_queues_lock:
-            queue = self._dir_queues.get(local_dir)
-            if queue is None:
-                return
-            queue["batch"] = True
-            queue["deadline"] = now + self._move_delay_seconds
-            if name:
-                queue["known_extras"][name] = now
-        logger.debug(f"额外文件 {name or ''} 已上传，重置目录队列倒计时: {local_dir}")
-
     def _queue_worker(self):
-        """队列后台线程：按 0.5~1 秒轮询各目录队列，队列全空时自动退出"""
+        """队列后台线程：每 0.5 秒轮询各目录，先放行独立媒体，再逐队列判断放行；全空时退出"""
         logger.debug("上传队列线程已启动")
         while True:
             with self._dir_queues_lock:
@@ -2462,87 +2531,100 @@ class OpenlistMover(_PluginBase):
             local_dirs = list(self._dir_queues.keys())
         for local_dir in local_dirs:
             try:
-                self._process_one_dir_queue(local_dir, now)
+                # 顺序：先处理独立媒体（到期即提交），再逐队列判断放行
+                self._process_pending_for_dir(local_dir, now)
+                self._process_queues_for_dir(local_dir, now)
             except Exception as e:
                 logger.error(f"处理目录队列 {local_dir} 时出错: {e} - {traceback.format_exc()}")
-
-    def _process_one_dir_queue(self, local_dir: str, now: float):
-        """扫描单个目录：更新额外文件状态，并在满足条件时按 FIFO 放行一个媒体文件"""
-        extras_present = self._scan_dir_extras(local_dir, now)
-
         with self._dir_queues_lock:
-            queue = self._dir_queues.get(local_dir)
-            if queue is None:
+            for local_dir in list(self._dir_queues.keys()):
+                self._drop_dir_state_if_idle_locked(local_dir)
+
+    def _process_pending_for_dir(self, local_dir: str, now: float):
+        """放行该目录所有已到 ready_at 的独立媒体（不受额外文件/队列状态影响）"""
+        with self._dir_queues_lock:
+            state = self._dir_queues.get(local_dir)
+            if state is None:
+                return
+            due = [it for it in state["pending"] if now >= it["ready_at"]]
+            if not due:
+                return
+            due.sort(key=lambda it: it["ready_at"])
+            due_names = {it["name"] for it in due}
+            # 出锁前先从 pending 摘除，保证每个媒体只提交一次
+            state["pending"] = [it for it in state["pending"] if it["name"] not in due_names]
+
+        for item in due:
+            if not Path(item["file_path"]).exists():
+                logger.info(f"独立等待中的媒体文件已消失，跳过：{item['name']}")
+                continue
+            logger.info(f"独立媒体到期上传: {item['name']} (目录 {local_dir})")
+            self._submit_move(item["src_dir"], item["dst_dir"], item["name"])
+
+    def _process_queues_for_dir(self, local_dir: str, now: float):
+        """扫描单个目录：额外文件收尾且到达 deadline 后，逐队列按 FIFO 每次放行一个"""
+        extras_present = self._scan_dir_extras(local_dir)
+        submissions = []
+        with self._dir_queues_lock:
+            state = self._dir_queues.get(local_dir)
+            if state is None:
                 return
 
-            # 目录内仍有额外文件 / 额外文件上传、回拷未收尾 → 需要等待
-            wait_reason = None
-            if extras_present:
-                wait_reason = "目录内仍有额外文件"
-            elif self._dir_has_pending_extra_task(queue.get("src_dir")):
-                wait_reason = "额外文件上传/回拷未收尾"
+            for queue in list(state["queues"]):
+                if not queue["items"]:
+                    state["queues"].remove(queue)
+                    continue
 
-            if wait_reason:
-                wait_since = queue.get("wait_since")
-                if wait_since is None:
-                    wait_since = now
-                    queue["wait_since"] = wait_since
-                waited = now - wait_since
+                # 目录内仍有额外文件 / 额外文件上传、回拷未收尾 → 需要等待
+                wait_reason = None
+                if extras_present:
+                    wait_reason = "目录内仍有额外文件"
+                elif self._dir_has_pending_extra_task(queue.get("src_dir")):
+                    wait_reason = "额外文件上传/回拷未收尾"
 
-                # 等待兜底上限：超时告警（每轮等待只告警一次）后强行放行音视频
-                if self._queue_wait_max_seconds > 0 and waited >= self._queue_wait_max_seconds:
-                    if not queue.get("wait_timeout_warned"):
-                        queue["wait_timeout_warned"] = True
-                        next_name = queue["items"][0]["name"] if queue["items"] else local_dir
-                        logger.warning(
-                            f"目录 {local_dir} 等待额外文件超时（{int(waited)}s），放行媒体文件 {next_name}"
-                        )
-                    # 走正常放行流程
+                if wait_reason:
+                    if queue.get("wait_since") is None:
+                        queue["wait_since"] = now
+                    waited = now - queue["wait_since"]
+
+                    # 等待兜底上限：超时告警（每轮等待只告警一次）后强行放行
+                    if self._queue_wait_max_seconds > 0 and waited >= self._queue_wait_max_seconds:
+                        if not queue.get("wait_timeout_warned"):
+                            queue["wait_timeout_warned"] = True
+                            logger.warning(
+                                f"目录 {local_dir} 等待额外文件超时（{int(waited)}s），"
+                                f"放行媒体文件 {queue['items'][0]['name']}"
+                            )
+                    else:
+                        logger.debug(f"目录 {local_dir} {wait_reason}，继续等待 ({waited:.1f}s)")
+                        continue
                 else:
-                    logger.debug(f"目录 {local_dir} {wait_reason}，继续等待 ({waited:.1f}s)")
-                    return
-            else:
-                # 等待条件解除，重置超时计时
-                queue["wait_since"] = None
-                queue["wait_timeout_warned"] = False
+                    # 等待条件解除，重置超时计时
+                    queue["wait_since"] = None
+                    queue["wait_timeout_warned"] = False
 
-            if queue["batch"]:
                 if now < queue["deadline"]:
-                    return
-            else:
-                items = queue["items"]
-                if not items:
-                    del self._dir_queues[local_dir]
-                    return
-                if now < items[0]["ready_at"]:
-                    return
+                    continue
 
-            items = queue["items"]
-            if not items:
-                del self._dir_queues[local_dir]
-                return
+                item = queue["items"].pop(0)
+                queue["started"] = True
+                submissions.append(item)
 
-            item = items.pop(0)
-            if not items:
-                del self._dir_queues[local_dir]
+            state["queues"] = [q for q in state["queues"] if q["items"]]
 
-        # 放行前校验本地文件仍在：排队期间文件可能已被删除/重命名
-        if not Path(item["file_path"]).exists():
-            logger.info(f"排队期间的媒体文件已消失，跳过：{item['name']}")
-            return
+        for item in submissions:
+            # 放行前校验本地文件仍在：排队期间文件可能已被删除/重命名
+            if not Path(item["file_path"]).exists():
+                logger.info(f"排队期间的媒体文件已消失，跳过：{item['name']}")
+                continue
+            logger.info(f"上传队列放行: {item['name']} (目录 {local_dir})")
+            self._submit_move(item["src_dir"], item["dst_dir"], item["name"])
 
-        logger.info(f"上传队列放行: {item['name']} (目录 {local_dir})")
-        self._submit_move(item["src_dir"], item["dst_dir"], item["name"])
-
-    def _scan_dir_extras(self, local_dir: str, now: float) -> bool:
-        """
-        扫描目录内的额外后缀文件，更新队列的 known_extras / batch / deadline。
-        返回目录内当前是否存在额外文件。
-        """
+    def _scan_dir_extras(self, local_dir: str) -> bool:
+        """返回目录内当前是否存在额外后缀文件（放行队列前的等待条件之一）"""
         if not self._strm_copy_extensions_set:
             return False
 
-        found = set()
         try:
             with os.scandir(local_dir) as entries:
                 for entry in entries:
@@ -2552,30 +2634,11 @@ class OpenlistMover(_PluginBase):
                     except OSError:
                         continue
                     if Path(entry.name).suffix.lower() in self._strm_copy_extensions_set:
-                        found.add(entry.name)
+                        return True
         except OSError:
             # 目录不存在或不可读：视为没有额外文件，避免永久阻塞队列
-            found = set()
-
-        with self._dir_queues_lock:
-            queue = self._dir_queues.get(local_dir)
-            if queue is not None:
-                known = queue["known_extras"]
-                # 已消失的额外文件从记录中移除，同名文件再次出现时视为新文件
-                for name in list(known.keys()):
-                    if name not in found:
-                        del known[name]
-
-                new_names = [name for name in found if name not in known]
-                for name in found:
-                    known[name] = now
-
-                if new_names and self._extra_first_enabled:
-                    queue["batch"] = True
-                    queue["deadline"] = now + self._move_delay_seconds
-                    logger.debug(f"目录 {local_dir} 发现新额外文件 {new_names}，重置队列倒计时")
-
-        return bool(found)
+            pass
+        return False
 
     def _dir_has_pending_extra_task(self, src_dir: str) -> bool:
         """该目录（Openlist 源目录）是否存在未收尾的额外文件任务"""
@@ -2595,7 +2658,7 @@ class OpenlistMover(_PluginBase):
                     return True
         return False
 
-    # ===== 按目录 FIFO 上传队列结束 =====
+    # ===== 按目录上传队列结束 =====
 
     def _handle_extra_file_copy(self, task: Dict[str, Any]):
         """
