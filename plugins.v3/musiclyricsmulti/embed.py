@@ -9,8 +9,10 @@ MoviePilot 在整理完成后会把本插件返回的歌词写成同目录旁挂
 （``transfer.audio.complete``）；两者载荷结构一致，本模块不感知事件类型。
 
 写入规则：
-- 有时间轴：``SYNCEDLYRICS`` = LRC 全文，``LYRICS`` = 去掉时间轴的纯文本；
-- 没有时间轴：只写 ``LYRICS``；
+- 有时间轴：同时写三个字段——``LYRICS`` = LRC 全文（主流播放器/标签
+  编辑器读这个键，必须带时间轴）、``UNSYNCEDLYRICS`` = 去掉时间轴的纯文本、
+  ``SYNCEDLYRICS`` = LRC 全文（兼容 MusicBee 等只认该键的播放器）；
+- 没有时间轴：只写 ``LYRICS`` = 纯文本；
 - 原文件已有内嵌歌词时直接跳过，不做任何修改。
 
 为保证原子性，先把原文件复制到同目录临时文件，在临时文件上写标签，
@@ -223,9 +225,12 @@ def _write_tags_atomic(audio_path: Path, synced: Optional[str], plain: Optional[
         if getattr(audio, "tags", None) is None:
             audio.add_tags()
         if synced:
-            audio["SYNCEDLYRICS"] = synced
+            # 三写：LYRICS 带时间轴供主流播放器读取，UNSYNCEDLYRICS 纯文本兜底，
+            # SYNCEDLYRICS 兼容只认该键的播放器（如 MusicBee）。
+            audio["LYRICS"] = synced
             if plain:
-                audio["LYRICS"] = plain
+                audio["UNSYNCEDLYRICS"] = plain
+            audio["SYNCEDLYRICS"] = synced
         else:
             audio["LYRICS"] = plain
         audio.save()

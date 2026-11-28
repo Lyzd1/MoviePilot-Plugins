@@ -15,8 +15,11 @@
 - 原文件已有内嵌歌词（LYRICS / SYNCEDLYRICS / UNSYNCEDLYRICS / lyricsfile）
   时完全跳过；
 - 否则读取宿主刚生成的旁挂歌词（.lrc > .txt > .lyricsfile.yaml），用
-  mutagen 原子写入 ``SYNCEDLYRICS``（有时间轴时）与 ``LYRICS``，成功后删除
-  该音轨的旁挂歌词文件；其它格式与开关关闭时行为保持不变。
+  mutagen 原子写入内嵌标签：有时间轴时三写——``LYRICS`` = LRC 全文（主流
+  播放器读这个键，必须带时间轴）、``UNSYNCEDLYRICS`` = 纯文本、
+  ``SYNCEDLYRICS`` = LRC 全文（兼容 MusicBee 等）；没有时间轴时只写
+  ``LYRICS`` = 纯文本。成功后删除该音轨的旁挂歌词文件；其它格式与开关
+  关闭时行为保持不变。
 """
 
 from __future__ import annotations
@@ -76,7 +79,7 @@ class MusicLyricsMulti(_PluginBase):
     plugin_name = "多源歌词"
     plugin_desc = "聚合网易云、QQ 音乐、酷狗歌词，严格匹配并支持双语合并"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "Lyzd1"
     author_url = "https://github.com/Lyzd1"
     plugin_config_prefix = "musiclyricsmulti_"
@@ -681,7 +684,7 @@ class MusicLyricsMulti(_PluginBase):
                                             "hint": (
                                                 "开启后，仅对整理完成的本地 FLAC/OGG 音轨写入内嵌歌词："
                                                 "把旁挂歌词写入音频标签（有时间轴时同时写 "
-                                                "SYNCEDLYRICS 与 LYRICS，否则只写 LYRICS），"
+                                                "LYRICS/UNSYNCEDLYRICS/SYNCEDLYRICS，否则只写 LYRICS），"
                                                 "成功后删除该音轨的 .lrc / .txt / .lyricsfile.yaml；"
                                                 "原文件已有内嵌歌词时跳过。其它格式仍按原逻辑生成旁挂歌词。"
                                             ),
