@@ -5,38 +5,47 @@
 - ``music_lyrics`` 返回最可信的一条，用于短路内置 LRCLIB；
 - ``music_lyrics_candidates`` 每个源返回一条候选，交给宿主 LyricsChain 择优。
 
-同步实现（宿主插件接口是同步的），只读网络请求，不写任何文件。
+同步实现（宿主插件接口是同步的）。
 
-内嵌歌词（1.0.1 新增，默认关闭）：
-- 开启 ``embed_lyrics`` 后，监听整理完成事件：影视用 ``TransferComplete``
-  （``transfer.complete``），音频用 ``AudioTransferComplete``
-  （``transfer.audio.complete``，宿主对音频文件实际发布的事件），两者
-  payload 结构一致；在后台延迟几秒处理本次整理到本地的 FLAC/OGG 音轨；
-- 原文件已有内嵌歌词（LYRICS / SYNCEDLYRICS / UNSYNCEDLYRICS / lyricsfile）
-  时完全跳过；
-- 否则读取宿主刚生成的旁挂歌词（.lrc > .txt > .lyricsfile.yaml），用
-  mutagen 原子写入内嵌标签：有时间轴时三写——``LYRICS`` = LRC 全文（主流
-  播放器读这个键，必须带时间轴）、``UNSYNCEDLYRICS`` = 纯文本、
-  ``SYNCEDLYRICS`` = LRC 全文（兼容 MusicBee 等）；没有时间轴时只写
-  ``LYRICS`` = 纯文本。成功后删除该音轨的旁挂歌词文件；其它格式与开关
-  关闭时行为保持不变。
+接管歌词刮削（1.1.0）：
+- 插件启用时把宿主系统配置 ``ScrapingSwitchs.music_lyrics`` 改为 ``skip``，
+  关闭宿主自己的歌词刮削（原值备份到插件 data，插件停用时恢复）；
+- 不再依赖宿主生成旁挂歌词：监听整理完成事件（影视 ``TransferComplete``、
+  音频 ``AudioTransferComplete``，payload 结构一致），在后台延迟几秒处理
+  本次整理到本地的 FLAC/OGG/MP3/M4A/WAV/AAC 音轨；
+- 原文件已有内嵌歌词、或同目录已有 .lrc / .txt / .lyricsfile.yaml 时跳过；
+- 否则自行从标签（缺失时用文件名）取 title/artist/album/duration，调用
+  三源取词并择优；开启 ``embed_lyrics`` 的 FLAC/OGG 直接写内嵌标签
+  （有时间轴时三写 LYRICS/UNSYNCEDLYRICS/SYNCEDLYRICS，否则只写 LYRICS），
+  不生成旁挂；其它情况在同目录写 .lrc（有时间轴）或 .txt（仅纯文本）。
 """
 
 from __future__ import annotations
 
+import os
+import re
+import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import mutagen
+
 from app.domain.context import MusicLyrics  # type: ignore
 from app.schemas.types import EventType  # type: ignore
 from app.sdk.events import Event, eventmanager  # type: ignore
 from app.sdk.logging import logger  # type: ignore
+from app.sdk.media import MetaMusic  # type: ignore
 from app.sdk.plugin import _PluginBase  # type: ignore
 
 from .cache import TTLCache
-from .embed import SUPPORTED_EXTENSIONS, embed_sidecar_lyrics
+from .embed import (
+    SUPPORTED_EXTENSIONS,
+    has_embedded_lyrics,
+    lrc_to_plain,
+    write_lyrics_direct,
+)
 from .httpclient import DeadlineExceeded, HttpClient
 from .lrc import TRANSLATION_MODES, build_lyrics
 from .match import iter_artist_names, to_optional_int
@@ -52,8 +61,18 @@ _LYRIC_CACHE_TTL = 60 * 60
 # 用短 TTL 缓存避免同一首歌重复请求三源。
 _QUERY_CACHE_SIZE = 64
 _QUERY_CACHE_TTL = 60
-# 整理完成事件后延迟多少秒再处理内嵌歌词，避免与刮削/外部搬运竞态
+# 整理完成事件后延迟多少秒再处理歌词，避免与刮削/外部搬运竞态
 _EMBED_DELAY_SECONDS = 3.0
+# 插件接管歌词时写入的系统配置键与值
+_SCRAPING_SETTING_KEY = "ScrapingSwitchs"
+_MUSIC_LYRICS_SETTING = "music_lyrics"
+_SKIP_VALUE = "skip"
+# 插件 data 中保存原值的键
+_BACKUP_DATA_KEY = "lyrics_scraping_backup"
+# 视为音频、需要处理歌词的后缀
+_AUDIO_EXTENSIONS = (".flac", ".ogg", ".mp3", ".m4a", ".wav", ".aac")
+# 已有旁挂歌词时跳过的后缀
+_SIDECAR_EXTENSIONS = (".lrc", ".txt", ".lyricsfile.yaml")
 
 _VALID_SOURCES = tuple(DEFAULT_SOURCES)
 _SOURCE_LABELS = {
@@ -79,7 +98,7 @@ class MusicLyricsMulti(_PluginBase):
     plugin_name = "多源歌词"
     plugin_desc = "聚合网易云、QQ 音乐、酷狗歌词，严格匹配并支持双语合并"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.1.0"
     plugin_author = "Lyzd1"
     author_url = "https://github.com/Lyzd1"
     plugin_config_prefix = "musiclyricsmulti_"
@@ -148,12 +167,18 @@ class MusicLyricsMulti(_PluginBase):
                 f"最多候选={self._max_candidates}"
             )
 
+        # 插件启用即接管宿主歌词刮削，与 embed_lyrics 开关无关。
+        # 内部已捕获全部异常，绝不会导致插件加载失败。
+        if self._enabled:
+            self._takeover_lyrics_scraping()
+
     def get_state(self) -> bool:
         """返回插件总开关状态。"""
         return self._enabled
 
     def stop_service(self) -> None:
-        """关闭 HTTP 连接池。"""
+        """恢复宿主歌词刮削配置并关闭 HTTP 连接池。"""
+        self._restore_lyrics_scraping()
         with self._lock:
             http = self._http
             self._http = None
@@ -161,6 +186,162 @@ class MusicLyricsMulti(_PluginBase):
         if http is not None:
             http.close()
         self._query_cache.clear()
+
+    # ------------------------------------------------------------------ #
+    # 接管宿主歌词刮削
+    # ------------------------------------------------------------------ #
+    def _load_scraping_switches(self) -> Optional[Dict[str, Any]]:
+        """读取宿主 ``ScrapingSwitchs`` 字典。
+
+        优先走插件基类注入的系统配置访问器（真实宿主为数据库配置），
+        不可用时退回运行期 ``settings``。读取异常返回 ``None``，调用方
+        必须据此中止，绝不能把读取失败当成空配置写回而丢掉其它刮削项。
+        """
+        store = getattr(self, "systemconfig", None)
+        if store is not None:
+            try:
+                value = store.get(_SCRAPING_SETTING_KEY)
+            except Exception as error:
+                logger.warning(f"【多源歌词】读取 ScrapingSwitchs 失败：{error}")
+                return None
+            if isinstance(value, dict):
+                return dict(value)
+        try:
+            from app.runtime.config import settings as runtime_settings
+
+            value = getattr(runtime_settings, _SCRAPING_SETTING_KEY, None)
+            if isinstance(value, dict):
+                return dict(value)
+        except Exception as error:
+            logger.debug(f"【多源歌词】读取运行期 ScrapingSwitchs 失败：{error}")
+        return {}
+
+    def _store_scraping_switches(self, value: Dict[str, Any]) -> bool:
+        """写回宿主 ``ScrapingSwitchs``；返回是否写入成功。"""
+        store = getattr(self, "systemconfig", None)
+        if store is not None and hasattr(store, "set"):
+            try:
+                result = store.set(_SCRAPING_SETTING_KEY, value)
+            except Exception as error:
+                logger.warning(f"【多源歌词】写入 ScrapingSwitchs 失败：{error}")
+                return False
+            return result is not False
+        try:
+            from app.runtime.config import settings as runtime_settings
+
+            update_setting = getattr(runtime_settings, "update_setting", None)
+            if callable(update_setting):
+                result = update_setting(_SCRAPING_SETTING_KEY, value)
+                if isinstance(result, tuple):
+                    result = result[0]
+                return result is not False
+        except Exception as error:
+            logger.warning(f"【多源歌词】写入 ScrapingSwitchs 失败：{error}")
+        return False
+
+    @staticmethod
+    def _notify_scraping_config_changed() -> None:
+        """广播配置变更，让宿主 ScrapingChain 立即重载刮削策略。"""
+        try:
+            from app.schemas.event import ConfigChangeEventData
+
+            eventmanager.send_event(
+                etype=EventType.ConfigChanged,
+                data=ConfigChangeEventData(
+                    key={_SCRAPING_SETTING_KEY},
+                    value=None,
+                    change_type="update",
+                ),
+            )
+        except Exception as error:
+            # 广播失败不影响已成功的写入；下次配置变更/重启仍会生效
+            logger.debug(f"【多源歌词】广播配置变更失败：{error}")
+
+    def _takeover_lyrics_scraping(self) -> None:
+        """把宿主 ``music_lyrics`` 刮削策略改为 skip，并备份原值。
+
+        幂等：当前已经是 skip 时直接返回，不重复备份。
+        """
+        try:
+            switches = self._load_scraping_switches()
+            if switches is None:
+                logger.warning("【多源歌词】无法读取宿主歌词刮削配置，本次不接管")
+                return
+            if switches.get(_MUSIC_LYRICS_SETTING) == _SKIP_VALUE:
+                logger.debug("【多源歌词】宿主歌词刮削已是 skip，无需接管")
+                return
+
+            present = _MUSIC_LYRICS_SETTING in switches
+            original = switches.get(_MUSIC_LYRICS_SETTING)
+            self.save_data(
+                _BACKUP_DATA_KEY,
+                {"value": original, "present": present, "at": int(time.time())},
+            )
+
+            updated = dict(switches)
+            updated[_MUSIC_LYRICS_SETTING] = _SKIP_VALUE
+            if not self._store_scraping_switches(updated):
+                # 写入失败时清除备份，避免停用时误恢复
+                self.del_data(_BACKUP_DATA_KEY)
+                logger.warning("【多源歌词】接管歌词刮削失败：无法写入 ScrapingSwitchs")
+                return
+
+            self._notify_scraping_config_changed()
+            logger.info(
+                f"【多源歌词】已接管歌词刮削："
+                f"ScrapingSwitchs.{_MUSIC_LYRICS_SETTING} {original!r} → {_SKIP_VALUE!r}"
+            )
+        except Exception as error:
+            logger.warning(
+                f"【多源歌词】接管歌词刮削异常（{error.__class__.__name__}）：{error}"
+            )
+
+    def _restore_lyrics_scraping(self) -> None:
+        """插件停用时恢复宿主 ``music_lyrics`` 原值。
+
+        当前值已不是 skip（用户手动改过）时只清除备份，不覆盖用户配置。
+        """
+        try:
+            backup = self.get_data(_BACKUP_DATA_KEY)
+            if not isinstance(backup, dict) or "value" not in backup:
+                return
+
+            switches = self._load_scraping_switches()
+            if switches is None:
+                logger.warning("【多源歌词】无法读取宿主歌词刮削配置，保留备份稍后恢复")
+                return
+            current = switches.get(_MUSIC_LYRICS_SETTING)
+            if current != _SKIP_VALUE:
+                self.del_data(_BACKUP_DATA_KEY)
+                logger.debug(
+                    f"【多源歌词】宿主歌词刮削已被改为 {current!r}，"
+                    "不恢复原值，仅清除备份"
+                )
+                return
+
+            original = backup.get("value")
+            present = bool(backup.get("present", original is not None))
+            updated = dict(switches)
+            if present and original is not None:
+                updated[_MUSIC_LYRICS_SETTING] = original
+            else:
+                updated.pop(_MUSIC_LYRICS_SETTING, None)
+
+            if not self._store_scraping_switches(updated):
+                # 保留备份，等待下次停用或人工处理
+                logger.warning("【多源歌词】恢复歌词刮削失败：无法写入 ScrapingSwitchs")
+                return
+
+            self.del_data(_BACKUP_DATA_KEY)
+            self._notify_scraping_config_changed()
+            logger.info(
+                f"【多源歌词】已恢复宿主歌词刮削："
+                f"ScrapingSwitchs.{_MUSIC_LYRICS_SETTING} → {original!r}"
+            )
+        except Exception as error:
+            logger.warning(
+                f"【多源歌词】恢复歌词刮削异常（{error.__class__.__name__}）：{error}"
+            )
 
     @staticmethod
     def _normalize_sources(value: Any) -> List[str]:
@@ -222,14 +403,15 @@ class MusicLyricsMulti(_PluginBase):
         self._handle_transfer_event(event)
 
     def _handle_transfer_event(self, event: Event) -> None:
-        """整理完成事件的统一处理：开关开启时把本地 FLAC/OGG 的旁挂歌词内嵌。
+        """整理完成事件的统一处理：插件接管后自行取词并落盘。
 
-        只做路径筛选与线程投递，真正的写标签、删旁挂放后台 daemon 线程，
+        只做路径筛选与线程投递，真正的取词、写标签/旁挂放后台 daemon 线程，
         延迟 ``_EMBED_DELAY_SECONDS`` 秒执行，避免与刮削/外部搬运竞态。
-        任何异常都在这里或工作线程内捕获，绝不抛回宿主事件总线。
+        插件总开关关闭时不处理；任何异常都在这里或工作线程内捕获，
+        绝不抛回宿主事件总线。
         """
         try:
-            if not self._embed_lyrics:
+            if not self._enabled:
                 return
             event_data = getattr(event, "event_data", None) or {}
             if not isinstance(event_data, dict):
@@ -243,14 +425,14 @@ class MusicLyricsMulti(_PluginBase):
             if not paths:
                 return
             threading.Thread(
-                target=self._embed_audio_paths,
+                target=self._process_audio_paths,
                 args=(paths,),
-                name="musiclyricsmulti-embed",
+                name="musiclyricsmulti-lyrics",
                 daemon=True,
             ).start()
         except Exception as error:
             logger.warning(
-                f"【多源歌词】内嵌歌词事件处理异常（{error.__class__.__name__}）：{error}"
+                f"【多源歌词】整理完成事件处理异常（{error.__class__.__name__}）：{error}"
             )
 
     @staticmethod
@@ -274,7 +456,7 @@ class MusicLyricsMulti(_PluginBase):
 
     @classmethod
     def _extract_local_audio_paths(cls, transferinfo: Any) -> List[Path]:
-        """从整理结果中提取本机真实存在的 FLAC/OGG 音轨路径。"""
+        """从整理结果中提取本机真实存在的常见音频路径。"""
         raw_paths: List[str] = []
         file_list = cls._event_field(transferinfo, "file_list_new") or []
         if isinstance(file_list, str):
@@ -303,48 +485,194 @@ class MusicLyricsMulti(_PluginBase):
                 continue
             seen.add(raw_path)
             path = Path(raw_path)
-            if path.suffix.casefold() not in SUPPORTED_EXTENSIONS:
+            if path.suffix.casefold() not in _AUDIO_EXTENSIONS:
                 continue
             if not path.is_file():
                 continue
             paths.append(path)
         return paths
 
-    def _embed_audio_paths(self, paths: List[Path]) -> None:
-        """后台线程：延迟后逐个写入内嵌歌词，异常只记 WARNING。"""
+    def _process_audio_paths(self, paths: List[Path]) -> None:
+        """后台线程：延迟后逐个自行取词并落盘，异常只记 WARNING。"""
         try:
             time.sleep(_EMBED_DELAY_SECONDS)
             for path in paths:
                 try:
-                    outcome = embed_sidecar_lyrics(path)
+                    self._process_one_audio(path)
                 except Exception as error:
                     logger.warning(
-                        f"【多源歌词】内嵌歌词处理异常：{path}（"
+                        f"【多源歌词】歌词处理异常：{path}（"
                         f"{error.__class__.__name__}）：{error}"
                     )
                     continue
-                if outcome.status == "embedded":
-                    deleted = "、".join(outcome.deleted) or "无"
-                    logger.info(
-                        f"【多源歌词】内嵌歌词成功：{path}；已删除旁挂：{deleted}"
-                    )
-                    if outcome.failed_deletes:
-                        logger.warning(
-                            f"【多源歌词】部分旁挂删除失败："
-                            f"{'、'.join(outcome.failed_deletes)}"
-                        )
-                elif outcome.status == "error":
-                    logger.warning(
-                        f"【多源歌词】内嵌歌词失败：{path}；{outcome.detail}"
-                    )
-                else:
-                    logger.debug(
-                        f"【多源歌词】跳过内嵌：{path}（{outcome.status}：{outcome.detail}）"
-                    )
         except Exception as error:
             logger.warning(
-                f"【多源歌词】内嵌歌词后台任务异常（{error.__class__.__name__}）：{error}"
+                f"【多源歌词】歌词后台任务异常（{error.__class__.__name__}）：{error}"
             )
+
+    @staticmethod
+    def _existing_sidecar(path: Path) -> Optional[Path]:
+        """返回该音轨已存在的旁挂歌词路径（.lrc / .txt / .lyricsfile.yaml）。"""
+        for suffix in _SIDECAR_EXTENSIONS:
+            sidecar = path.with_suffix(suffix)
+            if sidecar.is_file():
+                return sidecar
+        return None
+
+    @staticmethod
+    def _tag_text(tags: Any, *keys: str) -> str:
+        """按候选键读取标签文本，兼容 FLAC/Vorbis、ID3 与 MP4 帧。"""
+        for key in keys:
+            try:
+                value = tags.get(key)
+            except Exception:
+                value = None
+            if value is None:
+                continue
+            if isinstance(value, (list, tuple)):
+                value = next(
+                    (str(item).strip() for item in value if str(item).strip()), ""
+                )
+            else:
+                text = getattr(value, "text", value)
+                if isinstance(text, (list, tuple)):
+                    text = next(
+                        (str(item).strip() for item in text if str(item).strip()), ""
+                    )
+                value = str(text).strip()
+            if value:
+                return str(value)
+        return ""
+
+    @classmethod
+    def _read_audio_metadata(
+        cls, path: Path
+    ) -> Tuple[str, str, str, Optional[int]]:
+        """读取音轨的 title/artist/album/duration，标签缺失时用文件名兜底。"""
+        title = artist = album = ""
+        duration: Optional[int] = None
+        audio = None
+        for easy in (True, False):
+            try:
+                audio = mutagen.File(path, easy=easy)
+            except Exception:
+                audio = None
+            if audio is not None:
+                break
+
+        if audio is not None:
+            tags = getattr(audio, "tags", None)
+            if tags:
+                title = cls._tag_text(tags, "title", "TIT2", "\xa9nam")
+                artist = cls._tag_text(tags, "artist", "TPE1", "\xa9ART")
+                album = cls._tag_text(tags, "album", "TALB", "\xa9alb")
+            info = getattr(audio, "info", None)
+            length = getattr(info, "length", None)
+            if isinstance(length, (int, float)) and length > 0:
+                duration = int(round(length))
+
+        if not title or not artist:
+            # 去掉曲目号后按「艺人 - 歌名」拆分；只填补缺失字段
+            stem = re.sub(r"^\s*(?:\d+[\s._-]+)+", "", path.stem).strip()
+            left, _, right = stem.partition(" - ")
+            if right.strip():
+                if not artist:
+                    artist = left.strip()
+                if not title:
+                    title = right.strip()
+            if not title:
+                title = stem or path.stem
+
+        return title, artist, album, duration
+
+    @staticmethod
+    def _write_sidecar_atomic(target: Path, content: str) -> None:
+        """同目录临时文件写入后原子替换，避免播放器读到半截歌词。"""
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{target.stem[:40]}.",
+            suffix=target.suffix,
+            dir=str(target.parent),
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(content.rstrip() + "\n")
+            os.replace(temp_path, target)
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _process_one_audio(self, path: Path) -> None:
+        """单个音轨：跳过已有歌词 → 自行取词 → 内嵌或写旁挂。"""
+        path = Path(path)
+        try:
+            if has_embedded_lyrics(path):
+                logger.debug(f"【多源歌词】跳过：{path}（已有内嵌歌词）")
+                return
+        except Exception as error:
+            logger.warning(
+                f"【多源歌词】跳过：{path}（读取内嵌歌词失败："
+                f"{error.__class__.__name__}）：{error}"
+            )
+            return
+
+        sidecar = self._existing_sidecar(path)
+        if sidecar is not None:
+            logger.debug(f"【多源歌词】跳过：{path}（已有旁挂歌词 {sidecar.name}）")
+            return
+
+        title, artist, album, duration = self._read_audio_metadata(path)
+        if not title:
+            logger.debug(f"【多源歌词】跳过：{path}（无法确定歌名）")
+            return
+
+        try:
+            query = MetaMusic(
+                title=title,
+                artists=[artist] if artist else [],
+                album=album or None,
+                album_artist=artist or None,
+                duration=duration,
+            )
+        except Exception as error:
+            logger.warning(
+                f"【多源歌词】构造查询失败：{path}（{error.__class__.__name__}）：{error}"
+            )
+            return
+
+        lyrics = self.music_lyrics(query)
+        if lyrics is None:
+            logger.debug(f"【多源歌词】跳过：{path}（取词失败：{title} / {artist}）")
+            return
+
+        synced = (lyrics.synced_lyrics or "").strip() or None
+        plain = (lyrics.plain_lyrics or "").strip() or None
+        if not synced and not plain:
+            logger.debug(f"【多源歌词】跳过：{path}（歌词为空）")
+            return
+
+        provider = getattr(lyrics, "provider", "-")
+        if self._embed_lyrics and path.suffix.casefold() in SUPPORTED_EXTENSIONS:
+            outcome = write_lyrics_direct(path, synced, plain)
+            if outcome.status == "embedded":
+                logger.info(
+                    f"【多源歌词】内嵌歌词成功：{path}（{provider}，"
+                    f"时间轴={'有' if synced else '无'}）"
+                )
+            else:
+                logger.warning(
+                    f"【多源歌词】内嵌歌词失败：{path}；{outcome.detail}"
+                )
+            return
+
+        target = path.with_suffix(".lrc" if synced else ".txt")
+        self._write_sidecar_atomic(target, synced or plain or "")
+        logger.info(
+            f"【多源歌词】写入旁挂歌词成功：{target}（{provider}，"
+            f"时间轴={'有' if synced else '无'}）"
+        )
 
     # ------------------------------------------------------------------ #
     # 模块声明
@@ -540,12 +868,15 @@ class MusicLyricsMulti(_PluginBase):
                                             "class": "mb-2",
                                             "style": "white-space: pre-line;",
                                             "text": (
-                                                "插件只读请求网易云 / QQ 音乐 / 酷狗歌词，"
-                                                "不写文件、不改音频。\n"
+                                                "插件启用后会自动把宿主系统配置 "
+                                                "ScrapingSwitchs.music_lyrics 改为 skip，"
+                                                "接管歌词刮削；停用插件时恢复原值。\n"
+                                                "整理完成事件后，插件自行读取音频标签取词："
+                                                "已有内嵌歌词或同目录旁挂 .lrc / .txt / "
+                                                ".lyricsfile.yaml 时跳过，否则开启「内嵌歌词」的 "
+                                                "FLAC/OGG 直接写内嵌标签，其它情况写 .lrc/.txt。\n"
                                                 "匹配要求标题命中且艺人对上（有艺人信息时），"
-                                                "时长差超过 10 秒的候选直接淘汰。\n"
-                                                "网易云与 QQ 的翻译轨会按时间戳最近邻合并，"
-                                                "配不上的译文丢弃，避免时间轴错位。"
+                                                "时长差超过 10 秒的候选直接淘汰。"
                                             ),
                                         },
                                     }
@@ -682,11 +1013,11 @@ class MusicLyricsMulti(_PluginBase):
                                             "model": "embed_lyrics",
                                             "label": "内嵌歌词",
                                             "hint": (
-                                                "开启后，仅对整理完成的本地 FLAC/OGG 音轨写入内嵌歌词："
-                                                "把旁挂歌词写入音频标签（有时间轴时同时写 "
+                                                "开启后，对整理完成的本地 FLAC/OGG 音轨，"
+                                                "把插件自行取到的歌词直接写入音频标签（有时间轴时同时写 "
                                                 "LYRICS/UNSYNCEDLYRICS/SYNCEDLYRICS，否则只写 LYRICS），"
-                                                "成功后删除该音轨的 .lrc / .txt / .lyricsfile.yaml；"
-                                                "原文件已有内嵌歌词时跳过。其它格式仍按原逻辑生成旁挂歌词。"
+                                                "不生成旁挂文件；原文件已有内嵌歌词或已有旁挂时跳过。"
+                                                "关闭时（以及 MP3/M4A/WAV/AAC 等格式）改为写 .lrc/.txt。"
                                             ),
                                             "persistent-hint": True,
                                         },

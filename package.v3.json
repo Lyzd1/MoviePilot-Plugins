@@ -180,13 +180,14 @@
     },
     "MusicLyricsMulti": {
         "name": "多源歌词",
-        "description": "聚合网易云、QQ 音乐、酷狗歌词，严格匹配并支持双语合并；可选把歌词内嵌进 FLAC/OGG",
+        "description": "聚合网易云、QQ 音乐、酷狗歌词，严格匹配并支持双语合并；可接管宿主歌词刮削并选择旁挂或内嵌 FLAC/OGG",
         "labels": "音乐",
-        "version": "1.0.2",
+        "version": "1.1.0",
         "author": "Lyzd1",
         "level": 1,
         "release": true,
         "history": {
+            "v1.1.0": "新增「接管歌词刮削」：插件启用时自动把宿主 ScrapingSwitchs.music_lyrics 置为 skip（原值备份，停用时按条件恢复），完全由插件自己取词落盘；内嵌开启且为 FLAC/OGG 时直接内嵌（不再先生成旁挂再删除），其余情况写 .lrc/.txt；已有内嵌或已有旁挂则跳过",
             "v1.0.2": "修正内嵌歌词字段：LYRICS 改为写入带时间轴的 LRC（标签编辑器/多数播放器只读该字段），UNSYNCEDLYRICS 存纯文本兜底，SYNCEDLYRICS 同步保留以兼容 MusicBee；纯文本来源仍只写 LYRICS",
             "v1.0.1": "新增「内嵌歌词」开关（默认关闭）：开启后对整理完成的本地 FLAC/OGG 音轨，把宿主刚生成的双语旁挂歌词写入内嵌标签（SYNCEDLYRICS 带时间轴、LYRICS 纯文本）并删除旁挂文件；原文件已有内嵌歌词则跳过，其它格式保持旁挂不变。同时监听 AudioTransferComplete（音频整理完成事件），修复此前只订阅 TransferComplete 导致音乐永不触发的问题",
             "v1.0.0": "首个版本：网易云 / QQ 音乐 / 酷狗三源歌词候选；严格匹配；双语按时间戳对齐；限速与缓存。"

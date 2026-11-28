@@ -242,6 +242,42 @@ def _write_tags_atomic(audio_path: Path, synced: Optional[str], plain: Optional[
             pass
 
 
+def write_lyrics_direct(
+    audio_path: Path,
+    synced: Optional[str],
+    plain: Optional[str],
+) -> EmbedOutcome:
+    """把插件自己取到的歌词直接写入 FLAC/OGG 内嵌标签。
+
+    与 ``embed_sidecar_lyrics`` 不同，本函数不读取也不删除任何旁挂文件，
+    供插件接管歌词刮削后直接落盘使用。
+
+    :param audio_path: 目标音轨路径
+    :param synced: 带时间轴的 LRC；没有时间轴时为 ``None``
+    :param plain: 纯文本歌词；为空且有时间轴时自动从 LRC 推导
+    :return: 操作结果
+    """
+    path = Path(audio_path)
+    if path.suffix.casefold() not in SUPPORTED_EXTENSIONS:
+        return EmbedOutcome("unsupported", detail=f"不支持的内嵌格式：{path.suffix}")
+    if not path.is_file():
+        return EmbedOutcome("missing", detail="文件不存在")
+
+    synced = (synced or "").strip() or None
+    plain = (plain or "").strip() or None
+    if synced and not plain:
+        # 保证写入 UNSYNCEDLYRICS，三写策略完整
+        plain = lrc_to_plain(synced)
+    if not synced and not plain:
+        return EmbedOutcome("no_lyrics", detail="没有可写入的歌词")
+
+    try:
+        _write_tags_atomic(path, synced, plain)
+    except Exception as error:
+        return EmbedOutcome("error", detail=f"写入内嵌歌词失败：{error}")
+    return EmbedOutcome("embedded", detail=f"时间轴={'有' if synced else '无'}")
+
+
 def _remove_sidecars(audio_path: Path) -> Tuple[List[str], List[str]]:
     """删除该音轨存在的全部旁挂歌词，返回 (成功列表, 失败列表)。"""
     deleted: List[str] = []
