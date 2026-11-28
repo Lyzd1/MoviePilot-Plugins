@@ -44,6 +44,14 @@ https://raw.githubusercontent.com/Lyzd1/MoviePilot-Plugins/main/package.v2.json
 - **功能**: 监控 STRM 文件及文件夹删除，联动清理 openlist/local 云盘文件及元数据。支持视频/音乐自动识别、防雪崩保护。
 - **标签**: `云盘同步`
 
+### 音乐
+
+#### 多源歌词 — MusicLyricsMulti
+- **版本**: v1.0.1
+- **功能**: 聚合网易云 / QQ 音乐 / 酷狗三源歌词，严格匹配（标题 + 艺人 + 时长）并按时间戳合并双语；可选开启「内嵌歌词」，把整理后的双语歌词写入 FLAC/OGG 内嵌标签（`SYNCEDLYRICS` + `LYRICS`），并在上传云盘前删除旁挂文件。
+- **标签**: `音乐` `歌词`
+- **说明**: 只处理 `.flac` / `.ogg`；原文件已有内嵌歌词时跳过，其它格式仍按原逻辑生成旁挂 `.lrc`。
+
 ### 分享率
 
 #### BonusExchangePlugin — 魔力兑换助手
